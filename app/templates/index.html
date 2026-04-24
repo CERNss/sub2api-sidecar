@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ app_title }}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: linear-gradient(135deg, #f6efe6 0%, #f9fbfd 55%, #e7f1f7 100%);
+      --panel: rgba(255, 255, 255, 0.92);
+      --ink: #1f2937;
+      --muted: #5f6b7a;
+      --primary: #0f766e;
+      --primary-strong: #115e59;
+      --danger: #b91c1c;
+      --border: rgba(15, 23, 42, 0.08);
+      --shadow: 0 24px 80px rgba(15, 23, 42, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+      background: var(--bg);
+      color: var(--ink);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .shell {
+      width: min(820px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      backdrop-filter: blur(14px);
+    }
+
+    .hero {
+      padding: 32px 32px 20px;
+      border-bottom: 1px solid var(--border);
+      background: radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 45%),
+                  radial-gradient(circle at top right, rgba(14, 116, 144, 0.12), transparent 40%);
+    }
+
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(28px, 4vw, 40px);
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 16px;
+    }
+
+    .content {
+      padding: 24px 32px 32px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .section {
+      display: grid;
+      gap: 12px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 10px;
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    input, textarea {
+      width: 100%;
+      padding: 14px 16px;
+      border-radius: 14px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      font-size: 16px;
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      font-family: inherit;
+      resize: vertical;
+    }
+
+    textarea {
+      min-height: 120px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 14px;
+    }
+
+    input:focus, textarea:focus {
+      border-color: rgba(15, 118, 110, 0.6);
+      box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    button, .oauth-link {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 13px 20px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 170px;
+    }
+
+    button {
+      color: white;
+      background: linear-gradient(135deg, var(--primary), #0f766e 60%, #0f766e 100%);
+      box-shadow: 0 12px 28px rgba(15, 118, 110, 0.22);
+    }
+
+    button:hover, .oauth-link:hover {
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.7;
+      transform: none;
+    }
+
+    .oauth-link {
+      background: #ecfeff;
+      color: var(--primary-strong);
+      border: 1px solid rgba(15, 118, 110, 0.18);
+    }
+
+    .ghost-button {
+      appearance: none;
+      border-radius: 999px;
+      padding: 11px 16px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: rgba(255, 255, 255, 0.7);
+      color: var(--ink);
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.18s ease, background 0.18s ease;
+    }
+
+    .ghost-button:hover {
+      transform: translateY(-1px);
+      background: white;
+    }
+
+    .hidden { display: none; }
+
+    .status {
+      min-height: 24px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .status.error { color: var(--danger); }
+
+    .result {
+      background: #0f172a;
+      color: #dbeafe;
+      border-radius: 18px;
+      padding: 18px;
+      overflow: auto;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.65;
+      max-height: 320px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .tips {
+      padding: 16px 18px;
+      border-radius: 16px;
+      background: rgba(15, 118, 110, 0.07);
+      color: var(--primary-strong);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .muted-block {
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.04);
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .auth-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(15, 118, 110, 0.08);
+      color: var(--primary-strong);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      word-break: break-all;
+    }
+
+    @media (max-width: 640px) {
+      .hero, .content { padding-left: 20px; padding-right: 20px; }
+      button, .oauth-link { width: 100%; }
+      .ghost-button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="hero-top">
+        <div class="auth-badge">已登录：{{ current_user }}</div>
+        <button id="logoutButton" class="ghost-button" type="button">退出登录</button>
+      </div>
+      <h1>{{ app_title }}</h1>
+      <p>输入 email 后，后端会创建专属分组与用户，并返回 OpenAI OAuth 登录链接。你手动完成授权后，把浏览器最终跳转到的 localhost 回调地址完整粘贴回来，后端再继续完成账号创建与分组绑定。</p>
+    </section>
+
+    <section class="content">
+      <div class="section">
+        <div>
+          <label for="email">Email</label>
+          <input id="email" type="email" placeholder="user@example.com" autocomplete="email" />
+        </div>
+        <div class="actions">
+          <button id="startButton" type="button">开始创建</button>
+          <a id="oauthLink" class="oauth-link hidden" href="#" target="_blank" rel="noopener noreferrer">去完成 OAuth 授权</a>
+        </div>
+      </div>
+
+      <div class="muted-block hidden" id="redirectHintBlock">
+        OAuth 提供方会把浏览器跳转到这个 redirect URI：
+        <div><code id="redirectHint">{{ oauth_redirect_uri }}</code></div>
+        完成授权后，请把浏览器地址栏里的完整 localhost URL 复制回来，粘贴到下面。
+      </div>
+
+      <div class="section hidden" id="pastebackSection">
+        <div>
+          <label for="callbackUrl">Paste Callback URL</label>
+          <textarea id="callbackUrl" placeholder="http://localhost:3000/callback?code=...&state=..."></textarea>
+        </div>
+        <div class="actions">
+          <button id="completeButton" type="button">粘贴回调并完成绑定</button>
+        </div>
+      </div>
+
+      <div id="status" class="status"></div>
+      <pre id="result" class="result hidden"></pre>
+
+      <div class="tips">
+        约束已固定：账号名称始终使用流程入口传入的 email；用户绑定分组和 OAuth 账号绑定分组都会执行；OAuth 授权本身走手动点击；最终完成步骤依赖你粘贴 localhost 回调地址回来。
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const emailInput = document.getElementById('email');
+    const callbackUrlInput = document.getElementById('callbackUrl');
+    const startButton = document.getElementById('startButton');
+    const completeButton = document.getElementById('completeButton');
+    const statusNode = document.getElementById('status');
+    const resultNode = document.getElementById('result');
+    const oauthLink = document.getElementById('oauthLink');
+    const pastebackSection = document.getElementById('pastebackSection');
+    const redirectHintBlock = document.getElementById('redirectHintBlock');
+    const redirectHint = document.getElementById('redirectHint');
+    const logoutButton = document.getElementById('logoutButton');
+
+    function setStatus(message, isError = false) {
+      statusNode.textContent = message || '';
+      statusNode.classList.toggle('error', Boolean(isError));
+    }
+
+    function showResult(payload) {
+      resultNode.textContent = JSON.stringify(payload, null, 2);
+      resultNode.classList.remove('hidden');
+    }
+
+    function resetResult() {
+      resultNode.textContent = '';
+      resultNode.classList.add('hidden');
+    }
+
+    async function parseApiResponse(response, fallbackMessage) {
+      const payload = await response.json().catch(() => ({ detail: fallbackMessage }));
+
+      if (response.status === 401) {
+        setStatus('登录已失效，正在返回登录页...', true);
+        window.setTimeout(() => {
+          window.location.href = '/login';
+        }, 500);
+        throw new Error(payload.detail || '登录已失效，请重新登录');
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.detail || fallbackMessage);
+      }
+
+      return payload;
+    }
+
+    async function startProvision() {
+      const email = emailInput.value.trim();
+      resetResult();
+
+      if (!email) {
+        setStatus('请先输入 email。', true);
+        return;
+      }
+
+      startButton.disabled = true;
+      setStatus('正在创建分组、用户并生成 OAuth 链接...');
+
+      try {
+        const response = await fetch('/provision/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+
+        const payload = await parseApiResponse(response, '请求失败');
+        showResult(payload);
+        oauthLink.href = payload.oauth_url;
+        oauthLink.classList.remove('hidden');
+        redirectHint.textContent = payload.oauth_redirect_uri;
+        redirectHintBlock.classList.remove('hidden');
+        pastebackSection.classList.remove('hidden');
+        setStatus('创建成功。先点击按钮完成 OAuth，再把最终 localhost 回调 URL 粘贴回来。');
+      } catch (error) {
+        showResult({ success: false, detail: error.message });
+        setStatus(error.message || '请求失败', true);
+      } finally {
+        startButton.disabled = false;
+      }
+    }
+
+    async function completeProvision() {
+      const callbackUrl = callbackUrlInput.value.trim();
+      resetResult();
+
+      if (!callbackUrl) {
+        setStatus('请先粘贴 localhost 回调地址。', true);
+        return;
+      }
+
+      completeButton.disabled = true;
+      setStatus('正在解析回调地址并完成 OAuth 绑定...');
+
+      try {
+        const response = await fetch('/provision/oauth/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_url: callbackUrl }),
+        });
+
+        const payload = await parseApiResponse(response, '完成绑定失败');
+        showResult(payload);
+        setStatus('OAuth 绑定已完成。');
+      } catch (error) {
+        showResult({ success: false, detail: error.message });
+        setStatus(error.message || '完成绑定失败', true);
+      } finally {
+        completeButton.disabled = false;
+      }
+    }
+
+    startButton.addEventListener('click', startProvision);
+    completeButton.addEventListener('click', completeProvision);
+    logoutButton.addEventListener('click', async () => {
+      logoutButton.disabled = true;
+      setStatus('正在退出登录...');
+
+      try {
+        await fetch('/auth/logout', { method: 'POST' });
+      } finally {
+        window.location.href = '/login';
+      }
+    });
+    emailInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        startProvision();
+      }
+    });
+  </script>
+</body>
+</html>

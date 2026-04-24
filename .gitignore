@@ -1,0 +1,17 @@
+# Ignore hidden files and directories by default.
+.*
+!.gitignore
+!.dockerignore
+!.env.example
+!.openspec.yaml
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+.DS_Store
+.pytest_cache/
+data/
+*.db

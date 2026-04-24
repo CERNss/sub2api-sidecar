@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ app_title }} - 登录</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: radial-gradient(circle at top left, rgba(12, 74, 110, 0.14), transparent 38%),
+            radial-gradient(circle at bottom right, rgba(180, 83, 9, 0.12), transparent 36%),
+            linear-gradient(135deg, #f8f4ec 0%, #f7fafc 52%, #eef6fb 100%);
+      --panel: rgba(255, 255, 255, 0.94);
+      --ink: #172033;
+      --muted: #596579;
+      --accent: #0f766e;
+      --accent-strong: #115e59;
+      --danger: #b91c1c;
+      --border: rgba(15, 23, 42, 0.1);
+      --shadow: 0 24px 80px rgba(15, 23, 42, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+
+    .shell {
+      width: min(760px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      backdrop-filter: blur(14px);
+    }
+
+    .hero {
+      padding: 32px 32px 22px;
+      border-bottom: 1px solid var(--border);
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 42%),
+        radial-gradient(circle at top right, rgba(180, 83, 9, 0.12), transparent 35%);
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(30px, 4.5vw, 42px);
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 16px;
+    }
+
+    .content {
+      padding: 24px 32px 32px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .section {
+      display: grid;
+      gap: 12px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    input {
+      width: 100%;
+      padding: 14px 16px;
+      border-radius: 14px;
+      border: 1px solid rgba(15, 23, 42, 0.14);
+      font-size: 16px;
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      font-family: inherit;
+      background: white;
+    }
+
+    input:focus {
+      border-color: rgba(15, 118, 110, 0.6);
+      box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
+    }
+
+    input[readonly] {
+      background: #f8fafc;
+      color: #334155;
+    }
+
+    button {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 14px 20px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      color: white;
+      background: linear-gradient(135deg, var(--accent), #0f766e 65%, #155e75 100%);
+      box-shadow: 0 12px 28px rgba(15, 118, 110, 0.2);
+      transition: transform 0.18s ease, opacity 0.18s ease;
+      min-width: 180px;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { cursor: wait; opacity: 0.72; transform: none; }
+
+    .status {
+      min-height: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .status.error { color: var(--danger); }
+
+    .note-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .note {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.04);
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    .note strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      word-break: break-all;
+      color: var(--accent-strong);
+    }
+
+    @media (max-width: 640px) {
+      .hero, .content {
+        padding-left: 20px;
+        padding-right: 20px;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <h1>管理员登录</h1>
+    </section>
+
+    <section class="content">
+      <div class="note-grid">
+        <div class="note">
+          <strong>登录方式</strong>
+          用户名固定为 <code>{{ auth_username }}</code>，不需要自己创建账号。
+        </div>
+        <div class="note">
+          <strong>密码来源</strong>
+          密码会在每次服务启动时重新生成，请直接从服务启动日志里复制。
+        </div>
+        <div class="note">
+          <strong>OAuth 提醒</strong>
+          OpenAI OAuth 完成后不会自动跳回这里，你仍然需要把浏览器最后落到的 localhost URL 粘贴回编排页。
+        </div>
+      </div>
+
+      <div class="section">
+        <div>
+          <label for="username">Username</label>
+          <input id="username" type="text" value="{{ auth_username }}" readonly />
+        </div>
+        <div>
+          <label for="password">Password</label>
+          <input id="password" type="password" placeholder="从启动日志复制当前密码" autocomplete="current-password" />
+        </div>
+        <div>
+          <button id="loginButton" type="button">登录并进入编排页</button>
+        </div>
+      </div>
+
+      <div id="status" class="status"></div>
+    </section>
+  </main>
+
+  <script>
+    const usernameInput = document.getElementById('username');
+    const passwordInput = document.getElementById('password');
+    const loginButton = document.getElementById('loginButton');
+    const statusNode = document.getElementById('status');
+
+    function setStatus(message, isError = false) {
+      statusNode.textContent = message || '';
+      statusNode.classList.toggle('error', Boolean(isError));
+    }
+
+    async function login() {
+      const username = usernameInput.value.trim();
+      const password = passwordInput.value;
+
+      if (!password) {
+        setStatus('请先从日志复制当前密码。', true);
+        return;
+      }
+
+      loginButton.disabled = true;
+      setStatus('正在验证管理员身份...');
+
+      try {
+        const response = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || '登录失败');
+        }
+
+        setStatus('登录成功，正在进入编排页...');
+        window.location.href = '/';
+      } catch (error) {
+        setStatus(error.message || '登录失败', true);
+      } finally {
+        loginButton.disabled = false;
+      }
+    }
+
+    loginButton.addEventListener('click', login);
+    passwordInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        login();
+      }
+    });
+  </script>
+</body>
+</html>
