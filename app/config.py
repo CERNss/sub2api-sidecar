@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 
 from dotenv import load_dotenv
@@ -55,6 +56,27 @@ class Sub2APIProvisioningDefaults:
     )
 
 
+class ProvisioningAssignmentMode(str, Enum):
+    dedicated = "dedicated"
+    managed_pool = "managed_pool"
+
+
+class AutoRotationUsageWindow(str, Enum):
+    window_5h = "5h"
+    window_1d = "1d"
+    window_7d = "7d"
+    window_30d = "30d"
+
+
+@dataclass(frozen=True)
+class AutoRotationSettings:
+    enabled: bool = False
+    interval_seconds: int = 0
+    cooldown_minutes: int = 0
+    usage_window: AutoRotationUsageWindow = AutoRotationUsageWindow.window_1d
+    usage_thresholds: tuple[float, ...] = ()
+
+
 @dataclass(frozen=True)
 class Settings:
     sub2api_base_url: str
@@ -62,6 +84,8 @@ class Settings:
     app_base_url: str
     openai_oauth_redirect_uri: str
     sub2api_provisioning_defaults: Sub2APIProvisioningDefaults
+    assignment_mode: ProvisioningAssignmentMode = ProvisioningAssignmentMode.dedicated
+    auto_rotation: AutoRotationSettings = AutoRotationSettings()
     app_auth_username: str = "admin"
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
@@ -127,6 +151,19 @@ class Settings:
                 "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON"
             ),
         )
+        values["assignment_mode"] = _parse_assignment_mode_env("PROVISIONING_ASSIGNMENT_MODE")
+        values["auto_rotation"] = AutoRotationSettings(
+            enabled=_parse_bool_env("AUTO_ROTATION_ENABLED", default=False),
+            interval_seconds=_parse_int_env("AUTO_ROTATION_INTERVAL_SECONDS", default=0),
+            cooldown_minutes=_parse_int_env("AUTO_ROTATION_COOLDOWN_MINUTES", default=0),
+            usage_window=_parse_usage_window_env("AUTO_ROTATION_USAGE_WINDOW"),
+            usage_thresholds=_parse_thresholds_env("AUTO_ROTATION_USAGE_THRESHOLDS_JSON"),
+        )
+
+        if values["auto_rotation"].interval_seconds < 0:
+            raise ConfigurationError("AUTO_ROTATION_INTERVAL_SECONDS must be >= 0")
+        if values["auto_rotation"].cooldown_minutes < 0:
+            raise ConfigurationError("AUTO_ROTATION_COOLDOWN_MINUTES must be >= 0")
 
         return cls(**values)
 
@@ -205,6 +242,66 @@ def _parse_rule(
         keywords=keywords,
         description=description,
     )
+
+
+def _parse_assignment_mode_env(env_name: str) -> ProvisioningAssignmentMode:
+    raw_value = os.getenv(env_name, ProvisioningAssignmentMode.dedicated.value).strip()
+    try:
+        return ProvisioningAssignmentMode(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"{env_name} must be one of: {', '.join(mode.value for mode in ProvisioningAssignmentMode)}"
+        ) from exc
+
+
+def _parse_usage_window_env(env_name: str) -> AutoRotationUsageWindow:
+    raw_value = os.getenv(env_name, AutoRotationUsageWindow.window_1d.value).strip()
+    try:
+        return AutoRotationUsageWindow(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"{env_name} must be one of: {', '.join(window.value for window in AutoRotationUsageWindow)}"
+        ) from exc
+
+
+def _parse_int_env(env_name: str, *, default: int) -> int:
+    raw_value = os.getenv(env_name)
+    if raw_value is None or raw_value == "":
+        return default
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(f"{env_name} must be an integer") from exc
+
+
+def _parse_thresholds_env(env_name: str) -> tuple[float, ...]:
+    raw_value = os.getenv(env_name)
+    if not raw_value:
+        return ()
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(f"{env_name} must be valid JSON") from exc
+
+    if not isinstance(payload, list):
+        raise ConfigurationError(f"{env_name} must be a JSON array")
+
+    thresholds: list[float] = []
+    last_value: float | None = None
+    for index, item in enumerate(payload, start=1):
+        try:
+            value = float(item)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"{env_name}[{index}] must be numeric"
+            ) from exc
+        if value < 0:
+            raise ConfigurationError(f"{env_name}[{index}] must be >= 0")
+        if last_value is not None and value < last_value:
+            raise ConfigurationError(f"{env_name} must be sorted in ascending order")
+        thresholds.append(value)
+        last_value = value
+    return tuple(thresholds)
 
 
 @lru_cache(maxsize=1)

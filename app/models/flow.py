@@ -13,6 +13,11 @@ class FlowStatus(str, Enum):
     failed = "failed"
 
 
+class AssignmentMode(str, Enum):
+    dedicated = "dedicated"
+    managed_pool = "managed_pool"
+
+
 class ProvisionFlow(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -22,6 +27,8 @@ class ProvisionFlow(BaseModel):
     group_id: Any
     state: str
     status: FlowStatus
+    assignment_mode: AssignmentMode = AssignmentMode.dedicated
+    assignment_reason: str | None = None
     account_name: str
     oauth_url: str | None = None
     oauth_account_id: Any | None = None

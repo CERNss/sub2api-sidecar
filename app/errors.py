@@ -19,3 +19,15 @@ class ConfigurationError(ProvisioningError):
 
 class InvalidOAuthCallbackPayloadError(ProvisioningError):
     """Raised when pasted callback data cannot be parsed into code/state."""
+
+
+class RotationPoolEmptyError(ProvisioningError):
+    """Raised when managed-pool provisioning or rotation has no eligible target groups."""
+
+
+class RotationTargetValidationError(ProvisioningError):
+    """Raised when a requested rotation target is invalid or unsafe."""
+
+
+class RotationExecutionError(ProvisioningError):
+    """Raised when a rotation execution cannot be completed."""

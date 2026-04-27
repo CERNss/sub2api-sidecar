@@ -19,6 +19,7 @@ def clear_app_caches() -> None:
     main.get_auth_manager.cache_clear()
     main.get_flow_store.cache_clear()
     main.get_sub2api_client.cache_clear()
+    main.get_rotation_service.cache_clear()
     main.get_provisioning_service.cache_clear()
 
 

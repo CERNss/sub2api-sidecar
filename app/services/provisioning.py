@@ -8,14 +8,18 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 from app.clients.sub2api import Sub2APIClient
+from app.config import ProvisioningAssignmentMode
 from app.errors import (
     FlowNotFoundError,
     InvalidOAuthCallbackPayloadError,
     InvalidOAuthStateError,
+    RotationPoolEmptyError,
 )
-from app.models.flow import FlowStatus, ProvisionFlow
+from app.models.flow import AssignmentMode, FlowStatus, ProvisionFlow
 from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
+from app.services.rotation import RotationService
 from app.stores.base import FlowStore
+from app.stores.sqlite import SQLiteFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -28,22 +32,26 @@ class ProvisioningService:
         default_user_password: str,
         group_name_prefix: str,
         openai_oauth_redirect_uri: str,
+        assignment_mode: ProvisioningAssignmentMode,
+        rotation_store: SQLiteFlowStore,
+        rotation_service: RotationService,
     ) -> None:
         self.flow_store = flow_store
         self.sub2api_client = sub2api_client
         self.default_user_password = default_user_password
         self.group_name_prefix = group_name_prefix
         self.openai_oauth_redirect_uri = openai_oauth_redirect_uri
+        self.assignment_mode = assignment_mode
+        self.rotation_store = rotation_store
+        self.rotation_service = rotation_service
 
     def start_flow(self, email: str) -> ProvisionStartResponse:
         logger.info("Starting provisioning flow for email=%s", email)
         flow_id = str(uuid.uuid4())
         state = secrets.token_urlsafe(24)
-        group_name = self._build_group_name(email)
-
-        group = self.sub2api_client.create_group(group_name)
         user = self.sub2api_client.create_user(email=email, password=self.default_user_password)
-        self.sub2api_client.replace_user_group(user_id=user["id"], group_id=group["id"])
+        group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(email)
+        self.sub2api_client.set_user_group(user_id=user["id"], group_id=group_id)
         oauth = self.sub2api_client.generate_openai_auth_url(
             email=email,
             state=state,
@@ -54,9 +62,11 @@ class ProvisioningService:
             flow_id=flow_id,
             email=email,
             user_id=user["id"],
-            group_id=group["id"],
+            group_id=group_id,
             state=state,
             status=FlowStatus.pending_oauth,
+            assignment_mode=assignment_mode,
+            assignment_reason=assignment_reason,
             account_name=email,
             oauth_url=oauth["url"],
         )
@@ -65,7 +75,7 @@ class ProvisioningService:
             "Provisioning flow created | flow_id=%s | user_id=%s | group_id=%s",
             flow_id,
             user["id"],
-            group["id"],
+            group_id,
         )
 
         return ProvisionStartResponse(
@@ -127,6 +137,13 @@ class ProvisioningService:
         flow.error_message = None
         flow.updated_at = datetime.now(timezone.utc)
         self.flow_store.update(flow)
+        self.rotation_service.sync_assignment_after_provision(
+            user_id=flow.user_id,
+            email=flow.email,
+            group_id=flow.group_id,
+            assignment_mode=flow.assignment_mode,
+            reason=flow.assignment_reason,
+        )
         logger.info(
             "OAuth flow completed | flow_id=%s | oauth_account_id=%s",
             flow.flow_id,
@@ -168,6 +185,23 @@ class ProvisioningService:
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", email).strip("-").lower()
         group_name = f"{self.group_name_prefix}{slug}"
         return group_name[:128]
+
+    def _resolve_group_assignment(self, email: str) -> tuple[object, AssignmentMode, str]:
+        if self.assignment_mode == ProvisioningAssignmentMode.dedicated:
+            group_name = self._build_group_name(email)
+            group = self.sub2api_client.create_group(group_name)
+            return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
+
+        default_group = self.rotation_store.get_default_rotation_pool_group()
+        if default_group is None:
+            raise RotationPoolEmptyError(
+                "Managed-pool provisioning is enabled but no rotation pool group is available"
+            )
+        return (
+            default_group.group_id,
+            AssignmentMode.managed_pool,
+            "managed-pool default target",
+        )
 
     def _first_param(self, params: dict[str, list[str]], key: str) -> str | None:
         values = params.get(key) or []

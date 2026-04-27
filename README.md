@@ -28,9 +28,25 @@
   - 登录成功后返回 `access_key`，并给浏览器设置 `HttpOnly` cookie
 - `POST /auth/logout`
   - 注销当前浏览器或 API 会话
+- `GET /rotation/pool/candidates`
+  - 拉取 upstream 当前分组
+  - 区分专属组和非专属组
+  - 标记哪些组已被选入本地轮换池
+- `POST /rotation/pool/groups`
+  - 将专属组加入本地轮换池
+  - 支持设置轮换优先级
+- `DELETE /rotation/pool/groups/{group_id}`
+  - 从本地轮换池移除目标组
+- `POST /rotation/manual`
+  - 对已记录 assignment 的用户执行手动切组
+  - 统一调用 upstream `replace-group`，自动迁移现有 key
+- `POST /rotation/auto/run`
+  - 按当前窗口和阈值执行自动轮换
+  - 无 key 的用户会放到已有 key 用户之后调度
 - 自动化测试
   - 覆盖 SQLite store 持久化行为
   - 覆盖登录、受保护接口、paste-back OAuth 编排流程和错误分支
+  - 覆盖轮换池发现、managed-pool 预配、手动轮换、自动轮换
 
 ## 关键流程
 
@@ -55,6 +71,57 @@
 3. 密码默认在每次服务启动时自动生成，并打印在启动日志里
 4. 登录成功后浏览器会拿到 `HttpOnly` cookie；API 调用方也可以复用登录返回的 `access_key`
 5. 服务重启后旧密码和旧 access key 会失效，需要重新登录
+
+## 轮换池与自动轮换
+
+### 轮换池选择
+
+1. 调用 `GET /rotation/pool/candidates`
+2. 从返回结果里挑选 `is_exclusive=true` 的专属组
+3. 用 `POST /rotation/pool/groups` 加入本地轮换池
+4. 通过 `priority` 指定顺序，数值越小越靠前
+
+非专属组不会被允许加入轮换池。
+
+### managed-pool 预配
+
+- 当 `PROVISIONING_ASSIGNMENT_MODE=managed_pool` 时，`POST /provision/start` 不再创建新专属组
+- 服务会从本地轮换池里选择优先级最低的组作为默认目标组
+- 如果轮换池为空，请求会失败
+
+### 自动轮换策略
+
+- V1 仅支持 4 个窗口：`5h`、`1d`、`7d`、`30d`
+- `5h` / `1d` / `7d` 通过用户现有 API key 的窗口用量字段汇总
+- `30d` 通过 upstream usage stats 聚合查询
+- `AUTO_ROTATION_USAGE_THRESHOLDS_JSON` 需要是升序数组
+- 轮换池中的组数量必须满足：
+  - `len(rotation_pool_groups) == len(AUTO_ROTATION_USAGE_THRESHOLDS_JSON) + 1`
+
+例子：
+
+- 阈值是 `[10, 50]`
+- 轮换池里有 3 个组，优先级从低到高分别是 `A -> B -> C`
+- 用量 `<=10` 的用户会落到 `A`
+- 用量 `>10 且 <=50` 的用户会落到 `B`
+- 用量 `>50` 的用户会落到 `C`
+
+### 推荐 rollout
+
+1. 先保持 `PROVISIONING_ASSIGNMENT_MODE=dedicated`
+2. 通过 `GET /rotation/pool/candidates` 和 `POST /rotation/pool/groups` 选出一小组专属轮换目标
+3. 设置 `AUTO_ROTATION_USAGE_WINDOW`、`AUTO_ROTATION_USAGE_THRESHOLDS_JSON`、`AUTO_ROTATION_COOLDOWN_MINUTES`
+4. 先手动调用 `POST /rotation/auto/run` 验证策略
+5. 再打开 `AUTO_ROTATION_INTERVAL_SECONDS`
+6. 最后把 `PROVISIONING_ASSIGNMENT_MODE` 切到 `managed_pool`
+
+### 回滚
+
+1. 把 `PROVISIONING_ASSIGNMENT_MODE` 切回 `dedicated`
+2. 关闭 `AUTO_ROTATION_ENABLED`
+3. 把 `AUTO_ROTATION_INTERVAL_SECONDS` 设回 `0`
+4. 如有需要，用 `POST /rotation/manual` 把用户迁回目标专属组
+5. 再按需清理本地轮换池
 
 ## 目录结构
 
@@ -135,6 +202,12 @@ APP_ACCESS_KEY_TTL_HOURS=12
 SQLITE_DB_PATH=./data/sub2api-sidecar.db
 DEFAULT_USER_PASSWORD=ChangeMe123!
 GROUP_NAME_PREFIX=openai-oauth-
+PROVISIONING_ASSIGNMENT_MODE=dedicated
+AUTO_ROTATION_ENABLED=false
+AUTO_ROTATION_INTERVAL_SECONDS=0
+AUTO_ROTATION_COOLDOWN_MINUTES=0
+AUTO_ROTATION_USAGE_WINDOW=1d
+AUTO_ROTATION_USAGE_THRESHOLDS_JSON=[]
 SUB2API_GROUP_PLATFORM=openai
 SUB2API_ACCOUNT_PROVIDER=openai
 SUB2API_ACCOUNT_PLATFORM=openai
@@ -154,6 +227,12 @@ SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON=[{"error_code":"529","duratio
 - `SQLITE_DB_PATH` 是 flow 持久化数据库路径；默认会自动创建父目录和表结构。
 - `DEFAULT_USER_PASSWORD` 用于创建 Sub2API 用户。
 - `SUB2API_GROUP_PLATFORM` 控制专属分组的平台，默认 `openai`。
+- `PROVISIONING_ASSIGNMENT_MODE` 支持 `dedicated` 和 `managed_pool`。
+- `AUTO_ROTATION_ENABLED` 控制是否允许执行自动轮换。
+- `AUTO_ROTATION_INTERVAL_SECONDS` 大于 `0` 时，会启动进程内定时器按间隔自动执行轮换。
+- `AUTO_ROTATION_COOLDOWN_MINUTES` 控制同一用户两次轮换之间的冷却时间。
+- `AUTO_ROTATION_USAGE_WINDOW` V1 只支持 `5h`、`1d`、`7d`、`30d`。
+- `AUTO_ROTATION_USAGE_THRESHOLDS_JSON` 是自动轮换分档阈值数组，需要升序排列。
 - `SUB2API_ACCOUNT_PROVIDER`、`SUB2API_ACCOUNT_PLATFORM`、`SUB2API_ACCOUNT_TYPE` 默认会把账号按 `openai + oauth` 创建。
 - `SUB2API_ACCOUNT_WS_MODE` 默认使用 `context_pool`。如果你的 Sub2API 部署要求别的枚举值，只需要改这个变量。
 - `SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE` 控制账号创建时是否打开“临时不可调度”。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Any, Iterable
 from urllib.parse import urljoin
 
@@ -28,25 +29,45 @@ class Sub2APIClient:
     Keep any future adjustments inside this client so controllers/services remain stable.
     """
 
-    CREATE_GROUP_PATHS = ("/api/admin/groups", "/admin/groups")
-    CREATE_USER_PATHS = ("/api/admin/users", "/admin/users")
-    REPLACE_USER_GROUP_PATHS = (
+    CREATE_GROUP_PATHS = ("/api/v1/admin/groups", "/api/admin/groups", "/admin/groups")
+    CREATE_USER_PATHS = ("/api/v1/admin/users", "/api/admin/users", "/admin/users")
+    SET_USER_GROUP_PATHS = (
+        "/api/v1/admin/users/{user_id}",
         "/api/admin/users/{user_id}/groups",
         "/admin/users/{user_id}/groups",
     )
+    REPLACE_EXCLUSIVE_GROUP_PATHS = (
+        "/api/v1/admin/users/{user_id}/replace-group",
+        "/api/admin/users/{user_id}/replace-group",
+        "/admin/users/{user_id}/replace-group",
+    )
+    LIST_GROUPS_PATHS = (
+        "/api/v1/admin/groups/all",
+        "/api/v1/admin/groups",
+        "/api/admin/groups/all",
+        "/api/admin/groups",
+        "/admin/groups/all",
+        "/admin/groups",
+    )
+    USER_API_KEYS_PATHS = ("/api/v1/admin/users/{user_id}/api-keys",)
+    USAGE_STATS_PATHS = ("/api/v1/admin/usage/stats",)
     GENERATE_OPENAI_AUTH_URL_PATHS = (
+        "/api/v1/admin/openai/oauth/url",
         "/api/admin/openai/oauth/url",
         "/admin/openai/oauth/url",
     )
     EXCHANGE_OPENAI_CODE_PATHS = (
+        "/api/v1/admin/openai/oauth/exchange",
         "/api/admin/openai/oauth/exchange",
         "/admin/openai/oauth/exchange",
     )
     CREATE_OPENAI_ACCOUNT_PATHS = (
+        "/api/v1/admin/openai/accounts",
         "/api/admin/openai/accounts",
         "/admin/openai/accounts",
     )
     BIND_ACCOUNT_TO_GROUP_PATHS = (
+        "/api/v1/admin/groups/{group_id}/accounts",
         "/api/admin/groups/{group_id}/accounts",
         "/admin/groups/{group_id}/accounts",
     )
@@ -73,8 +94,9 @@ class Sub2APIClient:
     def create_group(self, name: str) -> dict[str, Any]:
         payload = self._build_group_payload(name)
         data = self._request_candidates("POST", self.CREATE_GROUP_PATHS, json=payload)
+        body = self._unwrap_data(data)
         group_id = self._extract_id(
-            data,
+            body,
             "id",
             "group_id",
             "data.id",
@@ -92,8 +114,9 @@ class Sub2APIClient:
             "password": password,
         }
         data = self._request_candidates("POST", self.CREATE_USER_PATHS, json=payload)
+        body = self._unwrap_data(data)
         user_id = self._extract_id(
-            data,
+            body,
             "id",
             "user_id",
             "data.id",
@@ -103,13 +126,97 @@ class Sub2APIClient:
         )
         return {"id": user_id, "email": email, "raw": data}
 
-    def replace_user_group(self, user_id: Any, group_id: Any) -> dict[str, Any]:
-        payload = {"group_ids": [group_id], "group_id": group_id}
-        path_candidates = tuple(
-            path.format(user_id=user_id) for path in self.REPLACE_USER_GROUP_PATHS
-        )
+    def set_user_group(self, user_id: Any, group_id: Any) -> dict[str, Any]:
+        payload = {
+            "allowed_groups": [group_id],
+            "group_ids": [group_id],
+            "group_id": group_id,
+        }
+        path_candidates = tuple(path.format(user_id=user_id) for path in self.SET_USER_GROUP_PATHS)
         data = self._request_candidates("PUT", path_candidates, json=payload)
         return {"user_id": user_id, "group_id": group_id, "raw": data}
+
+    def replace_user_group(self, user_id: Any, group_id: Any) -> dict[str, Any]:
+        return self.set_user_group(user_id=user_id, group_id=group_id)
+
+    def replace_exclusive_user_group(
+        self,
+        *,
+        user_id: Any,
+        old_group_id: Any,
+        new_group_id: Any,
+    ) -> dict[str, Any]:
+        payload = {"old_group_id": old_group_id, "new_group_id": new_group_id}
+        path_candidates = tuple(
+            path.format(user_id=user_id) for path in self.REPLACE_EXCLUSIVE_GROUP_PATHS
+        )
+        data = self._request_candidates("POST", path_candidates, json=payload)
+        body = self._unwrap_data(data)
+        migrated_keys = self._extract_value(
+            body,
+            "migrated_keys",
+            "data.migrated_keys",
+            "result.migrated_keys",
+        )
+        return {
+            "user_id": user_id,
+            "old_group_id": old_group_id,
+            "new_group_id": new_group_id,
+            "migrated_keys": migrated_keys or 0,
+            "raw": data,
+        }
+
+    def list_groups(self, platform: str | None = None) -> list[dict[str, Any]]:
+        last_error: Sub2APIError | None = None
+        params = {"platform": platform} if platform else None
+        for path in self.LIST_GROUPS_PATHS:
+            try:
+                data = self._request("GET", path, params=params)
+                return self._parse_group_list(data)
+            except Sub2APIError as exc:
+                last_error = exc
+                if exc.status_code == 404:
+                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
+                    continue
+                raise
+        raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
+
+    def get_user_api_keys(self, user_id: Any, page_size: int = 1000) -> dict[str, Any]:
+        path_candidates = tuple(path.format(user_id=user_id) for path in self.USER_API_KEYS_PATHS)
+        data = self._request_candidates(
+            "GET",
+            path_candidates,
+            params={"page": 1, "page_size": page_size},
+        )
+        envelope = self._unwrap_data(data)
+        items: list[dict[str, Any]] = []
+        total = 0
+        if isinstance(envelope, dict):
+            raw_items = envelope.get("items", [])
+            if isinstance(raw_items, list):
+                items = [item for item in raw_items if isinstance(item, dict)]
+            total = int(envelope.get("total", len(items)) or len(items))
+        return {"items": items, "total": total, "raw": data}
+
+    def get_usage_stats(
+        self,
+        *,
+        user_id: Any,
+        start_date: date,
+        end_date: date,
+        timezone_name: str,
+    ) -> dict[str, Any]:
+        params = {
+            "user_id": user_id,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "timezone": timezone_name,
+        }
+        data = self._request_candidates("GET", self.USAGE_STATS_PATHS, params=params)
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API usage stats response is not an object")
+        return body
 
     def generate_openai_auth_url(self, email: str, state: str, redirect_uri: str) -> dict[str, Any]:
         payload = {
@@ -122,8 +229,9 @@ class Sub2APIClient:
         data = self._request_candidates(
             "POST", self.GENERATE_OPENAI_AUTH_URL_PATHS, json=payload
         )
+        body = self._unwrap_data(data)
         auth_url = self._extract_value(
-            data,
+            body,
             "auth_url",
             "oauth_url",
             "url",
@@ -149,7 +257,8 @@ class Sub2APIClient:
         data = self._request_candidates(
             "POST", self.EXCHANGE_OPENAI_CODE_PATHS, json=payload
         )
-        return {"exchange": data, "raw": data}
+        body = self._unwrap_data(data)
+        return {"exchange": body if isinstance(body, dict) else data, "raw": data}
 
     def create_openai_account_from_oauth(
         self,
@@ -157,9 +266,6 @@ class Sub2APIClient:
         oauth_payload: dict[str, Any],
         group_id: Any,
     ) -> dict[str, Any]:
-        # IMPORTANT:
-        # The account name is intentionally forced to the original flow email.
-        # Do not switch this to any email returned by OAuth.
         payload = self._build_openai_oauth_account_payload(
             name=name,
             oauth_payload=oauth_payload,
@@ -168,8 +274,9 @@ class Sub2APIClient:
         data = self._request_candidates(
             "POST", self.CREATE_OPENAI_ACCOUNT_PATHS, json=payload
         )
+        body = self._unwrap_data(data)
         account_id = self._extract_id(
-            data,
+            body,
             "id",
             "account_id",
             "data.id",
@@ -191,6 +298,7 @@ class Sub2APIClient:
         return {
             "name": name,
             "platform": self.provisioning_defaults.group_platform,
+            "is_exclusive": True,
         }
 
     def _build_openai_oauth_account_payload(
@@ -200,10 +308,6 @@ class Sub2APIClient:
         oauth_payload: dict[str, Any],
         group_id: Any,
     ) -> dict[str, Any]:
-        # IMPORTANT:
-        # These request keys are centralized here because Sub2API admin payload
-        # names can vary across deployments. If your deployment expects different
-        # names, adjust this builder instead of changing service/controller logic.
         return {
             "provider": self.provisioning_defaults.account_provider,
             "platform": self.provisioning_defaults.account_platform,
@@ -230,6 +334,31 @@ class Sub2APIClient:
             "keywords": list(rule.keywords),
             "description": rule.description,
         }
+
+    def _parse_group_list(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        body = self._unwrap_data(payload)
+        if isinstance(body, list):
+            raw_groups = body
+        elif isinstance(body, dict) and isinstance(body.get("items"), list):
+            raw_groups = body["items"]
+        else:
+            raise Sub2APIError("Unable to parse group list from Sub2API response")
+
+        groups: list[dict[str, Any]] = []
+        for item in raw_groups:
+            if not isinstance(item, dict):
+                continue
+            groups.append(
+                {
+                    "id": self._extract_id(item, "id", "group_id"),
+                    "name": str(item.get("name") or item.get("group_name") or ""),
+                    "platform": item.get("platform"),
+                    "status": item.get("status"),
+                    "is_exclusive": bool(item.get("is_exclusive")),
+                    "raw": item,
+                }
+            )
+        return groups
 
     def _request_candidates(
         self,
@@ -271,6 +400,11 @@ class Sub2APIClient:
                 timeout=self.timeout_seconds,
             )
         except requests.RequestException as exc:
+            logger.exception(
+                "Failed to reach Sub2API admin API | method=%s | url=%s",
+                method,
+                url,
+            )
             raise Sub2APIError(f"Failed to reach Sub2API: {exc}") from exc
 
         if not response.ok:
@@ -295,6 +429,11 @@ class Sub2APIClient:
         logger.info("Sub2API request succeeded: %s %s", method, url)
         return data
 
+    def _unwrap_data(self, payload: Any) -> Any:
+        if isinstance(payload, dict) and "data" in payload:
+            return payload["data"]
+        return payload
+
     def _extract_id(self, payload: dict[str, Any], *paths: str) -> Any:
         value = self._extract_value(payload, *paths)
         if value is None:
@@ -313,6 +452,11 @@ class Sub2APIClient:
                     continue
                 found = False
                 break
-            if found and current not in (None, "", [], {}):
-                return current
+            if not found:
+                continue
+            if current is None:
+                continue
+            if isinstance(current, (str, list, dict)) and len(current) == 0:
+                continue
+            return current
         return None
