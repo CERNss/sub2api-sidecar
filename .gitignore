@@ -1,5 +1,7 @@
 # Ignore hidden files and directories by default.
 .*
+!.github/
+!.github/**
 !.gitignore
 !.dockerignore
 !.env.example

@@ -1,0 +1,728 @@
+name: Release
+
+# Fully segmented release pipeline:
+# init -> validate -> build -> package -> publish
+#
+# Runner selection order (first non-empty wins):
+# 1. workflow_dispatch input "runner" (per-run override)
+# 2. repository variable BUILD_RUNNER
+# 3. fallback to "linux"
+#
+# BUILD_RUNNER accepts: "macos" | "linux"
+# BUILD_RUNNER_MACOS_LABELS / BUILD_RUNNER_LINUX_LABELS accept either:
+# - JSON arrays, e.g. ["self-hosted","macOS","X64"]
+# - single label strings, e.g. ubuntu-latest
+# - comma-separated labels, e.g. self-hosted,macOS,X64
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v1.0.0)'
+        required: true
+        type: string
+      runner:
+        description: 'Runner target (blank = use BUILD_RUNNER var; default linux)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - macos
+          - linux
+        default: ''
+      platforms:
+        description: 'Docker platforms (blank = use DOCKER_PLATFORMS var; default linux/amd64)'
+        required: false
+        type: string
+        default: ''
+
+env:
+  PYTHON_VERSION: ${{ vars.PYTHON_VERSION || '3.12' }}
+  PUBLISH_LATEST_TAG: ${{ vars.PUBLISH_LATEST_TAG || 'true' }}
+  NEXUS_URL: ${{ vars.NEXUS_URL || secrets.NEXUS_URL }}
+  NEXUS_REPOSITORY: ${{ vars.NEXUS_REPOSITORY || secrets.NEXUS_REPOSITORY }}
+  NEXUS_ARTIFACT_PREFIX: ${{ vars.NEXUS_ARTIFACT_PREFIX || secrets.NEXUS_ARTIFACT_PREFIX }}
+  NEXUS_USERNAME: ${{ vars.NEXUS_USERNAME || secrets.NEXUS_USERNAME }}
+  NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD || vars.NEXUS_PASSWORD }}
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+      runs_on: ${{ steps.runner.outputs.runs_on }}
+      platforms: ${{ steps.platforms.outputs.platforms }}
+      storage_backend: ${{ steps.storage.outputs.storage_backend }}
+      nexus_build_metadata_url: ${{ steps.storage.outputs.nexus_build_metadata_url }}
+      nexus_version_url: ${{ steps.storage.outputs.nexus_version_url }}
+      nexus_source_bundle_url: ${{ steps.storage.outputs.nexus_source_bundle_url }}
+      nexus_release_notes_url: ${{ steps.storage.outputs.nexus_release_notes_url }}
+      image_name: ${{ steps.meta.outputs.image_name }}
+      bundle_name: ${{ steps.meta.outputs.bundle_name }}
+      ghcr_registry: ${{ steps.meta.outputs.ghcr_registry }}
+      ghcr_repository: ${{ steps.meta.outputs.ghcr_repository }}
+      ghcr_username: ${{ steps.meta.outputs.ghcr_username }}
+      dockerhub_repository: ${{ steps.meta.outputs.dockerhub_repository }}
+      dockerhub_username: ${{ steps.meta.outputs.dockerhub_username }}
+      release_ref: ${{ steps.release.outputs.release_ref }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      release_version: ${{ steps.release.outputs.release_version }}
+    steps:
+      - name: Resolve runner
+        id: runner
+        shell: bash
+        env:
+          INPUT_RUNNER: ${{ inputs.runner }}
+          VAR_RUNNER: ${{ vars.BUILD_RUNNER }}
+          MACOS_LABELS: ${{ vars.BUILD_RUNNER_MACOS_LABELS }}
+          LINUX_LABELS: ${{ vars.BUILD_RUNNER_LINUX_LABELS }}
+        run: |
+          set -euo pipefail
+
+          to_json_runs_on() {
+            local raw="$1"
+            local fallback="$2"
+            local trimmed=""
+
+            if [ -z "$raw" ]; then
+              printf '%s\n' "$fallback"
+              return
+            fi
+
+            trimmed="$(printf '%s' "$raw" | xargs)"
+
+            if [[ "$trimmed" == \[* ]] || [[ "$trimmed" == \"*\" ]]; then
+              printf '%s\n' "$trimmed"
+              return
+            fi
+
+            if [[ "$trimmed" != *,* ]]; then
+              printf '"%s"\n' "${trimmed//\"/\\\"}"
+              return
+            fi
+
+            local json="["
+            local first=1
+            IFS=',' read -r -a parts <<< "$trimmed"
+            for part in "${parts[@]}"; do
+              part="$(echo "$part" | xargs)"
+              if [ -z "$part" ]; then
+                continue
+              fi
+              if [ "$first" -eq 0 ]; then
+                json+=","
+              fi
+              json+="\"${part//\"/\\\"}\""
+              first=0
+            done
+
+            if [ "$first" -eq 1 ]; then
+              printf '%s\n' "$fallback"
+              return
+            fi
+
+            json+="]"
+            printf '%s\n' "$json"
+          }
+
+          RUNNER="${INPUT_RUNNER:-}"
+          if [ -z "$RUNNER" ]; then
+            RUNNER="${VAR_RUNNER:-}"
+          fi
+          if [ "$RUNNER" != "macos" ] && [ "$RUNNER" != "linux" ]; then
+            RUNNER="linux"
+          fi
+
+          if [ "$RUNNER" = "macos" ]; then
+            LABELS="$(to_json_runs_on "${MACOS_LABELS:-}" '["self-hosted","macOS","X64"]')"
+          else
+            LABELS="$(to_json_runs_on "${LINUX_LABELS:-}" '"ubuntu-latest"')"
+          fi
+
+          echo "runner=${RUNNER}" >> "$GITHUB_OUTPUT"
+          echo "runs_on=${LABELS}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release context
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG_NAME="${INPUT_TAG}"
+          else
+            TAG_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          TAG_NAME="${TAG_NAME#refs/tags/}"
+          if [ -z "${TAG_NAME}" ]; then
+            echo "Release tag is required"
+            exit 1
+          fi
+
+          case "${TAG_NAME}" in
+            v*) ;;
+            *)
+              echo "Release tag must start with v: ${TAG_NAME}"
+              exit 1
+              ;;
+          esac
+
+          echo "release_ref=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${TAG_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Docker platforms
+        id: platforms
+        shell: bash
+        env:
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+          VAR_PLATFORMS: ${{ vars.DOCKER_PLATFORMS }}
+        run: |
+          set -euo pipefail
+
+          PLATFORMS="${INPUT_PLATFORMS:-}"
+          if [ -z "$PLATFORMS" ]; then
+            PLATFORMS="${VAR_PLATFORMS:-}"
+          fi
+          if [ -z "$PLATFORMS" ]; then
+            PLATFORMS="linux/amd64"
+          fi
+
+          echo "platforms=${PLATFORMS}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve image metadata
+        id: meta
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+          RAW_IMAGE_NAME: ${{ vars.IMAGE_NAME || secrets.IMAGE_NAME }}
+          DEFAULT_IMAGE_NAME: ${{ github.event.repository.name }}
+          RAW_GHCR_IMAGE: ${{ vars.GHCR_IMAGE || secrets.GHCR_IMAGE }}
+          RAW_GHCR_NAMESPACE: ${{ vars.GHCR_NAMESPACE || secrets.GHCR_NAMESPACE }}
+          DEFAULT_GHCR_NAMESPACE: ${{ github.repository_owner }}
+          RAW_GHCR_USERNAME: ${{ secrets.GHCR_USERNAME || vars.GHCR_USERNAME }}
+          DEFAULT_GHCR_USERNAME: ${{ github.repository_owner }}
+          RAW_DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || secrets.DOCKERHUB_IMAGE }}
+          RAW_DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || secrets.DOCKERHUB_NAMESPACE }}
+          RAW_DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+          RAW_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          lower() {
+            echo "$1" | tr '[:upper:]' '[:lower:]'
+          }
+
+          IMAGE_NAME="${RAW_IMAGE_NAME:-$DEFAULT_IMAGE_NAME}"
+          IMAGE_NAME="$(lower "$IMAGE_NAME")"
+          BUNDLE_NAME="${IMAGE_NAME}-${RELEASE_VERSION}.tar.gz"
+
+          GHCR_USERNAME="${RAW_GHCR_USERNAME:-$DEFAULT_GHCR_USERNAME}"
+          if [ -n "${RAW_GHCR_IMAGE:-}" ]; then
+            GHCR_REPOSITORY="$(lower "$RAW_GHCR_IMAGE")"
+            case "$GHCR_REPOSITORY" in
+              ghcr.io/*) ;;
+              *) GHCR_REPOSITORY="ghcr.io/${GHCR_REPOSITORY}" ;;
+            esac
+          else
+            GHCR_NAMESPACE="${RAW_GHCR_NAMESPACE:-$DEFAULT_GHCR_NAMESPACE}"
+            GHCR_NAMESPACE="$(lower "$GHCR_NAMESPACE")"
+            GHCR_REPOSITORY="ghcr.io/${GHCR_NAMESPACE}/${IMAGE_NAME}"
+          fi
+          GHCR_REGISTRY="${GHCR_REPOSITORY%%/*}"
+
+          DOCKERHUB_USERNAME="${RAW_DOCKERHUB_USERNAME:-}"
+          if [ -n "${RAW_DOCKERHUB_IMAGE:-}" ]; then
+            DOCKERHUB_REPOSITORY="${RAW_DOCKERHUB_IMAGE#docker.io/}"
+            DOCKERHUB_REPOSITORY="$(lower "$DOCKERHUB_REPOSITORY")"
+          else
+            DOCKERHUB_NAMESPACE="${RAW_DOCKERHUB_NAMESPACE:-$DOCKERHUB_USERNAME}"
+            if [ -n "$DOCKERHUB_NAMESPACE" ]; then
+              DOCKERHUB_NAMESPACE="$(lower "$DOCKERHUB_NAMESPACE")"
+              DOCKERHUB_REPOSITORY="${DOCKERHUB_NAMESPACE}/${IMAGE_NAME}"
+            else
+              DOCKERHUB_REPOSITORY="skip"
+            fi
+          fi
+
+          if [ "$DOCKERHUB_REPOSITORY" != "skip" ] && { [ -z "$DOCKERHUB_USERNAME" ] || [ -z "${RAW_DOCKERHUB_TOKEN:-}" ]; }; then
+            echo "DockerHub credentials incomplete; skip DockerHub publish."
+            DOCKERHUB_REPOSITORY="skip"
+          fi
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "bundle_name=${BUNDLE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_registry=${GHCR_REGISTRY}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_repository=${GHCR_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_username=${GHCR_USERNAME}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub_repository=${DOCKERHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub_username=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve stage storage
+        id: storage
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          BUNDLE_NAME: ${{ steps.meta.outputs.bundle_name }}
+        run: |
+          set -euo pipefail
+
+          trim_single_line() {
+            printf '%s' "$1" | tr -d '\r\n'
+          }
+
+          STORAGE_BACKEND="github-artifact"
+          BUILD_METADATA_URL=""
+          VERSION_URL=""
+          SOURCE_BUNDLE_URL=""
+          RELEASE_NOTES_URL=""
+          NEXUS_URL_CLEAN="$(trim_single_line "${NEXUS_URL:-}")"
+          NEXUS_REPOSITORY_CLEAN="$(trim_single_line "${NEXUS_REPOSITORY:-}")"
+          NEXUS_USERNAME_CLEAN="$(trim_single_line "${NEXUS_USERNAME:-}")"
+          NEXUS_PASSWORD_CLEAN="$(trim_single_line "${NEXUS_PASSWORD:-}")"
+          NEXUS_ARTIFACT_PREFIX_CLEAN="$(trim_single_line "${NEXUS_ARTIFACT_PREFIX:-}")"
+
+          if [ -n "${NEXUS_URL_CLEAN}" ] && [ -n "${NEXUS_REPOSITORY_CLEAN}" ] && [ -n "${NEXUS_USERNAME_CLEAN}" ] && [ -n "${NEXUS_PASSWORD_CLEAN}" ]; then
+            STORAGE_BACKEND="nexus"
+
+            if [ -n "${NEXUS_ARTIFACT_PREFIX_CLEAN}" ]; then
+              PREFIX="${NEXUS_ARTIFACT_PREFIX_CLEAN}"
+            else
+              REPO_PATH="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+              PREFIX="infra/${REPO_PATH}/release"
+            fi
+
+            PREFIX="${PREFIX%/}/${RELEASE_TAG}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+            BASE_URL="${NEXUS_URL_CLEAN%/}/repository/${NEXUS_REPOSITORY_CLEAN}/${PREFIX}"
+            BUILD_METADATA_URL="${BASE_URL}/build-metadata.tar.gz"
+            VERSION_URL="${BASE_URL}/version-file.tar.gz"
+            SOURCE_BUNDLE_URL="${BASE_URL}/${BUNDLE_NAME}"
+            RELEASE_NOTES_URL="${BASE_URL}/release-notes.md"
+          fi
+
+          {
+            echo "storage_backend=${STORAGE_BACKEND}"
+            echo "nexus_build_metadata_url<<EOF"
+            printf '%s\n' "${BUILD_METADATA_URL}"
+            echo "EOF"
+            echo "nexus_version_url<<EOF"
+            printf '%s\n' "${VERSION_URL}"
+            echo "EOF"
+            echo "nexus_source_bundle_url<<EOF"
+            printf '%s\n' "${SOURCE_BUNDLE_URL}"
+            echo "EOF"
+            echo "nexus_release_notes_url<<EOF"
+            printf '%s\n' "${RELEASE_NOTES_URL}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate DockerHub credentials
+        if: ${{ steps.meta.outputs.dockerhub_repository != 'skip' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ steps.meta.outputs.dockerhub_username }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
+
+      - name: Validate GitHub Container Registry credentials
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.meta.outputs.ghcr_registry }}
+          username: ${{ steps.meta.outputs.ghcr_username }}
+          password: ${{ secrets.GHCR_TOKEN || vars.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+  validate:
+    needs: [init]
+    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.init.outputs.release_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Compile Python sources
+        run: python -m compileall app tests
+
+      - name: Run tests
+        run: pytest
+
+  build:
+    needs: [init, validate]
+    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.init.outputs.release_ref }}
+
+      - name: Verify Docker on macOS runner
+        if: ${{ needs.init.outputs.runner == 'macos' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker Desktop is not running on this macOS runner."
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        if: ${{ needs.init.outputs.runner == 'linux' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container image without publishing
+        shell: bash
+        env:
+          PLATFORMS: ${{ needs.init.outputs.platforms }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform "${PLATFORMS}" \
+            --file Dockerfile \
+            .
+
+      - name: Pack build metadata
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+          PLATFORMS: ${{ needs.init.outputs.platforms }}
+          IMAGE_NAME: ${{ needs.init.outputs.image_name }}
+          GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
+          DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release-build
+          {
+            echo "release_tag=${RELEASE_TAG}"
+            echo "release_version=${RELEASE_VERSION}"
+            echo "platforms=${PLATFORMS}"
+            echo "image_name=${IMAGE_NAME}"
+            echo "ghcr_repository=${GHCR_REPOSITORY}"
+            echo "dockerhub_repository=${DOCKERHUB_REPOSITORY}"
+            echo "source_sha=$(git rev-parse HEAD)"
+          } > .release-build/build-metadata.env
+          tar -czf build-metadata.tar.gz -C .release-build build-metadata.env
+
+      - name: Upload build metadata to Nexus
+        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
+        shell: bash
+        env:
+          NEXUS_UPLOAD_URL: ${{ needs.init.outputs.nexus_build_metadata_url }}
+        run: |
+          set -euo pipefail
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            --upload-file build-metadata.tar.gz \
+            "${NEXUS_UPLOAD_URL}"
+
+      - name: Upload build metadata artifact
+        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-metadata
+          path: build-metadata.tar.gz
+          retention-days: 1
+
+  package:
+    needs: [init, build]
+    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.init.outputs.release_ref }}
+
+      - name: Create package workspace
+        run: mkdir -p .release-dist .release-stage/version .release-stage/build
+
+      - name: Download build metadata from Nexus
+        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
+        shell: bash
+        env:
+          NEXUS_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_build_metadata_url }}
+        run: |
+          set -euo pipefail
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            -o .release-stage/build-metadata.tar.gz \
+            "${NEXUS_DOWNLOAD_URL}"
+
+      - name: Download build metadata artifact
+        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: build-metadata
+          path: .release-stage
+
+      - name: Extract build metadata
+        run: tar -xzf .release-stage/build-metadata.tar.gz -C .release-stage/build
+
+      - name: Pack VERSION artifact
+        env:
+          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+        run: |
+          printf '%s\n' "${RELEASE_VERSION}" > .release-stage/version/VERSION
+          tar -czf .release-dist/version-file.tar.gz -C .release-stage/version VERSION
+
+      - name: Pack source bundle
+        env:
+          IMAGE_NAME: ${{ needs.init.outputs.image_name }}
+          BUNDLE_NAME: ${{ needs.init.outputs.bundle_name }}
+          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+        run: |
+          git archive \
+            --format=tar.gz \
+            --prefix="${IMAGE_NAME}-${RELEASE_VERSION}/" \
+            --output=".release-dist/${BUNDLE_NAME}" \
+            HEAD
+
+      - name: Compose release notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+          PLATFORMS: ${{ needs.init.outputs.platforms }}
+          GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
+          DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
+          STORAGE_BACKEND: ${{ needs.init.outputs.storage_backend }}
+          NEXUS_BUILD_METADATA_URL: ${{ needs.init.outputs.nexus_build_metadata_url }}
+          NEXUS_VERSION_URL: ${{ needs.init.outputs.nexus_version_url }}
+          NEXUS_SOURCE_BUNDLE_URL: ${{ needs.init.outputs.nexus_source_bundle_url }}
+        run: |
+          set -euo pipefail
+
+          TAG_MESSAGE="$(git tag -l --format='%(contents:body)' "${RELEASE_TAG}" || true)"
+
+          {
+            echo "# ${RELEASE_TAG}"
+            echo
+            if [ -n "${TAG_MESSAGE}" ]; then
+              printf '%s\n' "${TAG_MESSAGE}"
+            else
+              echo "Automated release for ${RELEASE_TAG}."
+            fi
+            echo
+            echo "## Docker images"
+            echo
+            echo "Platforms: ${PLATFORMS}"
+            echo
+            echo "- ${GHCR_REPOSITORY}:${RELEASE_TAG}"
+            echo "- ${GHCR_REPOSITORY}:${RELEASE_VERSION}"
+            if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
+              echo "- ${GHCR_REPOSITORY}:latest"
+            fi
+            if [ "${DOCKERHUB_REPOSITORY}" != "skip" ]; then
+              echo "- ${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
+              echo "- ${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
+              if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
+                echo "- ${DOCKERHUB_REPOSITORY}:latest"
+              fi
+            fi
+            if [ "${STORAGE_BACKEND}" = "nexus" ]; then
+              echo
+              echo "## Staged artifacts"
+              echo
+              echo "- Build metadata: ${NEXUS_BUILD_METADATA_URL}"
+              echo "- VERSION: ${NEXUS_VERSION_URL}"
+              echo "- Source bundle: ${NEXUS_SOURCE_BUNDLE_URL}"
+            fi
+          } > .release-dist/release-notes.md
+
+      - name: Upload package artifacts to Nexus
+        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
+        shell: bash
+        env:
+          BUNDLE_NAME: ${{ needs.init.outputs.bundle_name }}
+          NEXUS_VERSION_UPLOAD_URL: ${{ needs.init.outputs.nexus_version_url }}
+          NEXUS_SOURCE_UPLOAD_URL: ${{ needs.init.outputs.nexus_source_bundle_url }}
+          NEXUS_NOTES_UPLOAD_URL: ${{ needs.init.outputs.nexus_release_notes_url }}
+        run: |
+          set -euo pipefail
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            --upload-file .release-dist/version-file.tar.gz \
+            "${NEXUS_VERSION_UPLOAD_URL}"
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            --upload-file ".release-dist/${BUNDLE_NAME}" \
+            "${NEXUS_SOURCE_UPLOAD_URL}"
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            --upload-file .release-dist/release-notes.md \
+            "${NEXUS_NOTES_UPLOAD_URL}"
+
+      - name: Upload package artifacts
+        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-package
+          path: .release-dist
+          retention-days: 1
+
+  publish:
+    needs: [init, package]
+    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.init.outputs.release_ref }}
+
+      - name: Create artifact workspace
+        run: mkdir -p .release-artifacts .release-artifacts/version
+
+      - name: Download package artifacts from Nexus
+        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
+        shell: bash
+        env:
+          BUNDLE_NAME: ${{ needs.init.outputs.bundle_name }}
+          NEXUS_VERSION_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_version_url }}
+          NEXUS_SOURCE_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_source_bundle_url }}
+          NEXUS_NOTES_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_release_notes_url }}
+        run: |
+          set -euo pipefail
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            -o .release-artifacts/version-file.tar.gz \
+            "${NEXUS_VERSION_DOWNLOAD_URL}"
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            -o ".release-artifacts/${BUNDLE_NAME}" \
+            "${NEXUS_SOURCE_DOWNLOAD_URL}"
+          curl -fS --retry 3 --retry-all-errors \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            -o .release-artifacts/release-notes.md \
+            "${NEXUS_NOTES_DOWNLOAD_URL}"
+
+      - name: Download package artifacts
+        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: release-package
+          path: .release-artifacts
+
+      - name: Extract staged VERSION
+        run: |
+          tar -xzf .release-artifacts/version-file.tar.gz -C .release-artifacts/version
+          cp .release-artifacts/version/VERSION app/VERSION
+
+      - name: Verify Docker on macOS runner
+        if: ${{ needs.init.outputs.runner == 'macos' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker Desktop is not running on this macOS runner."
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        if: ${{ needs.init.outputs.runner == 'linux' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        if: ${{ needs.init.outputs.dockerhub_repository != 'skip' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ needs.init.outputs.dockerhub_username }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ needs.init.outputs.ghcr_registry }}
+          username: ${{ needs.init.outputs.ghcr_username }}
+          password: ${{ secrets.GHCR_TOKEN || vars.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+          PLATFORMS: ${{ needs.init.outputs.platforms }}
+          GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
+          DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          TAG_ARGS=()
+
+          add_tag() {
+            TAG_ARGS+=(--tag "$1")
+          }
+
+          add_tag "${GHCR_REPOSITORY}:${RELEASE_TAG}"
+          add_tag "${GHCR_REPOSITORY}:${RELEASE_VERSION}"
+          if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
+            add_tag "${GHCR_REPOSITORY}:latest"
+          fi
+
+          if [ "${DOCKERHUB_REPOSITORY}" != "skip" ]; then
+            add_tag "${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
+            add_tag "${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
+            if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
+              add_tag "${DOCKERHUB_REPOSITORY}:latest"
+            fi
+          fi
+
+          docker buildx build \
+            --platform "${PLATFORMS}" \
+            --file Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+            --label "org.opencontainers.image.version=${RELEASE_VERSION}" \
+            "${TAG_ARGS[@]}" \
+            --push \
+            .
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.init.outputs.release_tag }}
+          name: ${{ needs.init.outputs.release_tag }}
+          body_path: .release-artifacts/release-notes.md
+          files: |
+            .release-artifacts/${{ needs.init.outputs.bundle_name }}
+            .release-artifacts/version-file.tar.gz
+          fail_on_unmatched_files: true
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
