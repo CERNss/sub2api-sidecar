@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  PYTHON_VERSION: ${{ vars.PYTHON_VERSION || '3.12' }}
+  PYTHON_VERSION: ${{ vars.PYTHON_VERSION || secrets.PYTHON_VERSION || '3.12' }}
 
 jobs:
   test:
