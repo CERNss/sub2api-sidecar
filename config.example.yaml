@@ -1,0 +1,51 @@
+app:
+  base_url: http://127.0.0.1:8000
+  auth_username: admin
+  access_key_ttl_hours: 12
+
+storage:
+  sqlite_db_path: ./data/sub2api-sidecar.db
+
+openai:
+  oauth_redirect_uri: http://localhost:3000/callback
+
+sub2api:
+  base_url: http://localhost:8080
+  request_timeout_seconds: 30
+  provisioning_defaults:
+    group_platform: openai
+    account_provider: openai
+    account_platform: openai
+    account_type: oauth
+    account_ws_mode: context_pool
+    account_temporary_unschedulable: true
+    account_temporary_unschedulable_rules:
+      - error_code: "529"
+        duration_minutes: 60
+        keywords:
+          - overloaded
+          - too many
+        description: 服务过载 - 暂停 60 分钟
+      - error_code: "429"
+        duration_minutes: 10
+        keywords:
+          - rate limit
+          - too many requests
+        description: 触发限流 - 暂停 10 分钟
+      - error_code: "503"
+        duration_minutes: 30
+        keywords:
+          - unavailable
+          - maintenance
+        description: 服务不可用 - 暂停 30 分钟
+
+provisioning:
+  group_name_prefix: openai-oauth-
+  assignment_mode: dedicated
+
+auto_rotation:
+  enabled: false
+  interval_seconds: 0
+  cooldown_minutes: 0
+  usage_window: 1d
+  usage_thresholds: []

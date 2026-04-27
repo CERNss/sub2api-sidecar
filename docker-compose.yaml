@@ -6,9 +6,12 @@ services:
     container_name: sub2api-sidecar
     env_file:
       - .env
+    environment:
+      CONFIG_PATH: /app/config.yaml
     ports:
       - "8000:8000"
     volumes:
+      - ./config.yaml:/app/config.yaml:ro
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:

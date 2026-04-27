@@ -54,7 +54,7 @@
 2. 服务创建分组、用户、用户绑组，并返回 OAuth 登录链接
    - 分组创建默认携带 `platform=openai`
 3. 用户手动点击 OAuth 登录链接
-4. OAuth 提供方把浏览器跳到你配置的 `OPENAI_OAUTH_REDIRECT_URI`，通常是某个 localhost 地址
+4. OAuth 提供方把浏览器跳到你配置的 `openai.oauth_redirect_uri`，通常是某个 localhost 地址
 5. 用户把浏览器地址栏中的完整 callback URL 复制回来
 6. 前端或调用方将该 URL 提交给 `POST /provision/oauth/complete`
 7. 服务解析 `code/state`，继续完成 OAuth 账号创建和账号绑组
@@ -67,7 +67,7 @@
 在进入这个流程之前，需要先登录：
 
 1. 打开 `GET /login`
-2. 用户名固定为 `APP_AUTH_USERNAME`，默认 `admin`
+2. 用户名固定为 `app.auth_username`，默认 `admin`
 3. 密码默认在每次服务启动时自动生成，并打印在启动日志里
 4. 登录成功后浏览器会拿到 `HttpOnly` cookie；API 调用方也可以复用登录返回的 `access_key`
 5. 服务重启后旧密码和旧 access key 会失效，需要重新登录
@@ -85,7 +85,7 @@
 
 ### managed-pool 预配
 
-- 当 `PROVISIONING_ASSIGNMENT_MODE=managed_pool` 时，`POST /provision/start` 不再创建新专属组
+- 当 `provisioning.assignment_mode=managed_pool` 时，`POST /provision/start` 不再创建新专属组
 - 服务会从本地轮换池里选择优先级最低的组作为默认目标组
 - 如果轮换池为空，请求会失败
 
@@ -94,9 +94,9 @@
 - V1 仅支持 4 个窗口：`5h`、`1d`、`7d`、`30d`
 - `5h` / `1d` / `7d` 通过用户现有 API key 的窗口用量字段汇总
 - `30d` 通过 upstream usage stats 聚合查询
-- `AUTO_ROTATION_USAGE_THRESHOLDS_JSON` 需要是升序数组
+- `auto_rotation.usage_thresholds` 需要是升序数组
 - 轮换池中的组数量必须满足：
-  - `len(rotation_pool_groups) == len(AUTO_ROTATION_USAGE_THRESHOLDS_JSON) + 1`
+  - `len(rotation_pool_groups) == len(auto_rotation.usage_thresholds) + 1`
 
 例子：
 
@@ -108,18 +108,18 @@
 
 ### 推荐 rollout
 
-1. 先保持 `PROVISIONING_ASSIGNMENT_MODE=dedicated`
+1. 先保持 `provisioning.assignment_mode=dedicated`
 2. 通过 `GET /rotation/pool/candidates` 和 `POST /rotation/pool/groups` 选出一小组专属轮换目标
-3. 设置 `AUTO_ROTATION_USAGE_WINDOW`、`AUTO_ROTATION_USAGE_THRESHOLDS_JSON`、`AUTO_ROTATION_COOLDOWN_MINUTES`
+3. 设置 `auto_rotation.usage_window`、`auto_rotation.usage_thresholds`、`auto_rotation.cooldown_minutes`
 4. 先手动调用 `POST /rotation/auto/run` 验证策略
-5. 再打开 `AUTO_ROTATION_INTERVAL_SECONDS`
-6. 最后把 `PROVISIONING_ASSIGNMENT_MODE` 切到 `managed_pool`
+5. 再打开 `auto_rotation.interval_seconds`
+6. 最后把 `provisioning.assignment_mode` 切到 `managed_pool`
 
 ### 回滚
 
-1. 把 `PROVISIONING_ASSIGNMENT_MODE` 切回 `dedicated`
-2. 关闭 `AUTO_ROTATION_ENABLED`
-3. 把 `AUTO_ROTATION_INTERVAL_SECONDS` 设回 `0`
+1. 把 `provisioning.assignment_mode` 切回 `dedicated`
+2. 关闭 `auto_rotation.enabled`
+3. 把 `auto_rotation.interval_seconds` 设回 `0`
 4. 如有需要，用 `POST /rotation/manual` 把用户迁回目标专属组
 5. 再按需清理本地轮换池
 
@@ -131,6 +131,7 @@
 ├── .env.example
 ├── .gitignore
 ├── build.sh
+├── config.example.yaml
 ├── Dockerfile
 ├── README.md
 ├── docker-compose.yaml
@@ -181,66 +182,37 @@
     └── test_sqlite_store.py
 ```
 
-## 环境变量
+## 配置文件和环境变量
 
-先复制模板：
+先复制两个模板：
 
 ```bash
+cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-然后填写：
+`config.yaml` 放非敏感、可读性更强的运行配置，例如本服务地址、OAuth redirect、SQLite 路径、预配模式、自动轮换策略、Sub2API 默认 payload 和临时不可调度规则。
+
+`.env` 只保留密钥和密码类字段：
 
 ```env
-SUB2API_BASE_URL=http://localhost:8080
 SUB2API_ADMIN_API_KEY=replace-me
-APP_BASE_URL=http://127.0.0.1:8000
-OPENAI_OAUTH_REDIRECT_URI=http://localhost:3000/callback
-APP_AUTH_USERNAME=admin
-APP_ACCESS_KEY_TTL_HOURS=12
-# APP_AUTH_PASSWORD=optional-test-override
-SQLITE_DB_PATH=./data/sub2api-sidecar.db
 DEFAULT_USER_PASSWORD=ChangeMe123!
-GROUP_NAME_PREFIX=openai-oauth-
-PROVISIONING_ASSIGNMENT_MODE=dedicated
-AUTO_ROTATION_ENABLED=false
-AUTO_ROTATION_INTERVAL_SECONDS=0
-AUTO_ROTATION_COOLDOWN_MINUTES=0
-AUTO_ROTATION_USAGE_WINDOW=1d
-AUTO_ROTATION_USAGE_THRESHOLDS_JSON=[]
-SUB2API_GROUP_PLATFORM=openai
-SUB2API_ACCOUNT_PROVIDER=openai
-SUB2API_ACCOUNT_PLATFORM=openai
-SUB2API_ACCOUNT_TYPE=oauth
-SUB2API_ACCOUNT_WS_MODE=context_pool
-SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE=true
-SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON=[{"error_code":"529","duration_minutes":60,"keywords":["overloaded","too many"],"description":"服务过载 - 暂停 60 分钟"},{"error_code":"429","duration_minutes":10,"keywords":["rate limit","too many requests"],"description":"触发限流 - 暂停 10 分钟"},{"error_code":"503","duration_minutes":30,"keywords":["unavailable","maintenance"],"description":"服务不可用 - 暂停 30 分钟"}]
+# APP_AUTH_PASSWORD=optional-test-override
 ```
 
 说明：
 
-- `APP_BASE_URL` 是你访问本地 sidecar 页面的地址。
-- `OPENAI_OAUTH_REDIRECT_URI` 是 OAuth 提供方授权完成后实际跳转到的 localhost 地址。这个地址不要求就是 sidecar 本身。
-- `APP_AUTH_USERNAME` 是本地登录页固定用户名，默认保持 `admin` 即可。
-- `APP_ACCESS_KEY_TTL_HOURS` 控制登录后 access key 的有效期。
-- `APP_AUTH_PASSWORD` 默认不需要填写；不填时服务会在每次启动时生成一个新密码并打印到日志中。这个变量主要用于测试或调试。
-- `SQLITE_DB_PATH` 是 flow 持久化数据库路径；默认会自动创建父目录和表结构。
+- `SUB2API_ADMIN_API_KEY` 是调用 Sub2API admin API 的密钥。
 - `DEFAULT_USER_PASSWORD` 用于创建 Sub2API 用户。
-- `SUB2API_GROUP_PLATFORM` 控制专属分组的平台，默认 `openai`。
-- `PROVISIONING_ASSIGNMENT_MODE` 支持 `dedicated` 和 `managed_pool`。
-- `AUTO_ROTATION_ENABLED` 控制是否允许执行自动轮换。
-- `AUTO_ROTATION_INTERVAL_SECONDS` 大于 `0` 时，会启动进程内定时器按间隔自动执行轮换。
-- `AUTO_ROTATION_COOLDOWN_MINUTES` 控制同一用户两次轮换之间的冷却时间。
-- `AUTO_ROTATION_USAGE_WINDOW` V1 只支持 `5h`、`1d`、`7d`、`30d`。
-- `AUTO_ROTATION_USAGE_THRESHOLDS_JSON` 是自动轮换分档阈值数组，需要升序排列。
-- `SUB2API_ACCOUNT_PROVIDER`、`SUB2API_ACCOUNT_PLATFORM`、`SUB2API_ACCOUNT_TYPE` 默认会把账号按 `openai + oauth` 创建。
-- `SUB2API_ACCOUNT_WS_MODE` 默认使用 `context_pool`。如果你的 Sub2API 部署要求别的枚举值，只需要改这个变量。
-- `SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE` 控制账号创建时是否打开“临时不可调度”。
-- `SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON` 用 JSON 配置停调规则；默认内置 529/429/503 三条规则。
+- `APP_AUTH_PASSWORD` 默认不需要填写；不填时服务会在每次启动时生成一个新密码并打印到日志中。这个变量主要用于测试或调试。
+- `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
+
+环境变量仍然可以覆盖 `config.yaml` 中的同名旧配置项，方便兼容已有部署和测试环境；新配置建议优先改 `config.yaml`。
 
 ## Sub2API 默认编排配置
 
-当前实现会把这些默认值集中封装在 `app/config.py` + `app/clients/sub2api.py`：
+这些默认值现在集中放在 `config.yaml` 的 `sub2api.provisioning_defaults`：
 
 - 创建分组时携带 `platform=openai`
 - 创建 OAuth 账号时携带 `provider=openai`
@@ -293,17 +265,14 @@ Ephemeral admin credentials ready | username=admin | password=... | note=Copy th
 
 ## Docker 启动
 
-先准备环境变量：
+先准备配置文件和环境变量：
 
 ```bash
+cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-然后按需修改 `.env`。如果你希望容器内的 SQLite 文件稳定落在挂载卷里，推荐保持：
-
-```env
-SQLITE_DB_PATH=./data/sub2api-sidecar.db
-```
+然后按需修改 `config.yaml` 和 `.env`。如果你希望容器内的 SQLite 文件稳定落在挂载卷里，推荐保持 `storage.sqlite_db_path: ./data/sub2api-sidecar.db`。
 
 构建并启动：
 
@@ -336,9 +305,9 @@ docker compose logs -f
 
 说明：
 
-- `docker-compose.yaml` 会读取项目根目录下的 `.env`
+- `docker-compose.yaml` 会读取项目根目录下的 `.env`，并把 `config.yaml` 挂载到容器内
 - `./data:/app/data` 会把 SQLite 数据库持久化到宿主机 `data/` 目录
-- 如果你的 `SUB2API_BASE_URL` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
+- 如果你的 `sub2api.base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
 
 ## Linux x64 镜像构建
 

@@ -26,6 +26,7 @@ def clear_app_caches() -> None:
 @pytest.fixture
 def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     db_path = tmp_path / "sub2api-sidecar-test.db"
+    monkeypatch.setenv("CONFIG_PATH", str(tmp_path / "missing-config.yaml"))
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
@@ -36,6 +37,12 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("SQLITE_DB_PATH", str(db_path))
     monkeypatch.setenv("DEFAULT_USER_PASSWORD", "ChangeMe123!")
     monkeypatch.setenv("GROUP_NAME_PREFIX", "openai-oauth-")
+    monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "dedicated")
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
+    monkeypatch.setenv("AUTO_ROTATION_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("AUTO_ROTATION_COOLDOWN_MINUTES", "0")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     monkeypatch.setenv("SUB2API_GROUP_PLATFORM", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PROVIDER", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PLATFORM", "openai")

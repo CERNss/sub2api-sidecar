@@ -116,11 +116,11 @@ The system SHALL provide a lightweight admin authentication flow for the local s
 ### Requirement: Use centralized admin API integration and pluggable flow storage
 The system SHALL centralize Sub2API admin API calls behind a client abstraction, SHALL authenticate those requests with `x-api-key`, and SHALL persist flow context in SQLite by default while preserving a store abstraction for future backend changes.
 
-#### Scenario: Environment config drives admin API requests and OAuth redirect selection
-- **GIVEN** the service starts with configured environment variables
+#### Scenario: File config and environment secrets drive admin API requests and OAuth redirect selection
+- **GIVEN** the service starts with configured `config.yaml` settings and environment secrets
 - **WHEN** it builds the Sub2API admin client and flow store
-- **THEN** the client reads the Sub2API base URL and admin API key from environment-backed settings
-- **THEN** the client reads the configured OpenAI group/account defaults and temporary-unschedulable rules from environment-backed settings
+- **THEN** the client reads the Sub2API base URL from config-backed settings and the admin API key from environment-backed settings
+- **THEN** the client reads the configured OpenAI group/account defaults and temporary-unschedulable rules from config-backed settings
 - **THEN** the client sends admin requests with `x-api-key`
 - **THEN** the OAuth login URL generation and OAuth code exchange both use the configured OAuth provider redirect URI
 - **THEN** the flow store reads the SQLite database path from configuration
