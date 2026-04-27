@@ -1,0 +1,33 @@
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VIRTUAL_ENV=/opt/ci-venv \
+    PATH=/opt/ci-venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ARG APT_PACKAGES="bash build-essential ca-certificates curl git jq make openssh-client pkg-config tar gzip unzip"
+ARG PIP_EXTRA_PACKAGES="pip-audit virtualenv"
+ARG INSTALL_PROJECT_DEPS=true
+
+WORKDIR /work
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ${APT_PACKAGES} \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv "${VIRTUAL_ENV}" \
+    && "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip setuptools wheel
+
+COPY requirements.txt requirements-dev.txt ./
+
+RUN if [ -n "${PIP_EXTRA_PACKAGES}" ]; then \
+      "${VIRTUAL_ENV}/bin/pip" install ${PIP_EXTRA_PACKAGES}; \
+    fi \
+    && if [ "${INSTALL_PROJECT_DEPS}" = "true" ]; then \
+      "${VIRTUAL_ENV}/bin/pip" install -r requirements-dev.txt; \
+    fi
+
+CMD ["bash"]
