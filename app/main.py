@@ -318,8 +318,11 @@ def rotation_pool_add_group(
             "success": True,
             "group_id": group.group_id,
             "name": group.group_name,
+            "group_kind": group.group_kind,
             "priority": group.priority,
             "is_exclusive": group.is_exclusive,
+            "is_subscription": group.is_subscription,
+            "rotation_supported": group.is_exclusive and not group.is_subscription,
         },
     )
 

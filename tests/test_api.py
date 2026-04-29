@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.auth import ACCESS_KEY_COOKIE_NAME
-from app.config import get_settings
+from app.clients.sub2api import Sub2APIClient
+from app.config import Sub2APIProvisioningDefaults, get_settings
 from app.models.flow import AssignmentMode
 from app.models.rotation import RotationPoolGroup, UserGroupAssignment
 
@@ -57,6 +58,7 @@ class FakeRotationSub2API:
             {
                 "id": 11,
                 "name": "rotation-low",
+                "type": "standard",
                 "platform": "openai",
                 "status": "active",
                 "is_exclusive": True,
@@ -64,6 +66,7 @@ class FakeRotationSub2API:
             {
                 "id": 22,
                 "name": "rotation-high",
+                "type": "standard",
                 "platform": "openai",
                 "status": "active",
                 "is_exclusive": True,
@@ -71,13 +74,24 @@ class FakeRotationSub2API:
             {
                 "id": 33,
                 "name": "public-shared",
+                "type": "standard",
                 "platform": "openai",
                 "status": "active",
                 "is_exclusive": False,
             },
+            {
+                "id": 44,
+                "name": "subscription-dedicated",
+                "type": "subscription",
+                "platform": "openai",
+                "status": "active",
+                "is_exclusive": True,
+                "subscription_id": "sub-1",
+            },
         ]
         self.user_api_keys: dict[int, list[dict[str, object]]] = {}
         self.replace_calls: list[dict[str, object]] = []
+        self.set_user_group_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
 
     def request(self, method: str, url: str, json=None, params=None, timeout=None):
@@ -96,6 +110,13 @@ class FakeRotationSub2API:
                 {"code": 0, "message": "success", "data": {"id": 101, "email": json["email"]}},
             )
         if method == "PUT" and path in {"/api/v1/admin/users/101", "/api/admin/users/101/groups"}:
+            self.set_user_group_calls.append(
+                {
+                    "user_id": 101,
+                    "group_id": json["group_id"],
+                    "allowed_groups": json["allowed_groups"],
+                }
+            )
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "POST" and path in {"/api/v1/admin/openai/oauth/url", "/api/admin/openai/oauth/url"}:
             return FakeResponse(
@@ -264,6 +285,33 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
     if method == "POST" and path == "/api/admin/groups/g-1/accounts":
         return FakeResponse(200, {"success": True, "account_id": json["account_id"]})
     return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+
+def test_sub2api_client_updates_single_api_key_group_with_admin_endpoint() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.update_api_key_group(key_id="key-1", group_id=123)
+
+    assert result["key_id"] == "key-1"
+    assert result["group_id"] == 123
+    assert calls == [
+        {
+            "method": "PUT",
+            "path": "/api/v1/admin/api-keys/key-1",
+            "json": {"group_id": 123},
+        }
+    ]
 
 
 def login(client: TestClient) -> dict[str, object]:
@@ -460,8 +508,13 @@ def test_rotation_pool_candidates_and_exclusive_selection(client) -> None:
     selected = {item["group_id"]: item for item in items}
     assert selected[11]["selected"] is True
     assert selected[11]["is_exclusive"] is True
+    assert selected[11]["is_subscription"] is False
+    assert selected[11]["rotation_supported"] is True
     assert selected[33]["selected"] is False
     assert selected[33]["is_exclusive"] is False
+    assert selected[33]["rotation_supported"] is False
+    assert selected[44]["is_subscription"] is True
+    assert selected[44]["rotation_supported"] is False
 
 
 def test_rotation_pool_rejects_public_group(client) -> None:
@@ -473,6 +526,17 @@ def test_rotation_pool_rejects_public_group(client) -> None:
 
     assert response.status_code == 400
     assert "exclusive groups" in response.json()["detail"]
+
+
+def test_rotation_pool_rejects_subscription_group(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/rotation/pool/groups", json={"group_id": 44})
+
+    assert response.status_code == 400
+    assert "Subscription groups cannot be added" in response.json()["detail"]
 
 
 def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch) -> None:
@@ -578,6 +642,10 @@ def test_manual_rotation_success_skip_and_failure(client) -> None:
     assert failed.status_code == 200
     assert failed.json()["status"] == "failed"
     assert "replace-group failed" in failed.json()["reason"]
+    assert backend.set_user_group_calls == []
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
+    ]
 
     updated_assignment = store.get_user_assignment(101)
     assert updated_assignment is not None

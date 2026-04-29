@@ -8,6 +8,7 @@
 
 - [x] 2.1 Update `app/clients/sub2api.py` to wrap the confirmed admin APIs for group discovery, group replacement, allowed-group updates, and usage queries
 - [x] 2.2 Add response parsing and error handling needed for manual and automatic rotation workflows
+- [x] 2.3 Harden rotation to use key-migrating `replace-group` semantics instead of `allowed_groups`, and add single API-key group update wrapper
 
 ## 3. Provisioning mode support
 
@@ -18,6 +19,7 @@
 
 - [x] 4.1 Add authenticated APIs to list upstream group candidates and manage local rotation-pool membership
 - [x] 4.2 Enforce exclusive-group-only pool membership and persist pool changes durably
+- [x] 4.3 Reject subscription groups from the rotation pool because upstream `replace-group` only supports dedicated standard groups
 
 ## 5. Rotation execution and APIs
 

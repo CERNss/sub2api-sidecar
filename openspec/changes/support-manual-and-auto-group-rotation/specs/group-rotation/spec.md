@@ -15,6 +15,7 @@ The system SHALL support an operator-managed pool of dedicated rotation-target g
 - **GIVEN** an authenticated operator calls `GET /rotation/pool/candidates`
 - **WHEN** the system queries the upstream Sub2API admin groups API
 - **THEN** the system returns current groups with their `is_exclusive` classification
+- **THEN** the system returns whether each group is a subscription group when upstream metadata exposes it
 - **THEN** the response distinguishes dedicated candidate groups from non-exclusive groups
 - **THEN** the response marks which dedicated groups are already selected into the local rotation pool
 
@@ -29,6 +30,12 @@ The system SHALL support an operator-managed pool of dedicated rotation-target g
 - **GIVEN** an authenticated operator selects a non-exclusive group
 - **WHEN** the operator calls `POST /rotation/pool/groups`
 - **THEN** the system rejects the request
+- **THEN** the system does not persist that group into the local rotation pool
+
+#### Scenario: Subscription groups cannot be added into the rotation pool
+- **GIVEN** an authenticated operator selects an exclusive subscription group
+- **WHEN** the operator calls `POST /rotation/pool/groups`
+- **THEN** the system rejects the request because upstream `replace-group` supports only dedicated standard groups
 - **THEN** the system does not persist that group into the local rotation pool
 
 #### Scenario: Automatic rotation configuration is validated at startup
@@ -66,6 +73,7 @@ The system SHALL expose an authenticated `POST /rotation/manual` API that moves 
 - **WHEN** the system executes the request
 - **THEN** the system loads the user's current assignment state
 - **THEN** the system calls the Sub2API admin API that replaces the user's effective group and migrates existing keys
+- **THEN** the system does not rely only on updating the user's `allowed_groups`
 - **THEN** the system updates the stored current assignment to the target group
 - **THEN** the response includes the user identity, source group, target group, trigger type `manual`, and execution status
 
@@ -120,6 +128,12 @@ The system SHALL skip or reject rotation when the requested or computed target g
 - **WHEN** the system validates the target group
 - **THEN** the system rejects or skips the rotation before calling the Sub2API group replacement API
 - **THEN** the system records the result as an invalid target because only dedicated rotation groups are allowed
+
+#### Scenario: Rotation rejects subscription groups as targets
+- **GIVEN** a manual or automatic rotation attempt resolves a subscription group id
+- **WHEN** the system validates the target group
+- **THEN** the system rejects or skips the rotation before calling the Sub2API group replacement API
+- **THEN** the system records the result as an invalid target because only dedicated standard groups are allowed
 
 #### Scenario: Rotation is skipped when the target group matches the current group
 - **GIVEN** a manual or automatic rotation attempt resolves the same group that the user is already assigned to

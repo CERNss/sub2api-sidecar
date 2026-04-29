@@ -34,9 +34,11 @@ class RotationPoolGroup(BaseModel):
 
     group_id: Any
     group_name: str
+    group_kind: str | None = None
     platform: str | None = None
     status: str | None = None
     is_exclusive: bool = True
+    is_subscription: bool = False
     priority: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

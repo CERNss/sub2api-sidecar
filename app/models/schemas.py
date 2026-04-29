@@ -54,9 +54,13 @@ class RotationPoolGroupRequest(BaseModel):
 class RotationPoolCandidateResponse(BaseModel):
     group_id: Any
     name: str
+    group_kind: str | None = None
     platform: str | None = None
     status: str | None = None
     is_exclusive: bool
+    is_subscription: bool = False
+    rotation_supported: bool = True
+    unsupported_reason: str | None = None
     selected: bool
     priority: int | None = None
 

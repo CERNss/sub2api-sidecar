@@ -36,6 +36,7 @@ class Sub2APIClient:
         "/api/admin/users/{user_id}/groups",
         "/admin/users/{user_id}/groups",
     )
+    UPDATE_API_KEY_GROUP_PATHS = ("/api/v1/admin/api-keys/{key_id}",)
     REPLACE_EXCLUSIVE_GROUP_PATHS = (
         "/api/v1/admin/users/{user_id}/replace-group",
         "/api/admin/users/{user_id}/replace-group",
@@ -127,6 +128,7 @@ class Sub2APIClient:
         return {"id": user_id, "email": email, "raw": data}
 
     def set_user_group(self, user_id: Any, group_id: Any) -> dict[str, Any]:
+        """Set a user's allowed groups for initial provisioning before API keys exist."""
         payload = {
             "allowed_groups": [group_id],
             "group_ids": [group_id],
@@ -136,8 +138,26 @@ class Sub2APIClient:
         data = self._request_candidates("PUT", path_candidates, json=payload)
         return {"user_id": user_id, "group_id": group_id, "raw": data}
 
-    def replace_user_group(self, user_id: Any, group_id: Any) -> dict[str, Any]:
-        return self.set_user_group(user_id=user_id, group_id=group_id)
+    def update_api_key_group(self, *, key_id: Any, group_id: Any) -> dict[str, Any]:
+        payload = {"group_id": group_id}
+        path_candidates = tuple(
+            path.format(key_id=key_id) for path in self.UPDATE_API_KEY_GROUP_PATHS
+        )
+        data = self._request_candidates("PUT", path_candidates, json=payload)
+        return {"key_id": key_id, "group_id": group_id, "raw": data}
+
+    def replace_user_group(
+        self,
+        *,
+        user_id: Any,
+        old_group_id: Any,
+        new_group_id: Any,
+    ) -> dict[str, Any]:
+        return self.replace_exclusive_user_group(
+            user_id=user_id,
+            old_group_id=old_group_id,
+            new_group_id=new_group_id,
+        )
 
     def replace_exclusive_user_group(
         self,
@@ -348,17 +368,63 @@ class Sub2APIClient:
         for item in raw_groups:
             if not isinstance(item, dict):
                 continue
+            group_kind = self._extract_group_kind(item)
+            is_subscription = self._is_subscription_group(item, group_kind)
+            is_exclusive = self._coerce_bool(item.get("is_exclusive"))
             groups.append(
                 {
                     "id": self._extract_id(item, "id", "group_id"),
                     "name": str(item.get("name") or item.get("group_name") or ""),
+                    "group_kind": group_kind,
                     "platform": item.get("platform"),
                     "status": item.get("status"),
-                    "is_exclusive": bool(item.get("is_exclusive")),
+                    "is_exclusive": is_exclusive,
+                    "is_subscription": is_subscription,
+                    "rotation_supported": is_exclusive and not is_subscription,
                     "raw": item,
                 }
             )
         return groups
+
+    def _extract_group_kind(self, item: dict[str, Any]) -> str | None:
+        for field_name in ("group_kind", "group_type", "type", "kind", "mode"):
+            value = item.get(field_name)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    def _is_subscription_group(self, item: dict[str, Any], group_kind: str | None) -> bool:
+        if group_kind and "subscription" in group_kind.lower():
+            return True
+
+        for field_name in (
+            "is_subscription",
+            "is_subscription_group",
+            "subscription_group",
+        ):
+            value = item.get(field_name)
+            if self._coerce_bool(value):
+                return True
+
+        for field_name in ("subscription_id", "subscription_name", "subscription"):
+            value = item.get(field_name)
+            if value in (None, "", False):
+                continue
+            return True
+
+        return False
+
+    def _coerce_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        if value is None:
+            return False
+        return bool(value)
 
     def _request_candidates(
         self,

@@ -86,16 +86,19 @@ Alternative considered: store every new field inside the existing flow JSON only
 The current client uses broad candidate-path fallbacks for a minimal provisioning flow. Rotation should add explicit wrappers for the confirmed upstream APIs used in `infra/sub2api`, especially:
 
 - admin group listing for rotation-pool discovery
-- user group replacement with key migration
-- user allowed-group updates when needed
+- user group replacement with key migration via `POST /api/v1/admin/users/{user_id}/replace-group`
+- single API key group updates via `PUT /api/v1/admin/api-keys/{key_id}` when a future flow needs one-key migration
+- user allowed-group updates only for initial provisioning before keys exist
 - per-user or batch usage retrieval
 
 Why this approach:
 
 - rotation-pool discovery should reuse the upstream exclusivity flag instead of guessing locally
 - rotation needs predictable semantics, especially around key migration and auth-cache invalidation
+- existing-user rotation must not rely only on updating `allowed_groups`, because existing API keys would keep their old effective group until explicitly migrated
 - usage-driven logic depends on consistent payload parsing
 - confirmed endpoints are safer than adding more generic fallback guesses
+- upstream `replace-group` currently supports dedicated standard groups only, so subscription groups must be filtered out of the rotation pool
 
 Alternative considered: keep expanding candidate path guessing. Rejected because rotation failures would become harder to diagnose and test.
 

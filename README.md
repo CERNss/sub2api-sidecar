@@ -40,6 +40,7 @@
 - `POST /rotation/manual`
   - 对已记录 assignment 的用户执行手动切组
   - 统一调用 upstream `replace-group`，自动迁移现有 key
+  - 不使用仅更新用户 `allowed_groups` 的方式做轮换
 - `POST /rotation/auto/run`
   - 按当前窗口和阈值执行自动轮换
   - 无 key 的用户会放到已有 key 用户之后调度
@@ -77,11 +78,11 @@
 ### 轮换池选择
 
 1. 调用 `GET /rotation/pool/candidates`
-2. 从返回结果里挑选 `is_exclusive=true` 的专属组
+2. 从返回结果里挑选 `is_exclusive=true` 且 `is_subscription=false` 的专属标准组
 3. 用 `POST /rotation/pool/groups` 加入本地轮换池
 4. 通过 `priority` 指定顺序，数值越小越靠前
 
-非专属组不会被允许加入轮换池。
+非专属组不会被允许加入轮换池；订阅分组也不会被允许加入轮换池，因为 upstream `replace-group` 当前只支持专属标准分组。
 
 ### managed-pool 预配
 
@@ -95,6 +96,8 @@
 - `5h` / `1d` / `7d` 通过用户现有 API key 的窗口用量字段汇总
 - `30d` 通过 upstream usage stats 聚合查询
 - `auto_rotation.usage_thresholds` 需要是升序数组
+- 实际切组使用 upstream `POST /api/v1/admin/users/{user_id}/replace-group`，由 upstream 迁移该用户旧分组下的 API keys 并失效认证缓存
+- 正在进行中的流式请求、WebSocket 或已建立连接不会半路切换，需要下一次请求或重连才会使用新分组
 - 轮换池中的组数量必须满足：
   - `len(rotation_pool_groups) == len(auto_rotation.usage_thresholds) + 1`
 
@@ -406,6 +409,7 @@ curl -X POST 'http://127.0.0.1:8000/provision/oauth/complete' \
 - 入口 email 贯穿全流程。
 - 创建 OpenAI OAuth 账号时，`name` 强制使用入口 email。
 - `用户绑定分组` 和 `账号绑定分组` 两步都会执行。
+- 轮换已有用户时不要只改用户 `allowed_groups`；必须使用 upstream `replace-group`，或在只迁移单个 key 的场景使用 `PUT /api/v1/admin/api-keys/{key_id}`。
 - 页面和编排 API 需要先登录；登录密码默认每次启动重新生成。
 - OAuth 授权本身由用户手动点击返回的 `oauth_url` 完成。
 - OAuth 最终完成步骤依赖用户把 localhost callback URL 粘贴回来。
