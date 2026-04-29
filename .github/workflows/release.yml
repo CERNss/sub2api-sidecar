@@ -811,7 +811,7 @@ jobs:
           retention-days: 1
 
   publish_linux:
-    if: ${{ needs.init.outputs.runner == 'linux' && needs.package.result == 'success' }}
+    if: ${{ always() && needs.init.outputs.runner == 'linux' && needs.package.result == 'success' }}
     needs: [init, package]
     runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
     steps:
@@ -955,7 +955,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish_macos:
-    if: ${{ needs.init.outputs.runner == 'macos' && needs.package.result == 'success' }}
+    if: ${{ always() && needs.init.outputs.runner == 'macos' && needs.package.result == 'success' }}
     needs: [init, package]
     runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
     steps:
