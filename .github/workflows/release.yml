@@ -940,20 +940,6 @@ jobs:
             fi
           fi
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.init.outputs.release_tag }}
-          name: ${{ needs.init.outputs.release_tag }}
-          body_path: .release-artifacts/release-notes.md
-          files: |
-            .release-artifacts/${{ needs.init.outputs.bundle_name }}
-            .release-artifacts/version-file.tar.gz
-          fail_on_unmatched_files: true
-          overwrite_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   publish_macos:
     if: ${{ always() && needs.init.outputs.runner == 'macos' && needs.package.result == 'success' }}
     needs: [init, package]
@@ -1083,17 +1069,3 @@ jobs:
               push_loaded_image "${archive_image_tag}" "${DOCKERHUB_REPOSITORY}:latest"
             fi
           fi
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.init.outputs.release_tag }}
-          name: ${{ needs.init.outputs.release_tag }}
-          body_path: .release-artifacts/release-notes.md
-          files: |
-            .release-artifacts/${{ needs.init.outputs.bundle_name }}
-            .release-artifacts/version-file.tar.gz
-          fail_on_unmatched_files: true
-          overwrite_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
