@@ -661,7 +661,7 @@ jobs:
 
           COPY release/requirements.txt ./
           COPY release/wheelhouse ./wheelhouse
-          RUN python -m pip install --no-cache-dir --no-index --find-links=/app/wheelhouse -r requirements.txt \
+          RUN python -m pip install --no-cache-dir --find-links=/app/wheelhouse -r requirements.txt \
               && rm -rf /app/wheelhouse
 
           COPY release/app ./app
