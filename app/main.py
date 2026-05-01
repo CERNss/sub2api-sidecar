@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import ACCESS_KEY_COOKIE_NAME, AuthSession, EphemeralAdminAuthManager
@@ -15,28 +16,43 @@ from app.clients.sub2api import Sub2APIClient, Sub2APIError
 from app.config import Settings, get_settings
 from app.errors import FlowNotFoundError, ProvisioningError
 from app.logging_config import setup_logging
+from app.models.flow import AssignmentMode, FlowStatus
 from app.models.schemas import (
     AutoRotationRunResponse,
     ErrorResponse,
     LoginRequest,
     LoginResponse,
     ManualRotationRequest,
+    OrchestrationApiKeyAssignRequest,
+    OrchestrationApiKeyResponse,
+    OrchestrationApiKeysEnvelope,
+    OrchestrationAssignRequest,
+    OrchestrationGroupResponse,
+    OrchestrationGroupsEnvelope,
+    OrchestrationUserResponse,
+    OrchestrationUsersEnvelope,
     ProvisionCompleteRequest,
+    ProvisionFlowDetailResponse,
+    ProvisionFlowsEnvelope,
     ProvisionStartRequest,
     RotationExecutionResponse,
     RotationPoolCandidateResponse,
     RotationPoolCandidatesEnvelope,
     RotationPoolGroupRequest,
 )
+from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.provisioning import ProvisioningService
-from app.services.rotation import RotationService
+from app.services.rotation import RotationExecutionResult, RotationService
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.stores.sqlite import SQLiteFlowStore
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
-templates = Jinja2Templates(directory="app/templates")
+APP_DIR = Path(__file__).resolve().parent
+UI_DIST_DIR = APP_DIR / "static" / "ui"
+UI_INDEX_FILE = UI_DIST_DIR / "index.html"
+APP_TITLE = "Sub2API OpenAI OAuth 编排服务"
 
 
 @asynccontextmanager
@@ -64,6 +80,9 @@ app = FastAPI(
     version="0.4.0",
     lifespan=lifespan,
 )
+
+if UI_DIST_DIR.exists():
+    app.mount("/ui-static", StaticFiles(directory=str(UI_DIST_DIR)), name="ui-static")
 
 
 @lru_cache(maxsize=1)
@@ -204,20 +223,35 @@ def clear_auth_cookie(response: JSONResponse) -> None:
     response.delete_cookie(key=ACCESS_KEY_COOKIE_NAME, path="/")
 
 
+def serve_react_app() -> Response:
+    if UI_INDEX_FILE.exists():
+        return FileResponse(UI_INDEX_FILE)
+
+    return HTMLResponse(
+        """
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sub2API UI</title>
+  </head>
+  <body>
+    <div id="root" data-ui-build="missing">
+      React frontend build is missing. Run `cd frontend && npm install && npm run build`.
+    </div>
+  </body>
+</html>
+        """.strip()
+    )
+
+
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request) -> HTMLResponse:
+def login_page(request: Request) -> Response:
     if get_optional_auth_session(request):
         return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
-    settings = get_settings()
-    return templates.TemplateResponse(
-        request=request,
-        name="login.html",
-        context={
-            "app_title": "Sub2API OpenAI OAuth 编排服务",
-            "auth_username": settings.app_auth_username,
-        },
-    )
+    return serve_react_app()
 
 
 @app.post("/auth/login")
@@ -252,26 +286,213 @@ def auth_logout(request: Request) -> JSONResponse:
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request) -> HTMLResponse:
+def index(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
         return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
 
+    return serve_react_app()
+
+
+@app.get("/ui/config")
+def ui_config(request: Request) -> dict[str, str | None]:
     settings = get_settings()
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={
-            "app_title": "Sub2API OpenAI OAuth 编排服务",
-            "current_user": session.username,
-            "oauth_redirect_uri": settings.openai_oauth_redirect_uri,
-        },
-    )
+    session = get_optional_auth_session(request)
+    return {
+        "app_title": APP_TITLE,
+        "auth_username": settings.app_auth_username,
+        "oauth_redirect_uri": settings.openai_oauth_redirect_uri,
+        "current_user": session.username if session else None,
+    }
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def rotation_execution_response(result: RotationExecutionResult) -> RotationExecutionResponse:
+    return RotationExecutionResponse(
+        user_id=result.user_id,
+        email=result.email,
+        source_group_id=result.source_group_id,
+        target_group_id=result.target_group_id,
+        trigger_type=result.trigger_type.value,
+        status=result.status.value,
+        reason=result.reason,
+        migrated_keys=result.migrated_keys,
+        usage_window=result.usage_window.value if result.usage_window else None,
+        usage_value=result.usage_value,
+        usage_snapshot=result.usage_snapshot,
+    )
+
+
+def group_response(candidate: dict[str, object]) -> OrchestrationGroupResponse:
+    unsupported_reason = candidate.get("unsupported_reason")
+    if unsupported_reason is None and candidate.get("rotation_supported") is False:
+        if candidate.get("is_subscription"):
+            unsupported_reason = "subscription groups require single-key updates"
+        elif candidate.get("is_exclusive") is False:
+            unsupported_reason = "group is not exclusive"
+    return OrchestrationGroupResponse(
+        group_id=candidate["id"],
+        name=str(candidate.get("name") or ""),
+        group_kind=candidate.get("group_kind") if candidate.get("group_kind") is not None else None,
+        platform=candidate.get("platform") if candidate.get("platform") is not None else None,
+        status=candidate.get("status") if candidate.get("status") is not None else None,
+        is_exclusive=bool(candidate.get("is_exclusive")),
+        is_subscription=bool(candidate.get("is_subscription")),
+        rotation_supported=bool(candidate.get("rotation_supported")),
+        unsupported_reason=str(unsupported_reason) if unsupported_reason else None,
+    )
+
+
+@app.get("/orchestration/users")
+def orchestration_users(
+    email: str | None = None,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    upstream_users = get_sub2api_client().list_users(email=email)
+    local_assignments = {
+        str(assignment.user_id): assignment
+        for assignment in get_flow_store().list_user_assignments()
+    }
+    items: list[OrchestrationUserResponse] = []
+    for user in upstream_users:
+        local_assignment = local_assignments.get(str(user["id"]))
+        current_group_id = user.get("current_group_id")
+        current_group_name = user.get("current_group_name")
+        items.append(
+            OrchestrationUserResponse(
+                user_id=user["id"],
+                email=str(user.get("email") or ""),
+                name=user.get("name") if user.get("name") is not None else None,
+                status=user.get("status") if user.get("status") is not None else None,
+                current_group_id=current_group_id,
+                current_group_name=current_group_name,
+                local_group_id=local_assignment.current_group_id if local_assignment else None,
+                local_group_name=local_assignment.current_group_name if local_assignment else None,
+                has_local_assignment=local_assignment is not None,
+            )
+        )
+    payload = OrchestrationUsersEnvelope(items=items, total=len(items))
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/orchestration/groups")
+def orchestration_groups(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
+    groups = get_sub2api_client().list_groups(
+        platform=get_settings().sub2api_provisioning_defaults.group_platform
+    )
+    items = [group_response(group) for group in groups]
+    payload = OrchestrationGroupsEnvelope(items=items, total=len(items))
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/orchestration/users/{user_id}/api-keys")
+def orchestration_user_api_keys(
+    user_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    response = get_sub2api_client().get_user_api_keys(user_id)
+    items = []
+    for item in response["items"]:
+        items.append(
+            OrchestrationApiKeyResponse(
+                key_id=item.get("id") or item.get("key_id"),
+                name=item.get("name"),
+                group_id=item.get("group_id") or item.get("current_group_id"),
+                group_name=item.get("group_name") or item.get("current_group_name"),
+                status=item.get("status"),
+                usage_5h=item.get("usage_5h"),
+                usage_1d=item.get("usage_1d"),
+                usage_7d=item.get("usage_7d"),
+            )
+        )
+    payload = OrchestrationApiKeysEnvelope(items=items, total=response["total"])
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.post("/orchestration/assignments/replace-group")
+def orchestration_replace_group(
+    payload: OrchestrationAssignRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_rotation_service().orchestrate_existing_assignment(
+        user_id=payload.user_id,
+        email=payload.email,
+        source_group_id=payload.source_group_id,
+        target_group_id=payload.target_group_id,
+        reason=payload.reason,
+    )
+    response = rotation_execution_response(result)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.post("/orchestration/api-keys/update-group")
+def orchestration_update_api_key_group(
+    payload: OrchestrationApiKeyAssignRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_rotation_service().orchestrate_existing_api_key(
+        user_id=payload.user_id,
+        email=payload.email,
+        key_id=payload.key_id,
+        source_group_id=payload.source_group_id,
+        target_group_id=payload.target_group_id,
+        reason=payload.reason,
+    )
+    response = rotation_execution_response(result)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/provision/flows")
+def provision_flows(
+    status_filter: FlowStatus | None = Query(default=None, alias="status"),
+    assignment_mode: AssignmentMode | None = None,
+    email: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    store = get_flow_store()
+    flows = store.list_flows(
+        status=status_filter,
+        assignment_mode=assignment_mode,
+        email=email,
+        limit=limit,
+        offset=offset,
+    )
+    total = store.count_flows(
+        status=status_filter,
+        assignment_mode=assignment_mode,
+        email=email,
+    )
+    payload = ProvisionFlowsEnvelope(
+        items=[flow_summary_response(flow) for flow in flows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/provision/flows/{flow_id}")
+def provision_flow_detail(
+    flow_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    store = get_flow_store()
+    flow = store.get_by_flow_id(flow_id)
+    if flow is None:
+        raise HTTPException(status_code=404, detail="Provisioning flow not found")
+
+    payload: ProvisionFlowDetailResponse = flow_detail_response(
+        flow,
+        oauth_redirect_uri=get_settings().openai_oauth_redirect_uri,
+        events=store.list_provision_events(flow_id),
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
 @app.post("/provision/start")
@@ -346,20 +567,8 @@ def rotation_manual(
         target_group_id=payload.target_group_id,
         reason=payload.reason,
     )
-    response = RotationExecutionResponse(
-        user_id=result.user_id,
-        email=result.email,
-        source_group_id=result.source_group_id,
-        target_group_id=result.target_group_id,
-        trigger_type=result.trigger_type.value,
-        status=result.status.value,
-        reason=result.reason,
-        migrated_keys=result.migrated_keys,
-        usage_window=result.usage_window.value if result.usage_window else None,
-        usage_value=result.usage_value,
-        usage_snapshot=result.usage_snapshot,
-    )
-    return JSONResponse(status_code=200, content=response.model_dump())
+    response = rotation_execution_response(result)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
 @app.post("/rotation/auto/run")

@@ -46,6 +46,118 @@ class ProvisionCompleteResponse(BaseModel):
     status: str
 
 
+class ProvisionFlowSummaryResponse(BaseModel):
+    flow_id: str
+    email: EmailStr
+    user_id: Any
+    group_id: Any
+    assignment_mode: str
+    status: str
+    account_name: str
+    oauth_account_id: Any | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProvisionEventResponse(BaseModel):
+    event_id: str
+    flow_id: str
+    event_type: str
+    status: str
+    message: str
+    details: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class ProvisionFlowDetailResponse(ProvisionFlowSummaryResponse):
+    success: bool = True
+    state: str
+    assignment_reason: str | None = None
+    oauth_url: str | None = None
+    oauth_redirect_uri: str
+    oauth_exchange_payload: dict[str, Any] | None = None
+    events: list[ProvisionEventResponse] = Field(default_factory=list)
+
+
+class ProvisionFlowsEnvelope(BaseModel):
+    success: bool = True
+    items: list[ProvisionFlowSummaryResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class OrchestrationUserResponse(BaseModel):
+    user_id: Any
+    email: str
+    name: str | None = None
+    status: str | None = None
+    current_group_id: Any | None = None
+    current_group_name: str | None = None
+    local_group_id: Any | None = None
+    local_group_name: str | None = None
+    has_local_assignment: bool = False
+
+
+class OrchestrationUsersEnvelope(BaseModel):
+    success: bool = True
+    items: list[OrchestrationUserResponse]
+    total: int
+
+
+class OrchestrationGroupResponse(BaseModel):
+    group_id: Any
+    name: str
+    group_kind: str | None = None
+    platform: str | None = None
+    status: str | None = None
+    is_exclusive: bool
+    is_subscription: bool = False
+    rotation_supported: bool = True
+    unsupported_reason: str | None = None
+
+
+class OrchestrationGroupsEnvelope(BaseModel):
+    success: bool = True
+    items: list[OrchestrationGroupResponse]
+    total: int
+
+
+class OrchestrationApiKeyResponse(BaseModel):
+    key_id: Any
+    name: str | None = None
+    group_id: Any | None = None
+    group_name: str | None = None
+    status: str | None = None
+    usage_5h: float | None = None
+    usage_1d: float | None = None
+    usage_7d: float | None = None
+
+
+class OrchestrationApiKeysEnvelope(BaseModel):
+    success: bool = True
+    items: list[OrchestrationApiKeyResponse]
+    total: int
+
+
+class OrchestrationAssignRequest(BaseModel):
+    user_id: Any
+    email: str = Field(..., min_length=1)
+    source_group_id: Any
+    target_group_id: Any
+    reason: str | None = None
+
+
+class OrchestrationApiKeyAssignRequest(BaseModel):
+    user_id: Any
+    email: str = Field(..., min_length=1)
+    key_id: Any
+    source_group_id: Any | None = None
+    target_group_id: Any
+    reason: str | None = None
+
+
 class RotationPoolGroupRequest(BaseModel):
     group_id: Any
     priority: int | None = Field(default=None, ge=0)

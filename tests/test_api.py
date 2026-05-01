@@ -54,6 +54,24 @@ class FakeResponse:
 
 class FakeRotationSub2API:
     def __init__(self) -> None:
+        self.users = [
+            {
+                "id": 101,
+                "email": "rotate@example.com",
+                "name": "rotate@example.com",
+                "status": "active",
+                "group_id": 11,
+                "group_name": "rotation-low",
+            },
+            {
+                "id": 202,
+                "email": "idle@example.com",
+                "name": "idle@example.com",
+                "status": "active",
+                "group_id": 22,
+                "group_name": "rotation-high",
+            },
+        ]
         self.groups = [
             {
                 "id": 11,
@@ -92,12 +110,15 @@ class FakeRotationSub2API:
         self.user_api_keys: dict[int, list[dict[str, object]]] = {}
         self.replace_calls: list[dict[str, object]] = []
         self.set_user_group_calls: list[dict[str, object]] = []
+        self.api_key_group_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
 
     def request(self, method: str, url: str, json=None, params=None, timeout=None):
         path = urlparse(url).path
         if method == "GET" and path == "/api/v1/admin/groups/all":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.groups})
+        if method == "GET" and path in {"/api/v1/admin/users/all", "/api/v1/admin/users"}:
+            return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
         if method == "POST" and path in {"/api/v1/admin/groups", "/api/admin/groups"}:
             self.create_group_calls += 1
             return FakeResponse(
@@ -190,6 +211,10 @@ class FakeRotationSub2API:
             )
         if method == "POST" and path == "/api/v1/admin/users/303/replace-group":
             return FakeResponse(500, {"message": "boom"})
+        if method == "PUT" and path.startswith("/api/v1/admin/api-keys/"):
+            key_id = path.split("/")[5]
+            self.api_key_group_calls.append({"key_id": key_id, "group_id": json["group_id"]})
+            return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "GET" and path == "/api/v1/admin/users/101/api-keys":
             return self._api_keys_response(101)
         if method == "GET" and path == "/api/v1/admin/users/202/api-keys":
@@ -208,7 +233,20 @@ class FakeRotationSub2API:
         return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
 
     def _api_keys_response(self, user_id: int) -> FakeResponse:
-        items = self.user_api_keys.get(user_id, [])
+        items = self.user_api_keys.get(
+            user_id,
+            [
+                {
+                    "id": f"key-{user_id}",
+                    "name": "primary",
+                    "group_id": 11,
+                    "group_name": "rotation-low",
+                    "usage_5h": 1.0,
+                    "usage_1d": 2.0,
+                    "usage_7d": 3.0,
+                }
+            ],
+        )
         return FakeResponse(
             200,
             {
@@ -327,13 +365,28 @@ def test_root_redirects_to_login_when_unauthenticated(client) -> None:
     assert response.headers["location"] == "/login"
 
 
-def test_login_page_contains_password_guidance(client) -> None:
+def test_login_page_serves_react_shell(client) -> None:
     response = client.get("/login")
 
     assert response.status_code == 200
-    assert "密码会在每次服务启动时重新生成" in response.text
-    assert "从服务启动日志里复制" in response.text
-    assert "localhost URL 粘贴回编排页" in response.text
+    assert 'id="root"' in response.text
+
+
+def test_ui_config_exposes_login_context_and_current_user(client) -> None:
+    response = client.get("/ui/config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["app_title"] == "Sub2API OpenAI OAuth 编排服务"
+    assert payload["auth_username"] == "admin"
+    assert payload["oauth_redirect_uri"] == EXPECTED_REDIRECT_URI
+    assert payload["current_user"] is None
+
+    login(client)
+    response = client.get("/ui/config")
+
+    assert response.status_code == 200
+    assert response.json()["current_user"] == "admin"
 
 
 def test_login_returns_access_key_and_sets_cookie(client) -> None:
@@ -472,6 +525,75 @@ def test_oauth_complete_uses_openai_oauth_account_defaults(client) -> None:
     assert callback_response.json()["status"] == "completed"
 
 
+def test_provision_flow_dashboard_requires_auth(client) -> None:
+    list_response = client.get("/provision/flows")
+    detail_response = client.get("/provision/flows/missing-flow")
+
+    assert list_response.status_code == 401
+    assert detail_response.status_code == 401
+
+
+def test_provision_flow_dashboard_lists_filters_details_events_and_redacts(client) -> None:
+    with patch.object(requests.Session, "request", new=fake_sub2api_request):
+        login(client)
+        pending_response = client.post(
+            "/provision/start", json={"email": "pending-dashboard@example.com"}
+        )
+        start_response = client.post(
+            "/provision/start", json={"email": "dashboard@example.com"}
+        )
+        state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={
+                "callback_url": (
+                    f"http://localhost:1455/callback?code=mock-code&state={state}"
+                )
+            },
+        )
+
+    assert pending_response.status_code == 200
+    assert start_response.status_code == 200
+    assert complete_response.status_code == 200
+
+    list_response = client.get("/provision/flows?status=completed&email=dashboard")
+    assert list_response.status_code == 200
+    list_payload = list_response.json()
+    assert list_payload["success"] is True
+    assert list_payload["total"] == 1
+    assert list_payload["items"][0]["flow_id"] == start_response.json()["flow_id"]
+    assert list_payload["items"][0]["status"] == "completed"
+    assert "oauth_exchange_payload" not in list_payload["items"][0]
+
+    pending_list = client.get("/provision/flows?status=pending_oauth&limit=1&offset=0")
+    assert pending_list.status_code == 200
+    assert pending_list.json()["total"] == 1
+    assert len(pending_list.json()["items"]) == 1
+    assert pending_list.json()["items"][0]["flow_id"] == pending_response.json()["flow_id"]
+
+    detail_response = client.get(f"/provision/flows/{start_response.json()['flow_id']}")
+    assert detail_response.status_code == 200
+    detail_payload = detail_response.json()
+    event_types = [event["event_type"] for event in detail_payload["events"]]
+    assert detail_payload["state"] == state
+    assert detail_payload["oauth_exchange_payload"]["access_token"] == "[redacted]"
+    assert detail_payload["oauth_exchange_payload"]["refresh_token"] == "[redacted]"
+    assert "start_requested" in event_types
+    assert "oauth_exchanged" in event_types
+    assert event_types[-1] == "completed"
+
+
+def test_provision_flow_dashboard_rejects_invalid_filter_and_missing_flow(client) -> None:
+    login(client)
+
+    invalid_filter = client.get("/provision/flows?status=not-a-status")
+    missing_flow = client.get("/provision/flows/not-found")
+
+    assert invalid_filter.status_code == 422
+    assert missing_flow.status_code == 404
+    assert missing_flow.json()["detail"] == "Provisioning flow not found"
+
+
 def test_provision_start_rejects_invalid_email(client) -> None:
     login(client)
     response = client.post("/provision/start", json={"email": "not-an-email"})
@@ -537,6 +659,150 @@ def test_rotation_pool_rejects_subscription_group(client) -> None:
 
     assert response.status_code == 400
     assert "Subscription groups cannot be added" in response.json()["detail"]
+
+
+def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        users_response = client.get("/orchestration/users?email=rotate")
+        groups_response = client.get("/orchestration/groups")
+        keys_response = client.get("/orchestration/users/101/api-keys")
+
+    assert users_response.status_code == 200
+    assert users_response.json()["total"] == 1
+    assert users_response.json()["items"][0]["user_id"] == 101
+    assert users_response.json()["items"][0]["current_group_id"] == 11
+    assert groups_response.status_code == 200
+    groups = {item["group_id"]: item for item in groups_response.json()["items"]}
+    assert groups[11]["rotation_supported"] is True
+    assert groups[44]["rotation_supported"] is False
+    assert keys_response.status_code == 200
+    assert keys_response.json()["items"][0]["key_id"] == "key-101"
+
+
+def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "source_group_id": 11,
+                "target_group_id": 22,
+                "reason": "rebalance",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "moved"
+    assert response.json()["migrated_keys"] == 2
+    assert backend.set_user_group_calls == []
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
+    ]
+    assignment = main.get_flow_store().get_user_assignment(101)
+    assert assignment is not None
+    assert assignment.current_group_id == 22
+
+
+def test_existing_user_group_orchestration_requires_direct_source_group(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "source_group_id": 22,
+                "target_group_id": 11,
+                "reason": "wrong source",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "direct current group" in response.json()["detail"]
+    assert backend.replace_calls == []
+    assert backend.set_user_group_calls == []
+
+
+def test_existing_user_group_orchestration_rejects_allowed_group_as_source(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 404,
+            "email": "allowed-only@example.com",
+            "name": "allowed-only@example.com",
+            "status": "active",
+            "allowed_groups": [11],
+        }
+    ]
+    now = datetime.now(timezone.utc)
+    main.get_flow_store().upsert_user_assignment(
+        UserGroupAssignment(
+            user_id=404,
+            email="allowed-only@example.com",
+            current_group_id=11,
+            current_group_name="rotation-low",
+            assignment_mode=AssignmentMode.managed_pool,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        users_response = client.get("/orchestration/users?email=allowed-only")
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 404,
+                "email": "allowed-only@example.com",
+                "source_group_id": 11,
+                "target_group_id": 22,
+                "reason": "allowed group is not direct current group",
+            },
+        )
+
+    assert users_response.status_code == 200
+    user_payload = users_response.json()["items"][0]
+    assert user_payload["current_group_id"] is None
+    assert user_payload["local_group_id"] == 11
+    assert response.status_code == 400
+    assert "direct current group" in response.json()["detail"]
+    assert backend.replace_calls == []
+    assert backend.set_user_group_calls == []
+
+
+def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/update-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "key_id": "key-101",
+                "source_group_id": 11,
+                "target_group_id": 22,
+                "reason": "single key move",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "moved"
+    assert response.json()["migrated_keys"] == 1
+    assert backend.replace_calls == []
+    assert backend.set_user_group_calls == []
+    assert backend.api_key_group_calls == [{"key_id": "key-101", "group_id": 22}]
 
 
 def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch) -> None:

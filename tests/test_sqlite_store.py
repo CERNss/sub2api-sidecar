@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.models.flow import FlowStatus, ProvisionFlow
+from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionEventStatus, ProvisionEventType, ProvisionFlow
 from app.models.rotation import RotationEvent, RotationPoolGroup, RotationResultStatus, RotationTrigger, UserGroupAssignment
 from app.stores.sqlite import SQLiteFlowStore
 
@@ -67,6 +67,46 @@ def test_sqlite_store_updates_persisted_flow(tmp_path: Path) -> None:
     assert persisted is not None
     assert persisted.status == FlowStatus.completed
     assert persisted.oauth_account_id == "oa-1"
+
+
+def test_sqlite_store_lists_flows_and_persists_provision_events(tmp_path: Path) -> None:
+    db_path = tmp_path / "dashboard.db"
+    store = SQLiteFlowStore(str(db_path))
+    first = build_flow()
+    second = build_flow().model_copy(
+        update={
+            "flow_id": "flow-2",
+            "state": "state-2",
+            "email": "other@example.com",
+            "status": FlowStatus.completed,
+            "assignment_mode": AssignmentMode.managed_pool,
+            "oauth_account_id": "oa-2",
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    store.save(first)
+    store.save(second)
+    store.save_provision_event(
+        ProvisionEvent(
+            flow_id="flow-2",
+            event_type=ProvisionEventType.completed,
+            status=ProvisionEventStatus.succeeded,
+            message="done",
+            details={"account_id": "oa-2"},
+        )
+    )
+
+    reloaded = SQLiteFlowStore(str(db_path))
+    completed = reloaded.list_flows(status=FlowStatus.completed)
+    managed_count = reloaded.count_flows(assignment_mode=AssignmentMode.managed_pool)
+    matching_email = reloaded.list_flows(email="other")
+    events = reloaded.list_provision_events("flow-2")
+
+    assert [flow.flow_id for flow in completed] == ["flow-2"]
+    assert managed_count == 1
+    assert [flow.flow_id for flow in matching_email] == ["flow-2"]
+    assert len(events) == 1
+    assert events[0].event_type == ProvisionEventType.completed
 
 
 def test_sqlite_store_persists_rotation_pool_assignments_and_events(tmp_path: Path) -> None:

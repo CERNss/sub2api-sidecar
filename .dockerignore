@@ -16,3 +16,6 @@ data
 .opencode
 openspec/changes/archive
 tests
+frontend/node_modules
+frontend/dist
+app/static/ui

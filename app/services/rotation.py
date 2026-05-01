@@ -132,6 +132,172 @@ class RotationService:
             reason=reason or "manual rotation request",
         )
 
+    def orchestrate_existing_assignment(
+        self,
+        *,
+        user_id: Any,
+        email: str,
+        source_group_id: Any,
+        target_group_id: Any,
+        reason: str | None = None,
+    ) -> RotationExecutionResult:
+        if source_group_id in (None, ""):
+            raise RotationTargetValidationError("Source group is required")
+        if target_group_id in (None, ""):
+            raise RotationTargetValidationError("Target group is required")
+
+        direct_group_id, direct_group_name = self._get_direct_user_group(user_id)
+        if direct_group_id in (None, ""):
+            raise RotationTargetValidationError(
+                "Selected user does not have a direct current group; source group cannot be inferred"
+            )
+        if self._normalize_key(source_group_id) != self._normalize_key(direct_group_id):
+            raise RotationTargetValidationError(
+                "Source group must match the selected user's direct current group"
+            )
+
+        target_group = self._get_upstream_group(target_group_id)
+        rotation_supported, unsupported_reason = self._rotation_support(target_group)
+        if not rotation_supported:
+            if target_group.get("is_subscription", False):
+                raise RotationTargetValidationError(
+                    "Subscription groups cannot be used as orchestration targets; replace-group supports only dedicated standard groups"
+                )
+            raise RotationTargetValidationError(
+                unsupported_reason or "Target group is not supported for orchestration"
+            )
+
+        now = datetime.now(timezone.utc)
+        existing = self.store.get_user_assignment(user_id)
+        assignment = UserGroupAssignment(
+            user_id=user_id,
+            email=email,
+            current_group_id=source_group_id,
+            current_group_name=direct_group_name or (existing.current_group_name if existing else None),
+            assignment_mode=AssignmentMode.managed_pool,
+            last_rotation_at=existing.last_rotation_at if existing else None,
+            last_decision_reason=existing.last_decision_reason if existing else None,
+            has_api_keys=existing.has_api_keys if existing else None,
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
+        )
+
+        request_reason = reason or "existing user/group orchestration"
+        if self._normalize_key(source_group_id) == self._normalize_key(target_group_id):
+            assignment.current_group_id = target_group_id
+            assignment.current_group_name = target_group["name"]
+            assignment.last_decision_reason = "Target group matches the current assignment"
+            assignment.updated_at = now
+            self.store.upsert_user_assignment(assignment)
+            return self._record_result(
+                assignment=assignment,
+                source_group_id=source_group_id,
+                target_group_id=target_group_id,
+                trigger_type=RotationTrigger.manual,
+                status=RotationResultStatus.skipped,
+                reason=assignment.last_decision_reason,
+            )
+
+        try:
+            response = self.sub2api_client.replace_exclusive_user_group(
+                user_id=user_id,
+                old_group_id=source_group_id,
+                new_group_id=target_group_id,
+            )
+        except Sub2APIError as exc:
+            logger.exception("Existing assignment orchestration failed for user_id=%s", user_id)
+            return self._record_result(
+                assignment=assignment,
+                source_group_id=source_group_id,
+                target_group_id=target_group_id,
+                trigger_type=RotationTrigger.manual,
+                status=RotationResultStatus.failed,
+                reason=f"Upstream replace-group failed: {exc}",
+            )
+
+        assignment.current_group_id = target_group_id
+        assignment.current_group_name = target_group["name"]
+        assignment.last_rotation_at = now
+        assignment.last_decision_reason = request_reason
+        assignment.updated_at = now
+        self.store.upsert_user_assignment(assignment)
+        return self._record_result(
+            assignment=assignment,
+            source_group_id=source_group_id,
+            target_group_id=target_group_id,
+            trigger_type=RotationTrigger.manual,
+            status=RotationResultStatus.moved,
+            reason=request_reason,
+            migrated_keys=int(response.get("migrated_keys") or 0),
+        )
+
+    def _get_direct_user_group(self, user_id: Any) -> tuple[Any | None, str | None]:
+        for user in self.sub2api_client.list_users():
+            if self._normalize_key(user.get("id")) == self._normalize_key(user_id):
+                return user.get("current_group_id"), user.get("current_group_name")
+        return None, None
+
+    def orchestrate_existing_api_key(
+        self,
+        *,
+        user_id: Any,
+        email: str,
+        key_id: Any,
+        source_group_id: Any | None,
+        target_group_id: Any,
+        reason: str | None = None,
+    ) -> RotationExecutionResult:
+        if key_id in (None, ""):
+            raise RotationTargetValidationError("API key is required")
+        if target_group_id in (None, ""):
+            raise RotationTargetValidationError("Target group is required")
+
+        target_group = self._get_upstream_group(target_group_id)
+        existing = self.store.get_user_assignment(user_id)
+        assignment = UserGroupAssignment(
+            user_id=user_id,
+            email=email,
+            current_group_id=source_group_id if source_group_id not in (None, "") else target_group_id,
+            current_group_name=existing.current_group_name if existing else None,
+            assignment_mode=AssignmentMode.managed_pool,
+            last_rotation_at=existing.last_rotation_at if existing else None,
+            last_decision_reason=existing.last_decision_reason if existing else None,
+            has_api_keys=True,
+            created_at=existing.created_at if existing else datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        try:
+            self.sub2api_client.update_api_key_group(
+                key_id=key_id,
+                group_id=target_group_id,
+            )
+        except Sub2APIError as exc:
+            logger.exception("API key group orchestration failed for key_id=%s", key_id)
+            return self._record_result(
+                assignment=assignment,
+                source_group_id=source_group_id,
+                target_group_id=target_group_id,
+                trigger_type=RotationTrigger.manual,
+                status=RotationResultStatus.failed,
+                reason=f"Upstream api-key group update failed: {exc}",
+            )
+
+        result = self._record_result(
+            assignment=assignment,
+            source_group_id=source_group_id,
+            target_group_id=target_group_id,
+            trigger_type=RotationTrigger.manual,
+            status=RotationResultStatus.moved,
+            reason=reason or "single API key group orchestration",
+            migrated_keys=1,
+            metadata={
+                "key_id": str(key_id),
+                "target_group_name": target_group["name"],
+            },
+        )
+        return result
+
     def run_auto_rotation(self, trigger_type: RotationTrigger = RotationTrigger.automatic_api) -> dict[str, Any]:
         if not self.settings.auto_rotation.enabled:
             raise RotationExecutionError("Automatic rotation is disabled")
@@ -224,6 +390,7 @@ class RotationService:
         usage_window: AutoRotationUsageWindow | None = None,
         usage_value: float | None = None,
         usage_snapshot: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> RotationExecutionResult:
         target_group = self.store.get_rotation_pool_group(target_group_id)
         if target_group is None or not target_group.is_exclusive:
@@ -348,6 +515,7 @@ class RotationService:
         usage_window: AutoRotationUsageWindow | None = None,
         usage_value: float | None = None,
         usage_snapshot: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> RotationExecutionResult:
         result = RotationExecutionResult(
             user_id=assignment.user_id,
@@ -362,6 +530,9 @@ class RotationService:
             usage_value=usage_value,
             usage_snapshot=usage_snapshot,
         )
+        event_metadata = {"migrated_keys": str(result.migrated_keys)}
+        if metadata:
+            event_metadata.update(metadata)
         event = RotationEvent(
             user_id=result.user_id,
             email=result.email,
@@ -373,7 +544,7 @@ class RotationService:
             usage_window=result.usage_window,
             usage_value=result.usage_value,
             usage_snapshot=result.usage_snapshot,
-            metadata={"migrated_keys": str(result.migrated_keys)},
+            metadata=event_metadata,
         )
         self.store.save_rotation_event(event)
         return result

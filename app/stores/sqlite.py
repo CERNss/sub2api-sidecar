@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from app.models.flow import FlowStatus, ProvisionFlow
+from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
 from app.models.rotation import RotationEvent, RotationPoolGroup, UserGroupAssignment
 from app.stores.base import FlowStore
 
@@ -88,8 +88,90 @@ class SQLiteFlowStore(FlowStore):
     def has_pending_flow_for_user(self, user_id: Any) -> bool:
         return self.get_pending_flow_by_user_id(user_id) is not None
 
+    def list_flows(
+        self,
+        *,
+        status: FlowStatus | None = None,
+        assignment_mode: AssignmentMode | None = None,
+        email: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ProvisionFlow]:
+        where_clause, params = self._flow_filter_clause(
+            status=status,
+            assignment_mode=assignment_mode,
+            email=email,
+        )
+        query = f"""
+            SELECT payload FROM provision_flows
+            {where_clause}
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ? OFFSET ?
+        """
+        return self._load_many_models(
+            query,
+            (*params, limit, offset),
+            ProvisionFlow,
+        )
+
+    def count_flows(
+        self,
+        *,
+        status: FlowStatus | None = None,
+        assignment_mode: AssignmentMode | None = None,
+        email: str | None = None,
+    ) -> int:
+        where_clause, params = self._flow_filter_clause(
+            status=status,
+            assignment_mode=assignment_mode,
+            email=email,
+        )
+        query = f"SELECT COUNT(*) AS total FROM provision_flows {where_clause}"
+        with self._connect() as connection:
+            row = connection.execute(query, params).fetchone()
+        return int(row["total"] if row else 0)
+
     def update(self, flow: ProvisionFlow) -> ProvisionFlow:
         return self.save(flow)
+
+    def save_provision_event(self, event: ProvisionEvent) -> ProvisionEvent:
+        payload = event.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO provision_events (
+                    event_id,
+                    flow_id,
+                    event_type,
+                    status,
+                    payload,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.flow_id,
+                    event.event_type.value,
+                    event.status.value,
+                    payload,
+                    event.created_at.isoformat(),
+                    event.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return event
+
+    def list_provision_events(self, flow_id: str) -> list[ProvisionEvent]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM provision_events
+            WHERE flow_id = ?
+            ORDER BY created_at ASC, event_id ASC
+            """,
+            (flow_id,),
+            ProvisionEvent,
+        )
 
     def upsert_rotation_pool_group(self, group: RotationPoolGroup) -> RotationPoolGroup:
         payload = group.model_dump_json()
@@ -304,6 +386,37 @@ class SQLiteFlowStore(FlowStore):
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS provision_events (
+                    event_id TEXT PRIMARY KEY,
+                    flow_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_provision_flows_list
+                ON provision_flows(status, assignment_mode, updated_at DESC, created_at DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_provision_flows_email
+                ON provision_flows(email)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_provision_events_flow
+                ON provision_events(flow_id, created_at ASC)
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS user_group_assignments (
                     user_id_key TEXT PRIMARY KEY,
                     email TEXT NOT NULL,
@@ -366,7 +479,7 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[ProvisionFlow] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[RotationEvent],
+        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[RotationEvent],
     ) -> Any:
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
@@ -378,11 +491,33 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[RotationPoolGroup] | type[UserGroupAssignment] | type[RotationEvent],
+        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[RotationEvent],
     ) -> list[Any]:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
         return [model_class.model_validate_json(row["payload"]) for row in rows]
+
+    def _flow_filter_clause(
+        self,
+        *,
+        status: FlowStatus | None,
+        assignment_mode: AssignmentMode | None,
+        email: str | None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status.value)
+        if assignment_mode is not None:
+            clauses.append("assignment_mode = ?")
+            params.append(assignment_mode.value)
+        if email:
+            clauses.append("LOWER(email) LIKE ?")
+            params.append(f"%{email.lower()}%")
+        if not clauses:
+            return "", ()
+        return "WHERE " + " AND ".join(clauses), tuple(params)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, uri=self._use_uri)

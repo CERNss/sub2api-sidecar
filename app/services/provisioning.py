@@ -15,7 +15,14 @@ from app.errors import (
     InvalidOAuthStateError,
     RotationPoolEmptyError,
 )
-from app.models.flow import AssignmentMode, FlowStatus, ProvisionFlow
+from app.models.flow import (
+    AssignmentMode,
+    FlowStatus,
+    ProvisionEvent,
+    ProvisionEventStatus,
+    ProvisionEventType,
+    ProvisionFlow,
+)
 from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
 from app.services.rotation import RotationService
 from app.stores.base import FlowStore
@@ -49,14 +56,66 @@ class ProvisioningService:
         logger.info("Starting provisioning flow for email=%s", email)
         flow_id = str(uuid.uuid4())
         state = secrets.token_urlsafe(24)
-        user = self.sub2api_client.create_user(email=email, password=self.default_user_password)
-        group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(email)
-        self.sub2api_client.set_user_group(user_id=user["id"], group_id=group_id)
-        oauth = self.sub2api_client.generate_openai_auth_url(
-            email=email,
-            state=state,
-            redirect_uri=self.openai_oauth_redirect_uri,
+        self._record_event(
+            flow_id=flow_id,
+            event_type=ProvisionEventType.start_requested,
+            status=ProvisionEventStatus.info,
+            message="Provisioning flow requested",
+            details={"email": email},
         )
+        try:
+            user = self.sub2api_client.create_user(
+                email=email,
+                password=self.default_user_password,
+            )
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.user_created,
+                status=ProvisionEventStatus.succeeded,
+                message="Sub2API user created",
+                details={"user_id": user["id"], "email": email},
+            )
+            group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(email)
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.group_resolved,
+                status=ProvisionEventStatus.succeeded,
+                message="Target group assignment resolved",
+                details={
+                    "group_id": group_id,
+                    "assignment_mode": assignment_mode.value,
+                    "reason": assignment_reason,
+                },
+            )
+            self.sub2api_client.set_user_group(user_id=user["id"], group_id=group_id)
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.user_bound,
+                status=ProvisionEventStatus.succeeded,
+                message="User bound to target group",
+                details={"user_id": user["id"], "group_id": group_id},
+            )
+            oauth = self.sub2api_client.generate_openai_auth_url(
+                email=email,
+                state=state,
+                redirect_uri=self.openai_oauth_redirect_uri,
+            )
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.oauth_url_generated,
+                status=ProvisionEventStatus.succeeded,
+                message="OpenAI OAuth handoff URL generated",
+                details={"redirect_uri": self.openai_oauth_redirect_uri},
+            )
+        except Exception as exc:
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.failed,
+                status=ProvisionEventStatus.failed,
+                message="Provisioning flow failed during start",
+                details={"error": str(exc)},
+            )
+            raise
 
         flow = ProvisionFlow(
             flow_id=flow_id,
@@ -71,6 +130,13 @@ class ProvisioningService:
             oauth_url=oauth["url"],
         )
         self.flow_store.save(flow)
+        self._record_event(
+            flow_id=flow_id,
+            event_type=ProvisionEventType.pending_oauth,
+            status=ProvisionEventStatus.info,
+            message="Provisioning flow is pending OAuth callback",
+            details={"state": state},
+        )
         logger.info(
             "Provisioning flow created | flow_id=%s | user_id=%s | group_id=%s",
             flow_id,
@@ -109,19 +175,50 @@ class ProvisioningService:
 
         logger.info("Completing OAuth flow | flow_id=%s | email=%s", flow.flow_id, flow.email)
         try:
+            self._record_event(
+                flow_id=flow.flow_id,
+                event_type=ProvisionEventType.callback_parsed,
+                status=ProvisionEventStatus.succeeded,
+                message="OAuth callback parsed",
+                details={"state": state},
+            )
             exchange = self.sub2api_client.exchange_openai_code(
                 code=code,
                 state=state,
                 redirect_uri=self.openai_oauth_redirect_uri,
+            )
+            self._record_event(
+                flow_id=flow.flow_id,
+                event_type=ProvisionEventType.oauth_exchanged,
+                status=ProvisionEventStatus.succeeded,
+                message="OAuth code exchanged",
+                details={
+                    "provider_user_id": exchange["exchange"].get("provider_user_id"),
+                    "received_token_payload": True,
+                },
             )
             account = self.sub2api_client.create_openai_account_from_oauth(
                 name=flow.email,
                 oauth_payload=exchange["exchange"],
                 group_id=flow.group_id,
             )
+            self._record_event(
+                flow_id=flow.flow_id,
+                event_type=ProvisionEventType.account_created,
+                status=ProvisionEventStatus.succeeded,
+                message="OpenAI OAuth account created",
+                details={"account_id": account["id"], "group_id": flow.group_id},
+            )
             self.sub2api_client.bind_account_to_group(
                 account_id=account["id"],
                 group_id=flow.group_id,
+            )
+            self._record_event(
+                flow_id=flow.flow_id,
+                event_type=ProvisionEventType.account_bound,
+                status=ProvisionEventStatus.succeeded,
+                message="OpenAI OAuth account bound to group",
+                details={"account_id": account["id"], "group_id": flow.group_id},
             )
         except Exception as exc:
             logger.exception("OAuth completion failed | flow_id=%s", flow.flow_id)
@@ -129,6 +226,13 @@ class ProvisioningService:
             flow.error_message = str(exc)
             flow.updated_at = datetime.now(timezone.utc)
             self.flow_store.update(flow)
+            self._record_event(
+                flow_id=flow.flow_id,
+                event_type=ProvisionEventType.failed,
+                status=ProvisionEventStatus.failed,
+                message="OAuth completion failed",
+                details={"error": str(exc)},
+            )
             raise
 
         flow.status = FlowStatus.completed
@@ -137,6 +241,13 @@ class ProvisioningService:
         flow.error_message = None
         flow.updated_at = datetime.now(timezone.utc)
         self.flow_store.update(flow)
+        self._record_event(
+            flow_id=flow.flow_id,
+            event_type=ProvisionEventType.completed,
+            status=ProvisionEventStatus.succeeded,
+            message="Provisioning flow completed",
+            details={"oauth_account_id": account["id"], "group_id": flow.group_id},
+        )
         self.rotation_service.sync_assignment_after_provision(
             user_id=flow.user_id,
             email=flow.email,
@@ -179,6 +290,13 @@ class ProvisioningService:
         flow.error_message = message
         flow.updated_at = datetime.now(timezone.utc)
         self.flow_store.update(flow)
+        self._record_event(
+            flow_id=flow.flow_id,
+            event_type=ProvisionEventType.failed,
+            status=ProvisionEventStatus.failed,
+            message="Provisioning flow marked failed",
+            details={"error": message},
+        )
         return flow
 
     def _build_group_name(self, email: str) -> str:
@@ -208,3 +326,21 @@ class ProvisioningService:
         if not values:
             return None
         return values[0]
+
+    def _record_event(
+        self,
+        *,
+        flow_id: str,
+        event_type: ProvisionEventType,
+        status: ProvisionEventStatus,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> ProvisionEvent:
+        event = ProvisionEvent(
+            flow_id=flow_id,
+            event_type=event_type,
+            status=status,
+            message=message,
+            details=details,
+        )
+        return self.flow_store.save_provision_event(event)

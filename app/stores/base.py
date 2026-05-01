@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from app.models.flow import ProvisionFlow
+from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
 
 
 class FlowStore(ABC):
@@ -21,5 +21,35 @@ class FlowStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_flows(
+        self,
+        *,
+        status: FlowStatus | None = None,
+        assignment_mode: AssignmentMode | None = None,
+        email: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ProvisionFlow]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def count_flows(
+        self,
+        *,
+        status: FlowStatus | None = None,
+        assignment_mode: AssignmentMode | None = None,
+        email: str | None = None,
+    ) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
     def update(self, flow: ProvisionFlow) -> ProvisionFlow:
+        raise NotImplementedError
+
+    @abstractmethod
+    def save_provision_event(self, event: ProvisionEvent) -> ProvisionEvent:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_provision_events(self, flow_id: str) -> list[ProvisionEvent]:
         raise NotImplementedError

@@ -1,3 +1,17 @@
+FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /build
+
+COPY frontend/package*.json ./frontend/
+
+WORKDIR /build/frontend
+
+RUN npm ci
+
+COPY frontend ./
+
+RUN npm run build
+
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,6 +25,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY --from=frontend-builder /build/app/static/ui ./app/static/ui
 COPY config.example.yaml ./
 COPY README.md ./
 

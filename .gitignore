@@ -1,5 +1,10 @@
 # Ignore hidden files and directories by default.
 .*
+!.codex/
+!.codex/skills/
+.codex/skills/*
+!.codex/skills/staged-release-cicd/
+!.codex/skills/staged-release-cicd/**
 !.github/
 !.github/**
 !.gitignore
@@ -18,3 +23,8 @@ config.yaml
 .pytest_cache/
 data/
 *.db
+node_modules/
+frontend/node_modules/
+frontend/dist/
+app/static/ui/
+*.tsbuildinfo

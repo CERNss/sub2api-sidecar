@@ -50,6 +50,14 @@ class Sub2APIClient:
         "/admin/groups/all",
         "/admin/groups",
     )
+    LIST_USERS_PATHS = (
+        "/api/v1/admin/users/all",
+        "/api/v1/admin/users",
+        "/api/admin/users/all",
+        "/api/admin/users",
+        "/admin/users/all",
+        "/admin/users",
+    )
     USER_API_KEYS_PATHS = ("/api/v1/admin/users/{user_id}/api-keys",)
     USAGE_STATS_PATHS = ("/api/v1/admin/usage/stats",)
     GENERATE_OPENAI_AUTH_URL_PATHS = (
@@ -193,6 +201,29 @@ class Sub2APIClient:
             try:
                 data = self._request("GET", path, params=params)
                 return self._parse_group_list(data)
+            except Sub2APIError as exc:
+                last_error = exc
+                if exc.status_code == 404:
+                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
+                    continue
+                raise
+        raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
+
+    def list_users(self, email: str | None = None) -> list[dict[str, Any]]:
+        last_error: Sub2APIError | None = None
+        params = {"email": email} if email else None
+        for path in self.LIST_USERS_PATHS:
+            try:
+                data = self._request("GET", path, params=params)
+                users = self._parse_user_list(data)
+                if email:
+                    needle = email.lower()
+                    users = [
+                        user
+                        for user in users
+                        if needle in str(user.get("email") or "").lower()
+                    ]
+                return users
             except Sub2APIError as exc:
                 last_error = exc
                 if exc.status_code == 404:
@@ -385,6 +416,61 @@ class Sub2APIClient:
                 }
             )
         return groups
+
+    def _parse_user_list(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        body = self._unwrap_data(payload)
+        if isinstance(body, list):
+            raw_users = body
+        elif isinstance(body, dict) and isinstance(body.get("items"), list):
+            raw_users = body["items"]
+        elif isinstance(body, dict) and isinstance(body.get("users"), list):
+            raw_users = body["users"]
+        else:
+            raise Sub2APIError("Unable to parse user list from Sub2API response")
+
+        users: list[dict[str, Any]] = []
+        for item in raw_users:
+            if not isinstance(item, dict):
+                continue
+            current_group_id, current_group_name = self._extract_user_current_group(item)
+            users.append(
+                {
+                    "id": self._extract_id(item, "id", "user_id"),
+                    "email": str(
+                        item.get("email")
+                        or item.get("username")
+                        or item.get("name")
+                        or ""
+                    ),
+                    "name": item.get("name") or item.get("username") or item.get("email"),
+                    "status": item.get("status"),
+                    "current_group_id": current_group_id,
+                    "current_group_name": current_group_name,
+                    "raw": item,
+                }
+            )
+        return users
+
+    def _extract_user_current_group(self, item: dict[str, Any]) -> tuple[Any | None, str | None]:
+        for field_name in ("group_id", "current_group_id", "default_group_id"):
+            value = item.get(field_name)
+            if value not in (None, ""):
+                return value, self._extract_user_group_name(item)
+
+        group = item.get("group") or item.get("current_group")
+        if isinstance(group, dict):
+            group_id = group.get("id") or group.get("group_id")
+            if group_id not in (None, ""):
+                return group_id, group.get("name") or group.get("group_name")
+
+        return None, self._extract_user_group_name(item)
+
+    def _extract_user_group_name(self, item: dict[str, Any]) -> str | None:
+        for field_name in ("group_name", "current_group_name", "default_group_name"):
+            value = item.get(field_name)
+            if value not in (None, ""):
+                return str(value)
+        return None
 
     def _extract_group_kind(self, item: dict[str, Any]) -> str | None:
         for field_name in ("group_kind", "group_type", "type", "kind", "mode"):
