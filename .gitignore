@@ -1,10 +1,5 @@
 # Ignore hidden files and directories by default.
 .*
-!.codex/
-!.codex/skills/
-.codex/skills/*
-!.codex/skills/staged-release-cicd/
-!.codex/skills/staged-release-cicd/**
 !.github/
 !.github/**
 !.gitignore

@@ -1,45 +1,21 @@
-# openai-oauth-provisioning Specification
-
 ## MODIFIED Requirements
 
 ### Requirement: Start provisioning flow from email
-The system SHALL expose a `POST /provision/start` endpoint that accepts an email address, validates it, resolves the target Sub2API group assignment for the user, provisions the required Sub2API resources, persists flow context, and returns the pending OAuth handoff details.
+The system SHALL expose a `POST /provision/start` endpoint that accepts an external OAuth account email, validates it, provisions the required Sub2API group resource, persists flow context, and returns the pending OAuth handoff details. The submitted email MUST NOT be treated as a Sub2API user-system email.
 
-#### Scenario: Dedicated mode creates a pending OAuth flow
-- **GIVEN** the client submits a valid email address to `POST /provision/start`
-- **AND** the configured provisioning assignment mode is `dedicated`
+#### Scenario: Valid external email creates a pending OAuth flow
+- **GIVEN** the client submits a valid external OAuth account email address to `POST /provision/start`
 - **WHEN** the system starts a provisioning flow
 - **THEN** the system creates a dedicated group whose name is derived from the configured group prefix and the submitted email
 - **THEN** the dedicated group creation request includes the configured OpenAI platform value
-- **THEN** the system creates a user for the submitted email through the Sub2API admin API
-- **THEN** the system binds that user to the dedicated group
+- **THEN** the system does not create a Sub2API user for the submitted email
+- **THEN** the system does not bind a Sub2API user to the dedicated group
 - **THEN** the system generates an OpenAI OAuth login URL through the Sub2API admin API using the configured OAuth provider redirect URI
-- **THEN** the system stores a flow record containing `flow_id`, `email`, `user_id`, `group_id`, `state`, `assignment_mode=dedicated`, and `status=pending_oauth`
-- **THEN** the response includes `success=true`, `flow_id`, `email`, `user_id`, `group_id`, `account_name`, `oauth_url`, and the configured OAuth provider redirect URI
+- **THEN** the system stores a flow record containing `flow_id`, `email`, `group_id`, `state`, and `status=pending_oauth`
+- **THEN** the flow record does not require `user_id`
+- **THEN** the response includes `success=true`, `flow_id`, `email`, `group_id`, `account_name`, `oauth_url`, and the configured OAuth provider redirect URI
+- **THEN** the response does not require `user_id`
 - **THEN** `account_name` equals the submitted email value
-
-#### Scenario: Managed-pool mode assigns a pending OAuth flow to an existing dedicated rotation group
-- **GIVEN** the client submits a valid email address to `POST /provision/start`
-- **AND** the configured provisioning assignment mode is `managed_pool`
-- **AND** at least one dedicated rotation-target group has been selected into the local rotation pool
-- **WHEN** the system starts a provisioning flow
-- **THEN** the system selects a target group from the persisted dedicated rotation-group pool using the current assignment policy
-- **THEN** the selected target group belongs to the configured dedicated rotation pool and is not a public group
-- **THEN** the system does not create a new dedicated group for the flow
-- **THEN** the system creates a user for the submitted email through the Sub2API admin API
-- **THEN** the system binds that user to the selected dedicated rotation group
-- **THEN** the system generates an OpenAI OAuth login URL through the Sub2API admin API using the configured OAuth provider redirect URI
-- **THEN** the system stores a flow record containing `flow_id`, `email`, `user_id`, `group_id`, `state`, `assignment_mode=managed_pool`, and `status=pending_oauth`
-- **THEN** the response includes the selected `group_id` instead of a newly created dedicated group id
-- **THEN** `account_name` equals the submitted email value
-
-#### Scenario: Managed-pool mode rejects provisioning when no rotation target is available
-- **GIVEN** the client submits a valid email address to `POST /provision/start`
-- **AND** the configured provisioning assignment mode is `managed_pool`
-- **AND** the local dedicated rotation pool is empty
-- **WHEN** the system starts a provisioning flow
-- **THEN** the system returns an error response indicating that no dedicated rotation target is available
-- **THEN** the system does not create a user, group, or flow record
 
 #### Scenario: Invalid email is rejected before provisioning
 - **GIVEN** the client submits an invalid email address to `POST /provision/start`
@@ -47,8 +23,14 @@ The system SHALL expose a `POST /provision/start` endpoint that accepts an email
 - **THEN** the system rejects the request with a client error response
 - **THEN** the system does not create a group, user, or flow record
 
+#### Scenario: External email is not reconciled with the Sub2API user system
+- **GIVEN** the submitted email matches or does not match an existing Sub2API user
+- **WHEN** the system starts a provisioning flow
+- **THEN** the system does not look up, create, or mutate a Sub2API user because of that email
+- **THEN** the provisioning flow remains scoped to the dedicated group and future OAuth account
+
 ### Requirement: Complete OAuth using stored flow context
-The system SHALL complete OpenAI OAuth from the stored flow context by accepting a pasted localhost callback URL, and MUST use the original entry email as the OpenAI OAuth account name and the group assignment recorded on the flow instead of recalculating the target group during callback handling.
+The system SHALL complete OpenAI OAuth from the stored flow context by accepting a pasted localhost callback URL, and MUST use the original external email as the OpenAI OAuth account name instead of any email returned by the OAuth provider.
 
 #### Scenario: Pasted callback URL completes a previously started flow
 - **GIVEN** a provisioning flow exists in `pending_oauth` status for a generated `state` value
@@ -62,8 +44,9 @@ The system SHALL complete OpenAI OAuth from the stored flow context by accepting
 - **THEN** the account creation request enables the configured temporary-unschedulable switch
 - **THEN** the account creation request includes the configured temporary-unschedulable rules
 - **THEN** the account creation request sets the configured workspace mode for context-pool scheduling
-- **THEN** the account creation request targets the group recorded on the flow at provisioning start
+- **THEN** the account creation request targets the dedicated group created for the flow
 - **THEN** the system binds the created OAuth account to `flow.group_id`
+- **THEN** the system does not create, look up, bind, or mutate a Sub2API user during OAuth completion
 - **THEN** the system updates the flow status to `completed`
 - **THEN** the response returns a success payload describing the completed flow
 
@@ -84,3 +67,25 @@ The system SHALL complete OpenAI OAuth from the stored flow context by accepting
 - **WHEN** the application process restarts and the user later submits the pasted localhost callback URL
 - **THEN** the system loads the persisted flow from SQLite
 - **THEN** the system completes the OAuth binding workflow without requiring the flow to remain in memory
+
+### Requirement: Provide a minimal manual OAuth handoff page
+The system SHALL protect the operator browser experience with ephemeral admin authentication and SHALL reveal the provisioning page at `GET /` only after successful login.
+
+#### Scenario: Unauthenticated browser is redirected to the login page
+- **GIVEN** a user opens `GET /` without a valid admin session
+- **WHEN** the request is handled
+- **THEN** the system redirects the browser to `GET /login`
+- **THEN** the login page explains that the username is fixed
+- **THEN** the login page explains that the password is generated on each startup and must be copied from the service logs
+
+#### Scenario: Authenticated browser can complete the flow from the provisioning page
+- **GIVEN** the operator has a valid admin session
+- **WHEN** the operator opens `GET /`
+- **THEN** the page displays an email input field for the external OAuth account email
+- **THEN** submitting the email sends a request to `POST /provision/start`
+- **THEN** a successful response is rendered back to the page for review without requiring a Sub2API user id
+- **THEN** the page reveals a link or button that opens the returned OAuth URL
+- **THEN** the page shows where the OAuth provider redirect will land
+- **THEN** the page provides a textarea or input for pasting the final localhost callback URL
+- **THEN** submitting the pasted callback URL sends a request to `POST /provision/oauth/complete`
+- **THEN** the page provides a way to log out without restarting the service

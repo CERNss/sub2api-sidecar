@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
-from app.models.rotation import RotationEvent, RotationPoolGroup, UserGroupAssignment
+from app.models.rotation import (
+    AutoRotationRuntimeConfig,
+    RotationEvent,
+    RotationPoolGroup,
+    RotationPoolKind,
+    UserGroupAssignment,
+)
 from app.stores.base import FlowStore
 
 
@@ -179,6 +185,7 @@ class SQLiteFlowStore(FlowStore):
             connection.execute(
                 """
                 INSERT INTO rotation_pool_groups (
+                    pool_kind,
                     group_id_key,
                     priority,
                     group_name,
@@ -186,8 +193,8 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(group_id_key) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pool_kind, group_id_key) DO UPDATE SET
                     priority = excluded.priority,
                     group_name = excluded.group_name,
                     is_exclusive = excluded.is_exclusive,
@@ -195,6 +202,7 @@ class SQLiteFlowStore(FlowStore):
                     updated_at = excluded.updated_at
                 """,
                 (
+                    group.pool_kind.value,
                     self._serialize_key(group.group_id),
                     group.priority,
                     group.group_name,
@@ -207,37 +215,95 @@ class SQLiteFlowStore(FlowStore):
             connection.commit()
         return group
 
-    def get_rotation_pool_group(self, group_id: Any) -> RotationPoolGroup | None:
+    def get_rotation_pool_group(
+        self,
+        group_id: Any,
+        pool_kind: RotationPoolKind = RotationPoolKind.rotation,
+    ) -> RotationPoolGroup | None:
         return self._load_single_model(
             """
             SELECT payload FROM rotation_pool_groups
-            WHERE group_id_key = ?
+            WHERE pool_kind = ? AND group_id_key = ?
             """,
-            (self._serialize_key(group_id),),
+            (pool_kind.value, self._serialize_rotation_pool_group_id_key(group_id)),
             RotationPoolGroup,
         )
 
-    def list_rotation_pool_groups(self) -> list[RotationPoolGroup]:
+    def list_rotation_pool_groups(
+        self,
+        pool_kind: RotationPoolKind = RotationPoolKind.rotation,
+    ) -> list[RotationPoolGroup]:
         return self._load_many_models(
             """
             SELECT payload FROM rotation_pool_groups
+            WHERE pool_kind = ?
             ORDER BY priority ASC, created_at ASC
             """,
-            (),
+            (pool_kind.value,),
             RotationPoolGroup,
         )
 
-    def get_default_rotation_pool_group(self) -> RotationPoolGroup | None:
-        groups = self.list_rotation_pool_groups()
+    def get_default_rotation_pool_group(
+        self,
+        pool_kind: RotationPoolKind = RotationPoolKind.rotation,
+    ) -> RotationPoolGroup | None:
+        groups = self.list_rotation_pool_groups(pool_kind)
         return groups[0] if groups else None
 
-    def delete_rotation_pool_group(self, group_id: Any) -> None:
+    def delete_rotation_pool_group(
+        self,
+        group_id: Any,
+        pool_kind: RotationPoolKind = RotationPoolKind.rotation,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
-                "DELETE FROM rotation_pool_groups WHERE group_id_key = ?",
-                (self._serialize_key(group_id),),
+                "DELETE FROM rotation_pool_groups WHERE pool_kind = ? AND group_id_key = ?",
+                (pool_kind.value, self._serialize_rotation_pool_group_id_key(group_id)),
             )
             connection.commit()
+
+    def get_auto_rotation_config(self) -> AutoRotationRuntimeConfig | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM auto_rotation_config
+            WHERE config_key = 'default'
+            """,
+            (),
+            AutoRotationRuntimeConfig,
+        )
+
+    def save_auto_rotation_config(
+        self,
+        config: AutoRotationRuntimeConfig,
+    ) -> AutoRotationRuntimeConfig:
+        payload = config.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO auto_rotation_config (
+                    config_key,
+                    enabled,
+                    usage_window,
+                    payload,
+                    created_at,
+                    updated_at
+                ) VALUES ('default', ?, ?, ?, ?, ?)
+                ON CONFLICT(config_key) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    usage_window = excluded.usage_window,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    1 if config.enabled else 0,
+                    config.usage_window.value,
+                    payload,
+                    config.created_at.isoformat(),
+                    config.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return config
 
     def upsert_user_assignment(self, assignment: UserGroupAssignment) -> UserGroupAssignment:
         payload = assignment.model_dump_json()
@@ -374,16 +440,19 @@ class SQLiteFlowStore(FlowStore):
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS rotation_pool_groups (
-                    group_id_key TEXT PRIMARY KEY,
+                    pool_kind TEXT NOT NULL DEFAULT 'rotation',
+                    group_id_key TEXT NOT NULL,
                     priority INTEGER NOT NULL,
                     group_name TEXT NOT NULL,
                     is_exclusive INTEGER NOT NULL,
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (pool_kind, group_id_key)
                 )
                 """
             )
+            self._migrate_rotation_pool_groups_schema(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS provision_events (
@@ -432,6 +501,18 @@ class SQLiteFlowStore(FlowStore):
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS auto_rotation_config (
+                    config_key TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL,
+                    usage_window TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS rotation_events (
                     event_id TEXT PRIMARY KEY,
                     user_id_key TEXT NOT NULL,
@@ -472,6 +553,64 @@ class SQLiteFlowStore(FlowStore):
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
         )
 
+    def _migrate_rotation_pool_groups_schema(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("PRAGMA table_info(rotation_pool_groups)").fetchall()
+        columns = {row["name"] for row in rows}
+        primary_key_columns = {row["name"] for row in rows if row["pk"]}
+        if "pool_kind" in columns and primary_key_columns == {"pool_kind", "group_id_key"}:
+            return
+
+        connection.execute("ALTER TABLE rotation_pool_groups RENAME TO rotation_pool_groups_legacy")
+        connection.execute(
+            """
+            CREATE TABLE rotation_pool_groups (
+                pool_kind TEXT NOT NULL DEFAULT 'rotation',
+                group_id_key TEXT NOT NULL,
+                priority INTEGER NOT NULL,
+                group_name TEXT NOT NULL,
+                is_exclusive INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (pool_kind, group_id_key)
+            )
+            """
+        )
+        legacy_rows = connection.execute(
+            """
+            SELECT group_id_key, priority, group_name, is_exclusive, payload, created_at, updated_at
+            FROM rotation_pool_groups_legacy
+            """
+        ).fetchall()
+        for row in legacy_rows:
+            group = RotationPoolGroup.model_validate_json(row["payload"])
+            group.pool_kind = RotationPoolKind.rotation
+            connection.execute(
+                """
+                INSERT INTO rotation_pool_groups (
+                    pool_kind,
+                    group_id_key,
+                    priority,
+                    group_name,
+                    is_exclusive,
+                    payload,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    RotationPoolKind.rotation.value,
+                    row["group_id_key"],
+                    row["priority"],
+                    row["group_name"],
+                    row["is_exclusive"],
+                    group.model_dump_json(),
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
+        connection.execute("DROP TABLE rotation_pool_groups_legacy")
+
     def _load_single_flow(self, query: str, params: tuple[Any, ...]) -> ProvisionFlow | None:
         return self._load_single_model(query, params, ProvisionFlow)
 
@@ -479,7 +618,7 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[RotationEvent],
+        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent],
     ) -> Any:
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
@@ -491,7 +630,7 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[RotationEvent],
+        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent],
     ) -> list[Any]:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
@@ -526,6 +665,9 @@ class SQLiteFlowStore(FlowStore):
 
     def _serialize_key(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+    def _serialize_rotation_pool_group_id_key(self, value: Any) -> str:
+        return self._serialize_key(str(value))
 
     def _serialize_optional_bool(self, value: bool | None) -> int | None:
         if value is None:

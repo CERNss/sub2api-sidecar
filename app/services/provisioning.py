@@ -23,6 +23,7 @@ from app.models.flow import (
     ProvisionEventType,
     ProvisionFlow,
 )
+from app.models.rotation import RotationPoolKind
 from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
 from app.services.rotation import RotationService
 from app.stores.base import FlowStore
@@ -310,10 +311,10 @@ class ProvisioningService:
             group = self.sub2api_client.create_group(group_name)
             return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
 
-        default_group = self.rotation_store.get_default_rotation_pool_group()
+        default_group = self.rotation_store.get_default_rotation_pool_group(RotationPoolKind.landing)
         if default_group is None:
             raise RotationPoolEmptyError(
-                "Managed-pool provisioning is enabled but no rotation pool group is available"
+                "Managed-pool provisioning is enabled but no landing pool group is available"
             )
         return (
             default_group.group_id,

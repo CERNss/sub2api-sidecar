@@ -1,22 +1,27 @@
 import {
   ClipboardCheck,
+  EyeOff,
   ExternalLink,
   Eye,
   ListChecks,
+  LockKeyhole,
+  LogIn,
   LoaderCircle,
   LogOut,
   Play,
   Plus,
   RefreshCw,
   Search,
-  ShieldCheck
+  TimerReset,
+  UserRound
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button as AntButton,
   Card,
+  Checkbox,
   Descriptions,
   Drawer,
   Empty,
@@ -31,25 +36,27 @@ import {
 } from "antd";
 import {
   ApiOutlined,
+  ArrowDownOutlined,
   BranchesOutlined,
   ClusterOutlined,
   KeyOutlined,
   NodeIndexOutlined,
   ReloadOutlined,
   SendOutlined,
+  SyncOutlined,
   UserOutlined
 } from "@ant-design/icons";
 import {
   Background,
   Controls,
   MarkerType,
-  MiniMap,
   Position,
   ReactFlow,
   useEdgesState,
   useNodesState,
   type Edge,
-  type Node
+  type Node,
+  type ReactFlowInstance
 } from "@xyflow/react";
 
 type UiConfig = {
@@ -76,6 +83,8 @@ type ProvisionStartPayload = ApiPayload & {
 
 type FlowStatusFilter = "" | "pending_oauth" | "completed" | "failed";
 type AssignmentModeFilter = "" | "dedicated" | "managed_pool";
+type OperatorView = "orchestration" | "provision";
+type OrchestrationTab = "manual" | "dynamic";
 
 type ProvisionFlowSummary = {
   flow_id: string;
@@ -149,6 +158,14 @@ type OrchestrationGroup = {
   unsupported_reason: string | null;
 };
 
+type GroupSelectOption = {
+  value: string;
+  label: string;
+  searchText: string;
+  groupIdText: string;
+  disabled?: boolean;
+};
+
 type OrchestrationGroupsPayload = ApiPayload & {
   items: OrchestrationGroup[];
   total: number;
@@ -181,7 +198,72 @@ type RotationExecutionPayload = ApiPayload & {
   migrated_keys?: number;
 };
 
+type AutoRotationRunPayload = ApiPayload & {
+  window?: string;
+  dry_run?: boolean;
+  synced?: Record<string, number>;
+  config?: AutoRotationConfig;
+  planned?: RotationExecutionPayload[];
+  moved?: RotationExecutionPayload[];
+  skipped?: RotationExecutionPayload[];
+  failed?: RotationExecutionPayload[];
+};
+
+type RotationPoolCandidate = {
+  group_id: unknown;
+  name: string;
+  group_kind: string | null;
+  platform: string | null;
+  status: string | null;
+  is_exclusive: boolean;
+  is_subscription: boolean;
+  rotation_supported: boolean;
+  unsupported_reason: string | null;
+  selected: boolean;
+  rotation_selected: boolean;
+  landing_selected: boolean;
+  priority: number | null;
+  landing_priority: number | null;
+};
+
+type RotationPoolCandidatesPayload = ApiPayload & {
+  items: RotationPoolCandidate[];
+};
+
+type AutoRotationConfig = {
+  enabled: boolean;
+  auto_assign_new_users: boolean;
+  cooldown_minutes: number;
+  usage_window: "5h" | "1d" | "7d" | "30d";
+  usage_thresholds: number[];
+  schedule_source_group_ids: unknown[];
+};
+
+type AutoRotationConfigPayload = ApiPayload & {
+  config: AutoRotationConfig;
+  pool: RotationPoolCandidate[];
+  landing_pool?: RotationPoolCandidate[];
+  rotation_pool?: RotationPoolCandidate[];
+};
+
 const emptyStatus: StatusState = { message: "", tone: "idle" };
+const graphTopY = 42;
+const graphRowGap = 126;
+const graphNodeMinGap = 116;
+const usageWindowOptions = [
+  { label: "最近 5 小时", value: "5h" },
+  { label: "最近 1 天", value: "1d" },
+  { label: "最近 7 天", value: "7d" },
+  { label: "最近 30 天", value: "30d" }
+] as const;
+const operatorViewPaths: Record<OperatorView, string> = {
+  orchestration: "/orchestration/manual",
+  provision: "/provision"
+};
+const orchestrationTabPaths: Record<OrchestrationTab, string> = {
+  manual: "/orchestration/manual",
+  dynamic: "/orchestration/dynamic"
+};
 
 class ApiError extends Error {
   status: number;
@@ -264,9 +346,78 @@ function idValue(value: unknown): string {
   return String(value);
 }
 
+function average(values: number[], fallback: number) {
+  if (values.length === 0) {
+    return fallback;
+  }
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function spreadVerticalPositions(items: Array<{ id: string; desiredY: number }>, minGap = graphNodeMinGap) {
+  const positions = new Map<string, number>();
+  const sortedItems = [...items].sort((first, second) => first.desiredY - second.desiredY || first.id.localeCompare(second.id));
+  let nextY = graphTopY;
+  sortedItems.forEach((item) => {
+    const y = Math.max(item.desiredY, nextY);
+    positions.set(item.id, y);
+    nextY = y + minGap;
+  });
+  return positions;
+}
+
+function buildGroupOption(group: OrchestrationGroup, disabled = false): GroupSelectOption {
+  const groupIdText = unknownToText(group.group_id);
+  const label = group.name || groupIdText;
+  return {
+    value: idValue(group.group_id),
+    label,
+    searchText: `${label} ${groupIdText}`,
+    groupIdText,
+    disabled
+  };
+}
+
+function renderGroupOption(option: { label?: ReactNode; data: GroupSelectOption }) {
+  const groupOption = option.data;
+  return (
+    <div className="group-option">
+      <span className="group-option-name">{option.label}</span>
+      {groupOption?.groupIdText ? <span className="group-option-id">ID {groupOption.groupIdText}</span> : null}
+    </div>
+  );
+}
+
 function resolveKnownId(value: string, knownValues: unknown[]): unknown {
   const known = knownValues.find((item) => idValue(item) === value);
   return known ?? value;
+}
+
+function orchestrationTabFromPath(pathname: string): OrchestrationTab {
+  if (pathname === orchestrationTabPaths.dynamic || pathname === "/dynamic") {
+    return "dynamic";
+  }
+  return "manual";
+}
+
+function viewFromPath(pathname: string): OperatorView {
+  if (pathname === operatorViewPaths.provision) {
+    return "provision";
+  }
+  return "orchestration";
+}
+
+function loginRedirectPath(): string {
+  const nextPath = new URLSearchParams(window.location.search).get("next");
+  if (
+    nextPath &&
+    (Object.values(operatorViewPaths).includes(nextPath as OperatorView) ||
+      Object.values(orchestrationTabPaths).includes(nextPath as OrchestrationTab) ||
+      nextPath === "/orchestration" ||
+      nextPath === "/dynamic")
+  ) {
+    return nextPath;
+  }
+  return "/";
 }
 
 function App() {
@@ -322,9 +473,13 @@ function App() {
   }
 
   return (
-    <AppChrome title={config.app_title}>
-      {config.current_user ? <OperatorWorkspace config={config} /> : <LoginView config={config} />}
-    </AppChrome>
+    config.current_user ? (
+      <AppChrome title={config.app_title}>
+        <OperatorWorkspace config={config} />
+      </AppChrome>
+    ) : (
+      <LoginView config={config} />
+    )
   );
 }
 
@@ -345,15 +500,22 @@ function AppChrome({ title, children }: { title: string; children: ReactNode }) 
 }
 
 function LoginView({ config }: { config: UiConfig }) {
+  const [username, setUsername] = useState(config.auth_username);
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    if (!username.trim()) {
+      setStatus({ message: "请输入用户名。", tone: "error" });
+      return;
+    }
+
     if (!password) {
-      setStatus({ message: "请先从启动日志复制当前密码。", tone: "error" });
+      setStatus({ message: "请输入密码。", tone: "error" });
       return;
     }
 
@@ -364,12 +526,12 @@ function LoginView({ config }: { config: UiConfig }) {
       await requestJson("/auth/login", {
         method: "POST",
         body: JSON.stringify({
-          username: config.auth_username,
+          username: username.trim(),
           password
         })
       }, "登录失败");
-      setStatus({ message: "登录成功，正在进入编排页", tone: "success" });
-      window.location.href = "/";
+      setStatus({ message: "登录成功", tone: "success" });
+      window.location.href = loginRedirectPath();
     } catch (error: unknown) {
       setStatus({ message: getErrorMessage(error, "登录失败"), tone: "error" });
     } finally {
@@ -378,50 +540,97 @@ function LoginView({ config }: { config: UiConfig }) {
   }
 
   return (
-    <main className="panel login-panel">
-      <section className="note-grid" aria-label="登录信息">
-        <InfoNote title="登录方式">
-          用户名固定为 <code>{config.auth_username}</code>。
-        </InfoNote>
-        <InfoNote title="密码来源">密码会在每次服务启动时重新生成，请从服务日志复制。</InfoNote>
-        <InfoNote title="OAuth 回调">授权完成后，把浏览器最后落到的 localhost URL 粘贴回编排页。</InfoNote>
-      </section>
+    <main className="login-page">
+      <div className="login-shell">
+        <div className="login-brand" aria-label="Sub2API">
+          <div className="login-mark" aria-hidden="true">S</div>
+          <h1>Sub2API sidecar</h1>
+        </div>
 
-      <form className="form-stack" onSubmit={login}>
-        <label className="field">
-          <span>Username</span>
-          <input type="text" value={config.auth_username} readOnly />
-        </label>
-        <label className="field">
-          <span>Password</span>
-          <input
-            type="password"
-            value={password}
-            placeholder="从启动日志复制当前密码"
-            autoComplete="current-password"
-            onChange={(event) => setPassword(event.target.value)}
-          />
-        </label>
-        <div className="action-row">
-          <button className="button primary" type="submit" disabled={isSubmitting}>
+        <form className="login-panel form-stack" onSubmit={login}>
+          <div className="login-heading">
+            <h2>欢迎回来</h2>
+          </div>
+          <label className="login-field">
+            <span>用户名</span>
+            <div className="login-input-shell">
+              <UserRound size={18} aria-hidden="true" />
+              <input
+                type="text"
+                value={username}
+                autoComplete="username"
+                onChange={(event) => setUsername(event.target.value)}
+              />
+            </div>
+          </label>
+          <label className="login-field">
+            <span>密码</span>
+            <div className="login-input-shell">
+              <LockKeyhole size={18} aria-hidden="true" />
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                autoComplete="current-password"
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              <button
+                className="password-toggle"
+                type="button"
+                aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                onClick={() => setShowPassword((value) => !value)}
+              >
+                {showPassword ? <EyeOff size={18} aria-hidden="true" /> : <Eye size={18} aria-hidden="true" />}
+              </button>
+            </div>
+          </label>
+          <button className="login-submit" type="submit" disabled={isSubmitting}>
             {isSubmitting ? (
               <LoaderCircle className="spin" size={18} aria-hidden="true" />
             ) : (
-              <ShieldCheck size={18} aria-hidden="true" />
+              <LogIn size={18} aria-hidden="true" />
             )}
-            登录并进入编排页
+            登录
           </button>
-        </div>
-        <StatusLine status={status} />
-      </form>
+          <StatusLine status={status} />
+        </form>
+      </div>
     </main>
   );
 }
 
 function OperatorWorkspace({ config }: { config: UiConfig }) {
-  const [activeView, setActiveView] = useState<"orchestrate" | "dashboard" | "provision">("orchestrate");
+  const [activeView, setActiveView] = useState<OperatorView>(() => viewFromPath(window.location.pathname));
+  const [activeOrchestrationTab, setActiveOrchestrationTab] = useState<OrchestrationTab>(() =>
+    orchestrationTabFromPath(window.location.pathname)
+  );
   const [logoutBusy, setLogoutBusy] = useState(false);
-  const [dashboardRefresh, setDashboardRefresh] = useState(0);
+
+  useEffect(() => {
+    function syncViewFromPath() {
+      setActiveView(viewFromPath(window.location.pathname));
+      setActiveOrchestrationTab(orchestrationTabFromPath(window.location.pathname));
+    }
+
+    window.addEventListener("popstate", syncViewFromPath);
+    return () => window.removeEventListener("popstate", syncViewFromPath);
+  }, []);
+
+  function navigateView(view: OperatorView) {
+    setActiveView(view);
+    const nextPath = view === "orchestration" ? orchestrationTabPaths[activeOrchestrationTab] : operatorViewPaths[view];
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState({}, "", nextPath);
+    }
+  }
+
+  function navigateOrchestrationTab(tab: OrchestrationTab) {
+    setActiveView("orchestration");
+    setActiveOrchestrationTab(tab);
+    const nextPath = orchestrationTabPaths[tab];
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState({}, "", nextPath);
+    }
+  }
 
   async function logout() {
     setLogoutBusy(true);
@@ -443,10 +652,6 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
     return false;
   }
 
-  function noteFlowChanged() {
-    setDashboardRefresh((value) => value + 1);
-  }
-
   return (
     <main className="operator-stack">
       <section className="panel operator-toolbar">
@@ -457,25 +662,17 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
         <div className="toolbar-actions">
           <div className="segmented" role="tablist" aria-label="编排视图">
             <button
-              className={activeView === "orchestrate" ? "active" : ""}
+              className={activeView === "orchestration" ? "active" : ""}
               type="button"
-              onClick={() => setActiveView("orchestrate")}
+              onClick={() => navigateView("orchestration")}
             >
               <Play size={17} aria-hidden="true" />
-              用户分组编排
-            </button>
-            <button
-              className={activeView === "dashboard" ? "active" : ""}
-              type="button"
-              onClick={() => setActiveView("dashboard")}
-            >
-              <ListChecks size={17} aria-hidden="true" />
-              历史看板
+              编排工作台
             </button>
             <button
               className={activeView === "provision" ? "active" : ""}
               type="button"
-              onClick={() => setActiveView("provision")}
+              onClick={() => navigateView("provision")}
             >
               <Plus size={17} aria-hidden="true" />
               OAuth 预配
@@ -492,18 +689,16 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
         </div>
       </section>
 
-      {activeView === "orchestrate" ? (
-        <ExistingOrchestrationView onAuthExpired={handleAuthExpired} />
-      ) : activeView === "provision" ? (
+      {activeView === "provision" ? (
         <ProvisionForm
           config={config}
           onAuthExpired={handleAuthExpired}
-          onFlowChanged={noteFlowChanged}
+          onFlowChanged={() => undefined}
         />
       ) : (
-        <DashboardView
-          config={config}
-          refreshSignal={dashboardRefresh}
+        <ExistingOrchestrationView
+          activeTab={activeOrchestrationTab}
+          onTabChange={navigateOrchestrationTab}
           onAuthExpired={handleAuthExpired}
         />
       )}
@@ -512,8 +707,12 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
 }
 
 function ExistingOrchestrationView({
+  activeTab,
+  onTabChange,
   onAuthExpired
 }: {
+  activeTab: OrchestrationTab;
+  onTabChange: (tab: OrchestrationTab) => void;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [mode, setMode] = useState<OrchestrationMode>("replace_group");
@@ -525,13 +724,23 @@ function ExistingOrchestrationView({
   const [selectedUserId, setSelectedUserId] = useState("");
   const [sourceGroupId, setSourceGroupId] = useState("");
   const [targetGroupId, setTargetGroupId] = useState("");
-  const [selectedKeyId, setSelectedKeyId] = useState("");
+  const [selectedKeyIds, setSelectedKeyIds] = useState<string[]>([]);
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState<StatusState>(emptyStatus);
-  const [result, setResult] = useState<RotationExecutionPayload | null>(null);
+  const [result, setResult] = useState<RotationExecutionPayload[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const userSearchTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (userSearchTimerRef.current) {
+        window.clearTimeout(userSearchTimerRef.current);
+      }
+    };
+  }, []);
 
   const selectedUser = users.find((user) => idValue(user.user_id) === selectedUserId) ?? null;
   const targetGroups = useMemo(
@@ -561,8 +770,25 @@ function ExistingOrchestrationView({
     () => (selectedUserDirectGroup ? [selectedUserDirectGroup] : []),
     [selectedUserDirectGroup]
   );
-  const selectedKey = apiKeys.find((key) => idValue(key.key_id) === selectedKeyId) ?? null;
-  const selectedSourceGroup = sourceGroups.find((group) => idValue(group.group_id) === sourceGroupId) ?? null;
+  const sourceGroupOptions = useMemo(() => sourceGroups.map((group) => buildGroupOption(group)), [sourceGroups]);
+  const targetGroupOptions = useMemo(
+    () =>
+      targetGroups.map((group) =>
+        buildGroupOption(group, mode === "replace_group" && !group.rotation_supported)
+      ),
+    [mode, targetGroups]
+  );
+  const selectedKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
+  const selectedKeys = useMemo(
+    () => apiKeys.filter((key) => selectedKeySet.has(idValue(key.key_id))),
+    [apiKeys, selectedKeySet]
+  );
+  const toggleKeySelection = (keyId: string) => {
+    if (!keyId) return;
+    setSelectedKeyIds((current) =>
+      current.includes(keyId) ? current.filter((id) => id !== keyId) : [...current, keyId]
+    );
+  };
   const graph = useMemo(() => {
     const groupUserCounts = new Map<string, number>();
     const groupKeyCounts = new Map<string, number>();
@@ -624,8 +850,74 @@ function ExistingOrchestrationView({
       }
     });
 
-    const groupNodes: Node[] = Array.from(graphGroups.values()).map((group, index) => {
-      const groupValue = idValue(group.group_id);
+    const groupOrder = Array.from(graphGroups.values())
+      .map((group, fallbackIndex) => {
+        const groupValue = idValue(group.group_id);
+        const userIndexes = users
+          .map((user, index) => ({ index, groupValue: idValue(user.current_group_id) }))
+          .filter((item) => item.groupValue === groupValue)
+          .map((item) => item.index);
+        const keyIndexes = userKeyRows
+          .map((row, index) => ({ index, groupValue: idValue(row.key.group_id) }))
+          .filter((item) => item.groupValue === groupValue)
+          .map((item) => item.index);
+        return {
+          group,
+          groupValue,
+          score: average([...userIndexes, ...keyIndexes], users.length + fallbackIndex)
+        };
+      })
+      .sort((first, second) => first.score - second.score || first.groupValue.localeCompare(second.groupValue));
+    const initialGroupYById = new Map<string, number>();
+    groupOrder.forEach(({ groupValue }, index) => {
+      initialGroupYById.set(groupValue, graphTopY + index * graphRowGap);
+    });
+
+    const userRows = users
+      .map((user, fallbackIndex) => {
+        const userId = idValue(user.user_id);
+        const userGroupId = idValue(user.current_group_id);
+        const keyRows = userKeyRows.filter((row) => row.userId === userId);
+        const keyGroupScores = keyRows.map((row) => initialGroupYById.get(idValue(row.key.group_id))).filter((value): value is number => typeof value === "number");
+        return {
+          user,
+          userId,
+          fallbackIndex,
+          groupY: initialGroupYById.get(userGroupId) ?? graphTopY + groupOrder.length * graphRowGap + fallbackIndex * graphRowGap,
+          keyScore: average(keyGroupScores, fallbackIndex * graphRowGap)
+        };
+      })
+      .sort((first, second) => first.groupY - second.groupY || first.keyScore - second.keyScore || first.userId.localeCompare(second.userId));
+    const userYById = spreadVerticalPositions(
+      userRows.map(({ userId }, index) => ({ id: userId, desiredY: graphTopY + index * graphRowGap }))
+    );
+    const groupYById = spreadVerticalPositions(
+      groupOrder.map(({ groupValue }) => {
+        const relatedUserY = userRows
+          .filter(({ user }) => idValue(user.current_group_id) === groupValue)
+          .map(({ userId }) => userYById.get(userId))
+          .filter((value): value is number => typeof value === "number");
+        const desiredY = average(relatedUserY, initialGroupYById.get(groupValue) ?? graphTopY);
+        return { id: groupValue, desiredY };
+      })
+    );
+
+    const keyRows = userKeyRows
+      .map((row, fallbackIndex) => ({
+        ...row,
+        fallbackIndex,
+        userY: userYById.get(row.userId) ?? graphTopY + fallbackIndex * graphRowGap,
+        groupY: groupYById.get(idValue(row.key.group_id)) ?? graphTopY + fallbackIndex * graphRowGap
+      }))
+      .sort((first, second) => first.userY - second.userY || first.groupY - second.groupY || idValue(first.key.key_id).localeCompare(idValue(second.key.key_id)));
+    const keyYById = spreadVerticalPositions(
+      keyRows.map(({ userId, key }) => ({
+        id: `${userId}-${idValue(key.key_id)}`,
+        desiredY: userYById.get(userId) ?? graphTopY
+      }))
+    );
+
+    const groupNodes: Node[] = groupOrder.map(({ group, groupValue }) => {
       const tags = [
         `${groupUserCounts.get(groupValue) ?? 0} 用户`,
         `${groupKeyCounts.get(groupValue) ?? 0} Key`
@@ -637,32 +929,31 @@ function ExistingOrchestrationView({
         tags.push("目标");
       }
       return {
-      id: `group-${idValue(group.group_id)}`,
-      type: "output",
-      position: { x: 692, y: 42 + index * 126 },
-      targetPosition: Position.Left,
-      data: {
-        groupId: groupValue,
-        label: (
-          <GraphNode
-            icon={<ClusterOutlined />}
-            title={group.name || "分组"}
-            subtitle={`Group ${unknownToText(group.group_id)}`}
-            tone={groupValue === sourceGroupId ? "source" : groupValue === targetGroupId ? "target" : "neutral"}
-            tag={tags.join(" / ")}
-          />
-        )
-      }
+        id: `group-${groupValue}`,
+        type: "output",
+        position: { x: 692, y: groupYById.get(groupValue) ?? graphTopY },
+        targetPosition: Position.Left,
+        data: {
+          groupId: groupValue,
+          label: (
+            <GraphNode
+              icon={<ClusterOutlined />}
+              title={group.name || "分组"}
+              subtitle={`Group ${unknownToText(group.group_id)}`}
+              tone={groupValue === sourceGroupId ? "source" : groupValue === targetGroupId ? "target" : "neutral"}
+              tag={tags.join(" / ")}
+            />
+          )
+        }
       };
     });
 
-    const userNodes: Node[] = users.map((user, index) => {
-      const userId = idValue(user.user_id);
+    const userNodes: Node[] = userRows.map(({ user, userId }) => {
       const currentGroupId = user.current_group_id ?? null;
       const currentGroupName = user.current_group_name ?? unknownToText(currentGroupId);
       return {
         id: `user-${userId}`,
-        position: { x: 360, y: 42 + index * 126 },
+        position: { x: 360, y: userYById.get(userId) ?? graphTopY },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
         data: {
@@ -680,10 +971,10 @@ function ExistingOrchestrationView({
       };
     });
 
-    const keyNodes: Node[] = userKeyRows.map(({ userId, key }, index) => ({
+    const keyNodes: Node[] = keyRows.map(({ userId, key }) => ({
       id: `key-${userId}-${idValue(key.key_id)}`,
       type: "input",
-      position: { x: 28, y: 42 + index * 126 },
+      position: { x: 28, y: keyYById.get(`${userId}-${idValue(key.key_id)}`) ?? graphTopY },
       sourcePosition: Position.Right,
       data: {
         userId,
@@ -693,7 +984,7 @@ function ExistingOrchestrationView({
             icon={<KeyOutlined />}
             title={key.name || "api-key"}
             subtitle={unknownToText(key.key_id)}
-            tone={idValue(key.key_id) === selectedKeyId ? "active" : "neutral"}
+            tone={selectedKeySet.has(idValue(key.key_id)) ? "active" : "neutral"}
             tag={key.group_name || unknownToText(key.group_id)}
           />
         )
@@ -719,17 +1010,23 @@ function ExistingOrchestrationView({
         id: `user-key-${userId}-${idValue(key.key_id)}`,
         source: `key-${userId}-${idValue(key.key_id)}`,
         target: `user-${userId}`,
-        animated: userId === selectedUserId || idValue(key.key_id) === selectedKeyId,
+        animated: userId === selectedUserId || selectedKeySet.has(idValue(key.key_id)),
         markerEnd: { type: MarkerType.ArrowClosed },
         label: "用户 Key"
       })),
       ...userKeyRows
-        .filter(({ key }) => idValue(key.group_id))
+        .filter(({ user, key }) => {
+          const keyGroupId = idValue(key.group_id);
+          const userGroupId = idValue(user.current_group_id);
+          const keyId = idValue(key.key_id);
+          const userId = idValue(user.user_id);
+          return keyGroupId && keyGroupId !== userGroupId && (userId === selectedUserId || selectedKeySet.has(keyId));
+        })
         .map(({ userId, key }) => ({
           id: `group-key-${idValue(key.group_id)}-${userId}-${idValue(key.key_id)}`,
           source: `key-${userId}-${idValue(key.key_id)}`,
           target: `group-${idValue(key.group_id)}`,
-          animated: userId === selectedUserId || idValue(key.key_id) === selectedKeyId,
+          animated: userId === selectedUserId || selectedKeySet.has(idValue(key.key_id)),
           markerEnd: { type: MarkerType.ArrowClosed },
           style: { stroke: "#2563eb", strokeWidth: 1.6, strokeDasharray: "5 5" },
           label: "Key 当前分组"
@@ -740,7 +1037,7 @@ function ExistingOrchestrationView({
     apiKeys,
     apiKeysByUserId,
     groups,
-    selectedKeyId,
+    selectedKeySet,
     selectedUserId,
     sourceGroupId,
     targetGroupId,
@@ -749,11 +1046,12 @@ function ExistingOrchestrationView({
   const [nodes, setNodes, onNodesChange] = useNodesState(graph.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(graph.edges);
 
-  async function loadResources(nextSelectedUserId?: string) {
+  async function loadResources(nextSelectedUserId?: string, searchOverride?: string) {
     setLoading(true);
+    const searchTerm = (searchOverride !== undefined ? searchOverride : userSearch).trim();
     const params = new URLSearchParams();
-    if (userSearch.trim()) {
-      params.set("email", userSearch.trim());
+    if (searchTerm) {
+      params.set("email", searchTerm);
     }
 
     try {
@@ -773,11 +1071,12 @@ function ExistingOrchestrationView({
       setUsers(usersPayload.items);
       setGroups(groupsPayload.items);
       const candidateUserId =
-        nextSelectedUserId && usersPayload.items.some((user) => idValue(user.user_id) === nextSelectedUserId)
+        nextSelectedUserId === ""
+          ? ""
+          : nextSelectedUserId && usersPayload.items.some((user) => idValue(user.user_id) === nextSelectedUserId)
           ? nextSelectedUserId
           : usersPayload.items[0] ? idValue(usersPayload.items[0].user_id) : "";
       setSelectedUserId(candidateUserId);
-      setStatus({ message: `已加载 ${usersPayload.total} 个用户、${groupsPayload.total} 个分组`, tone: "success" });
       void loadAllApiKeys(usersPayload.items);
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
@@ -795,7 +1094,7 @@ function ExistingOrchestrationView({
   async function loadApiKeys(userId: string) {
     if (!userId) {
       setApiKeys([]);
-      setSelectedKeyId("");
+      setSelectedKeyIds([]);
       return;
     }
 
@@ -808,15 +1107,12 @@ function ExistingOrchestrationView({
       );
       setApiKeys(payload.items);
       setApiKeysByUserId((current) => ({ ...current, [userId]: payload.items }));
-      setSelectedKeyId((current) =>
-        current && payload.items.some((key) => idValue(key.key_id) === current)
-          ? current
-          : payload.items[0] ? idValue(payload.items[0].key_id) : ""
-      );
+      const validIds = new Set(payload.items.map((key) => idValue(key.key_id)));
+      setSelectedKeyIds((current) => current.filter((id) => validIds.has(id)));
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
         setApiKeys([]);
-        setSelectedKeyId("");
+        setSelectedKeyIds([]);
         setStatus({ message: getErrorMessage(error, "加载 API Keys 失败"), tone: "error" });
       }
     } finally {
@@ -850,12 +1146,14 @@ function ExistingOrchestrationView({
   }
 
   useEffect(() => {
-    void loadResources();
+    void loadResources("");
   }, []);
 
   useEffect(() => {
     if (!selectedUser) {
       setSourceGroupId("");
+      setApiKeys([]);
+      setSelectedKeyIds([]);
       return;
     }
     setSourceGroupId(idValue(selectedUserDirectGroup?.group_id));
@@ -863,21 +1161,22 @@ function ExistingOrchestrationView({
   }, [selectedUserId, selectedUserDirectGroup?.group_id]);
 
   useEffect(() => {
-    if (targetGroups.length === 0) {
-      setTargetGroupId("");
-      return;
-    }
     setTargetGroupId((current) =>
-      current && targetGroups.some((group) => idValue(group.group_id) === current)
-        ? current
-        : idValue(targetGroups[0].group_id)
+      current && targetGroups.some((group) => idValue(group.group_id) === current) ? current : ""
     );
   }, [targetGroups]);
 
   useEffect(() => {
     setNodes(graph.nodes);
     setEdges(graph.edges);
-  }, [graph, setEdges, setNodes]);
+    window.setTimeout(() => flowInstance?.fitView({ padding: 0.16, duration: 220 }), 0);
+  }, [flowInstance, graph, setEdges, setNodes]);
+
+  function refreshGraphLayout() {
+    setNodes(graph.nodes);
+    setEdges(graph.edges);
+    window.setTimeout(() => flowInstance?.fitView({ padding: 0.16, duration: 260 }), 0);
+  }
 
   function selectGraphEntity(userId?: unknown, keyId?: unknown) {
     const nextUserId = idValue(userId);
@@ -886,7 +1185,7 @@ function ExistingOrchestrationView({
     }
     const nextKeyId = idValue(keyId);
     if (nextKeyId) {
-      setSelectedKeyId(nextKeyId);
+      setSelectedKeyIds((current) => (current.includes(nextKeyId) ? current : [...current, nextKeyId]));
     }
   }
 
@@ -905,58 +1204,102 @@ function ExistingOrchestrationView({
       setStatus({ message: "请选择源分组。", tone: "error" });
       return;
     }
-    if (mode === "api_key" && !selectedKeyId) {
-      setStatus({ message: "请选择 API Key。", tone: "error" });
+    if (mode === "api_key" && selectedKeys.length === 0) {
+      setStatus({ message: "请至少选择一个 API Key。", tone: "error" });
       return;
     }
 
     const knownGroupIds = groups.map((group) => group.group_id);
     const sourceGroupValue = resolveKnownId(sourceGroupId, knownGroupIds);
     const targetGroupValue = resolveKnownId(targetGroupId, knownGroupIds);
-    const selectedKeySourceGroup = selectedKey?.group_id ?? sourceGroupValue;
-    const body =
-      mode === "replace_group"
-        ? {
-            user_id: selectedUser.user_id,
-            email: selectedUser.email,
-            source_group_id: sourceGroupValue,
-            target_group_id: targetGroupValue,
-            reason: reason.trim() || undefined
-          }
-        : {
-            user_id: selectedUser.user_id,
-            email: selectedUser.email,
-            key_id: selectedKey?.key_id ?? selectedKeyId,
-            source_group_id: selectedKeySourceGroup,
-            target_group_id: targetGroupValue,
-            reason: reason.trim() || undefined
-          };
-    const url =
-      mode === "replace_group"
-        ? "/orchestration/assignments/replace-group"
-        : "/orchestration/api-keys/update-group";
+    const reasonValue = reason.trim() || undefined;
 
     setSubmitting(true);
-    setStatus({ message: "正在执行编排", tone: "info" });
+    setStatus({
+      message:
+        mode === "api_key" && selectedKeys.length > 1
+          ? `正在执行编排（${selectedKeys.length} 个 Key）`
+          : "正在执行编排",
+      tone: "info"
+    });
+
     try {
-      const payload = await requestJson<RotationExecutionPayload>(
-        url,
-        {
-          method: "POST",
-          body: JSON.stringify(body)
-        },
-        "编排执行失败"
-      );
-      setResult(payload);
-      setStatus({
-        message: payload.status === "failed" ? payload.reason || "编排执行失败" : "编排执行完成",
-        tone: payload.status === "failed" ? "error" : "success"
-      });
+      if (mode === "replace_group") {
+        const payload = await requestJson<RotationExecutionPayload>(
+          "/orchestration/assignments/replace-group",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              user_id: selectedUser.user_id,
+              email: selectedUser.email,
+              source_group_id: sourceGroupValue,
+              target_group_id: targetGroupValue,
+              reason: reasonValue
+            })
+          },
+          "编排执行失败"
+        );
+        setResult([payload]);
+        setStatus({
+          message: payload.status === "failed" ? payload.reason || "编排执行失败" : "编排执行完成",
+          tone: payload.status === "failed" ? "error" : "success"
+        });
+      } else {
+        const results: RotationExecutionPayload[] = [];
+        let failedCount = 0;
+        let authExpired = false;
+        for (const key of selectedKeys) {
+          try {
+            const payload = await requestJson<RotationExecutionPayload>(
+              "/orchestration/api-keys/update-group",
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  user_id: selectedUser.user_id,
+                  email: selectedUser.email,
+                  key_id: key.key_id,
+                  source_group_id: key.group_id ?? sourceGroupValue,
+                  target_group_id: targetGroupValue,
+                  reason: reasonValue
+                })
+              },
+              "编排执行失败"
+            );
+            results.push(payload);
+            if (payload.status === "failed") failedCount += 1;
+          } catch (error: unknown) {
+            if (onAuthExpired(error, setStatus)) {
+              authExpired = true;
+              break;
+            }
+            results.push({
+              success: false,
+              status: "failed",
+              key_id: key.key_id,
+              detail: getErrorMessage(error, "编排执行失败")
+            });
+            failedCount += 1;
+          }
+        }
+        if (authExpired) {
+          if (results.length > 0) setResult(results);
+          return;
+        }
+        setResult(results);
+        const total = results.length;
+        if (failedCount === 0) {
+          setStatus({ message: `编排执行完成（${total} 个 Key）`, tone: "success" });
+        } else if (failedCount === total) {
+          setStatus({ message: `编排执行失败（${failedCount}/${total}）`, tone: "error" });
+        } else {
+          setStatus({ message: `部分执行成功（成功 ${total - failedCount} / 失败 ${failedCount}）`, tone: "error" });
+        }
+      }
       await loadResources(idValue(selectedUser.user_id));
       await loadApiKeys(idValue(selectedUser.user_id));
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
-        setResult({ success: false, detail: getErrorMessage(error, "编排执行失败") });
+        setResult([{ success: false, detail: getErrorMessage(error, "编排执行失败") }]);
         setStatus({ message: getErrorMessage(error, "编排执行失败"), tone: "error" });
       }
     } finally {
@@ -964,148 +1307,270 @@ function ExistingOrchestrationView({
     }
   }
 
+  const allKeyIds = apiKeys.map((key) => idValue(key.key_id)).filter(Boolean);
+  const allKeysSelected = allKeyIds.length > 0 && allKeyIds.every((id) => selectedKeySet.has(id));
+  const toggleAllKeys = () => {
+    if (allKeysSelected) {
+      setSelectedKeyIds([]);
+    } else {
+      setSelectedKeyIds(allKeyIds);
+    }
+  };
+
+  const apiKeyListContent = apiKeys.length === 0 ? (
+    <Empty
+      image={Empty.PRESENTED_IMAGE_SIMPLE}
+      description={loadingKeys ? "正在加载 API Keys" : "暂无 API Keys"}
+    />
+  ) : (
+    <List
+      className="orchestration-key-list"
+      dataSource={apiKeys}
+      renderItem={(key) => {
+        const keyId = idValue(key.key_id);
+        const checked = selectedKeySet.has(keyId);
+        const interactive = mode === "api_key";
+        return (
+          <List.Item
+            className={`${checked ? "selected-key-row" : ""} ${interactive ? "selectable-key-row" : "readonly-key-row"}`.trim()}
+            onClick={interactive ? () => toggleKeySelection(keyId) : undefined}
+          >
+            {interactive ? (
+              <Checkbox
+                className="orchestration-key-checkbox"
+                checked={checked}
+                onClick={(event) => event.stopPropagation()}
+                onChange={() => toggleKeySelection(keyId)}
+              />
+            ) : null}
+            <List.Item.Meta
+              avatar={<KeyOutlined />}
+              title={key.name || "api-key"}
+              description={unknownToText(key.key_id)}
+            />
+            <Tag color={checked ? "green" : "default"}>
+              {key.group_name || unknownToText(key.group_id)}
+            </Tag>
+          </List.Item>
+        );
+      }}
+    />
+  );
+
   return (
-    <div className="orchestration-ant-grid">
-      <Card
-        className="orchestration-control-card"
-        title={
+    <div className="orchestration-workbench">
+      <section className="orchestration-top-panel">
+        <div className="orchestration-top-header">
           <Space>
             <NodeIndexOutlined />
-            <span>关系编排</span>
+            <Typography.Text strong>关系编排</Typography.Text>
           </Space>
-        }
-        extra={
-          <AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadResources(selectedUserId)}>
-            刷新
-          </AntButton>
-        }
-      >
-        <form className="ant-orchestration-form" onSubmit={runExistingOrchestration}>
-          <AntSegmented
-            block
-            value={mode}
-            onChange={(value) => setMode(value as OrchestrationMode)}
-            options={[
-              { label: "整体替换", value: "replace_group", icon: <BranchesOutlined /> },
-              { label: "单 Key", value: "api_key", icon: <KeyOutlined /> }
-            ]}
-          />
-
-          <Input.Search
-            allowClear
-            value={userSearch}
-            placeholder="按 email 搜索已有用户"
-            enterButton="查询"
-            onChange={(event) => setUserSearch(event.target.value)}
-            onSearch={() => void loadResources(selectedUserId)}
-          />
-
-          <div className="ant-field">
-            <Typography.Text strong>User</Typography.Text>
-            <Select
-              value={selectedUserId || undefined}
-              placeholder="选择已有用户"
-              showSearch
-              optionFilterProp="label"
-              onChange={(value) => setSelectedUserId(value)}
-              options={users.map((user) => ({
-                value: idValue(user.user_id),
-                label: `${user.email} / ${unknownToText(user.user_id)}`
-              }))}
-              notFoundContent={loading ? <Spin size="small" /> : "暂无用户"}
+          <Space wrap>
+            <AntSegmented
+              value={activeTab}
+              onChange={(value) => onTabChange(value as OrchestrationTab)}
+              options={[
+                { label: "手动编排", value: "manual", icon: <BranchesOutlined /> },
+                { label: "动态编排", value: "dynamic", icon: <SyncOutlined /> }
+              ]}
             />
-          </div>
+            <AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadResources(selectedUserId)}>
+              刷新
+            </AntButton>
+          </Space>
+        </div>
 
-          <div className="ant-field-grid">
-            <div className="ant-field">
-              <Typography.Text strong>Source Group</Typography.Text>
-              <Select
-                value={sourceGroupId || undefined}
-                placeholder="当前用户未绑定分组"
-                disabled
-                optionFilterProp="label"
-                options={sourceGroups.map((group) => ({
-                  value: idValue(group.group_id),
-                  label: `${group.name} / ${unknownToText(group.group_id)}（当前绑定）`
-                }))}
+        {activeTab === "manual" ? (
+          <form className="orchestration-top-form" onSubmit={runExistingOrchestration}>
+            <section className="manual-zone manual-zone--target" aria-labelledby="manual-zone-target-title">
+              <header className="manual-zone-header">
+                <span className="manual-zone-step">1</span>
+                <Typography.Text strong id="manual-zone-target-title">选择对象</Typography.Text>
+              </header>
+
+              <AntSegmented
+                className="manual-mode-switch"
+                block
+                value={mode}
+                onChange={(value) => setMode(value as OrchestrationMode)}
+                options={[
+                  { label: "整体替换", value: "replace_group", icon: <BranchesOutlined /> },
+                  { label: "单 Key", value: "api_key", icon: <KeyOutlined /> }
+                ]}
               />
-            </div>
-            <div className="ant-field">
-              <Typography.Text strong>Target Group</Typography.Text>
-              <Select
-                value={targetGroupId || undefined}
-                placeholder="选择目标分组"
-                showSearch
-                optionFilterProp="label"
-                onChange={(value) => setTargetGroupId(value)}
-                options={targetGroups.map((group) => ({
-                  value: idValue(group.group_id),
-                  label: `${group.name} / ${unknownToText(group.group_id)}`,
-                  disabled: mode === "replace_group" && !group.rotation_supported
-                }))}
-                notFoundContent="暂无可用分组"
-              />
-            </div>
-          </div>
 
-          {mode === "api_key" ? (
-            <div className="ant-field">
-              <Typography.Text strong>API Key</Typography.Text>
-              <Select
-                value={selectedKeyId || undefined}
-                placeholder="选择 API Key"
-                loading={loadingKeys}
-                onChange={(value) => setSelectedKeyId(value)}
-                options={apiKeys.map((key) => ({
-                  value: idValue(key.key_id),
-                  label: `${key.name || "api-key"} / ${unknownToText(key.key_id)}`
-                }))}
-                notFoundContent={loadingKeys ? <Spin size="small" /> : "暂无 API Key"}
-              />
-            </div>
-          ) : null}
+              <div className="ant-field">
+                <Typography.Text strong>User</Typography.Text>
+                <Select
+                  value={selectedUserId || undefined}
+                  placeholder="按 email 搜索或选择用户"
+                  showSearch
+                  filterOption={false}
+                  loading={loading}
+                  allowClear
+                  onSearch={(value) => {
+                    setUserSearch(value);
+                    if (userSearchTimerRef.current) {
+                      window.clearTimeout(userSearchTimerRef.current);
+                    }
+                    userSearchTimerRef.current = window.setTimeout(() => {
+                      void loadResources(selectedUserId, value);
+                    }, 300);
+                  }}
+                  onClear={() => {
+                    if (userSearchTimerRef.current) {
+                      window.clearTimeout(userSearchTimerRef.current);
+                    }
+                    setUserSearch("");
+                    setSelectedUserId("");
+                    void loadResources("", "");
+                  }}
+                  onChange={(value) => setSelectedUserId(value ?? "")}
+                  options={users.map((user) => ({
+                    value: idValue(user.user_id),
+                    label: `${user.email} / ${unknownToText(user.user_id)}`
+                  }))}
+                  notFoundContent={loading ? <Spin size="small" /> : "暂无用户"}
+                />
+              </div>
 
-          <div className="ant-field">
-            <Typography.Text strong>Reason</Typography.Text>
-            <Input.TextArea
-              rows={4}
-              value={reason}
-              placeholder="变更原因"
-              onChange={(event) => setReason(event.target.value)}
-            />
-          </div>
+              <Typography.Text type="secondary" className="manual-zone-hint">
+                {users.length} 用户 · {groups.length} 分组
+              </Typography.Text>
+            </section>
 
-          {status.message ? (
-            <Alert
-              showIcon
-              type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
-              message={status.message}
-            />
-          ) : null}
+            <section className="manual-zone manual-zone--route" aria-labelledby="manual-zone-route-title">
+              <header className="manual-zone-header">
+                <span className="manual-zone-step">2</span>
+                <Typography.Text strong id="manual-zone-route-title">路由配置</Typography.Text>
+              </header>
 
-          <AntButton
-            block
-            type="primary"
-            htmlType="button"
-            icon={<SendOutlined />}
-            loading={submitting}
-            disabled={loading || targetGroups.length === 0}
-            onClick={() => void runExistingOrchestration()}
-          >
-            执行编排
-          </AntButton>
-        </form>
-      </Card>
+              <div className="manual-route-flow">
+                <div className="ant-field">
+                  <Typography.Text strong>当前分组</Typography.Text>
+                  <Select
+                    className="group-select"
+                    value={sourceGroupId || undefined}
+                    placeholder="当前用户未绑定分组"
+                    disabled
+                    optionFilterProp="searchText"
+                    options={sourceGroupOptions}
+                    optionRender={renderGroupOption}
+                  />
+                </div>
+                <div className="manual-route-arrow" aria-hidden="true">
+                  <ArrowDownOutlined />
+                </div>
+                <div className="ant-field">
+                  <Typography.Text strong>目标分组</Typography.Text>
+                  <Select
+                    className="group-select"
+                    value={targetGroupId || undefined}
+                    placeholder="选择目标分组"
+                    showSearch
+                    allowClear
+                    optionFilterProp="searchText"
+                    onChange={(value) => setTargetGroupId(value ?? "")}
+                    options={targetGroupOptions}
+                    optionRender={renderGroupOption}
+                    notFoundContent="暂无可用分组"
+                  />
+                </div>
+              </div>
+
+              <section className="orchestration-keys-panel manual-keys-panel" aria-label="用户 API Keys">
+                <div className="orchestration-keys-panel-title">
+                  <Space>
+                    <ApiOutlined />
+                    <Typography.Text strong>
+                      {mode === "api_key" ? "选择 API Key（支持多选）" : "用户 API Keys"}
+                    </Typography.Text>
+                  </Space>
+                  <Space size={8}>
+                    {mode === "api_key" && apiKeys.length > 0 ? (
+                      <>
+                        <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>
+                          已选 {selectedKeyIds.length} / {apiKeys.length}
+                        </Tag>
+                        <AntButton
+                          size="small"
+                          type="link"
+                          onClick={toggleAllKeys}
+                          disabled={loadingKeys}
+                        >
+                          {allKeysSelected ? "全不选" : "全选"}
+                        </AntButton>
+                      </>
+                    ) : loadingKeys ? (
+                      <Spin size="small" />
+                    ) : (
+                      <Tag>{apiKeys.length}</Tag>
+                    )}
+                  </Space>
+                </div>
+                {apiKeyListContent}
+              </section>
+            </section>
+
+            <section className="manual-zone manual-zone--submit" aria-labelledby="manual-zone-submit-title">
+              <header className="manual-zone-header">
+                <span className="manual-zone-step">3</span>
+                <Typography.Text strong id="manual-zone-submit-title">执行变更</Typography.Text>
+              </header>
+
+              <div className="ant-field manual-reason-field">
+                <Typography.Text strong>Reason</Typography.Text>
+                <Input.TextArea
+                  rows={5}
+                  value={reason}
+                  placeholder="变更原因"
+                  onChange={(event) => setReason(event.target.value)}
+                />
+              </div>
+
+              {status.message ? (
+                <Alert
+                  className="manual-status-alert"
+                  showIcon
+                  type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
+                  message={status.message}
+                />
+              ) : null}
+
+              <AntButton
+                className="manual-run-button"
+                type="primary"
+                htmlType="button"
+                icon={<SendOutlined />}
+                loading={submitting}
+                disabled={loading || targetGroups.length === 0}
+                onClick={() => void runExistingOrchestration()}
+                block
+              >
+                {mode === "api_key" && selectedKeyIds.length > 1
+                  ? `执行编排（${selectedKeyIds.length} 个 Key）`
+                  : "执行编排"}
+              </AntButton>
+            </section>
+          </form>
+        ) : (
+          <DynamicOrchestrationView onAuthExpired={onAuthExpired} />
+        )}
+      </section>
 
       <section className="orchestration-canvas-shell">
         <div className="canvas-title-row">
-          <div>
+          <div className="canvas-meta-row">
             <Typography.Text type="secondary">Graph Canvas</Typography.Text>
-            <Typography.Title level={3}>所有 Key、用户、分组</Typography.Title>
+            <div className="canvas-subtitle-tags">
+              <Tag color="processing">左到右：Key / 用户 / 分组</Tag>
+              <Tag color="default">全局关系</Tag>
+            </div>
           </div>
           <Space wrap>
-            <Tag color="processing">左到右：Key / 用户 / 分组</Tag>
-            <Tag color="default">全局关系</Tag>
+            <AntButton icon={<SyncOutlined />} onClick={refreshGraphLayout}>
+              刷新布局
+            </AntButton>
           </Space>
         </div>
         <div className="flow-canvas">
@@ -1115,6 +1580,7 @@ function ExistingOrchestrationView({
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onNodeClick={(_, node) => selectGraphEntity(node.data.userId, node.data.keyId)}
+            onInit={setFlowInstance}
             fitView
             minZoom={0.55}
             maxZoom={1.35}
@@ -1122,63 +1588,37 @@ function ExistingOrchestrationView({
             proOptions={{ hideAttribution: true }}
           >
             <Background />
-            <MiniMap pannable zoomable />
             <Controls />
           </ReactFlow>
         </div>
       </section>
 
-      <Card
-        className="orchestration-keys-card"
-        title={
-          <Space>
-            <ApiOutlined />
-            <span>用户 API Keys</span>
-          </Space>
-        }
-        extra={loadingKeys ? <Spin size="small" /> : <Tag>{apiKeys.length}</Tag>}
-      >
-        {apiKeys.length === 0 ? (
-          <Empty description={loadingKeys ? "正在加载 API Keys" : "暂无 API Keys"} />
-        ) : (
-          <List
-            dataSource={apiKeys}
-            renderItem={(key) => (
-              <List.Item
-                className={idValue(key.key_id) === selectedKeyId ? "selected-key-row" : ""}
-                onClick={() => setSelectedKeyId(idValue(key.key_id))}
-              >
-                <List.Item.Meta
-                  avatar={<KeyOutlined />}
-                  title={key.name || "api-key"}
-                  description={unknownToText(key.key_id)}
-                />
-                <Tag color={idValue(key.key_id) === selectedKeyId ? "green" : "default"}>
-                  {key.group_name || unknownToText(key.group_id)}
-                </Tag>
-              </List.Item>
-            )}
-          />
-        )}
-      </Card>
-
       <Drawer
-        title="执行结果"
-        open={Boolean(result)}
-        width={520}
+        title={result && result.length > 1 ? `执行结果（${result.length} 个 Key）` : "执行结果"}
+        open={Boolean(result && result.length > 0)}
+        width={560}
         onClose={() => setResult(null)}
       >
         {result ? (
           <Space direction="vertical" size={16} className="drawer-stack">
-            <Descriptions bordered size="small" column={1}>
-              <Descriptions.Item label="Status">{unknownToText(result.status)}</Descriptions.Item>
-              <Descriptions.Item label="User">{unknownToText(result.email || result.user_id)}</Descriptions.Item>
-              <Descriptions.Item label="Source Group">{unknownToText(result.source_group_id)}</Descriptions.Item>
-              <Descriptions.Item label="Target Group">{unknownToText(result.target_group_id)}</Descriptions.Item>
-              <Descriptions.Item label="Migrated Keys">{unknownToText(result.migrated_keys)}</Descriptions.Item>
-              <Descriptions.Item label="Reason">{unknownToText(result.reason)}</Descriptions.Item>
-            </Descriptions>
-            <pre className="drawer-payload">{formatPayload(result)}</pre>
+            {result.map((item, index) => (
+              <div key={index} className="drawer-result-block">
+                {result.length > 1 ? (
+                  <Typography.Text strong className="drawer-result-title">
+                    #{index + 1} · {unknownToText(item.key_id) || unknownToText(item.email || item.user_id)}
+                  </Typography.Text>
+                ) : null}
+                <Descriptions bordered size="small" column={1}>
+                  <Descriptions.Item label="Status">{unknownToText(item.status)}</Descriptions.Item>
+                  <Descriptions.Item label="User">{unknownToText(item.email || item.user_id)}</Descriptions.Item>
+                  <Descriptions.Item label="Source Group">{unknownToText(item.source_group_id)}</Descriptions.Item>
+                  <Descriptions.Item label="Target Group">{unknownToText(item.target_group_id)}</Descriptions.Item>
+                  <Descriptions.Item label="Migrated Keys">{unknownToText(item.migrated_keys)}</Descriptions.Item>
+                  <Descriptions.Item label="Reason">{unknownToText(item.reason)}</Descriptions.Item>
+                </Descriptions>
+                <pre className="drawer-payload">{formatPayload(item)}</pre>
+              </div>
+            ))}
           </Space>
         ) : null}
       </Drawer>
@@ -1209,6 +1649,429 @@ function GraphNode({
         <small>{subtitle}</small>
       </div>
       {tag ? <Tag color={tagColor}>{tag}</Tag> : null}
+    </div>
+  );
+}
+
+function DynamicOrchestrationView({
+  onAuthExpired
+}: {
+  onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+}) {
+  const [candidates, setCandidates] = useState<RotationPoolCandidate[]>([]);
+  const [config, setConfig] = useState<AutoRotationConfig>({
+    enabled: false,
+    auto_assign_new_users: false,
+    cooldown_minutes: 0,
+    usage_window: "1d",
+    usage_thresholds: [],
+    schedule_source_group_ids: []
+  });
+  const [status, setStatus] = useState<StatusState>(emptyStatus);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState<"preview" | "run" | null>(null);
+  const [result, setResult] = useState<AutoRotationRunPayload | null>(null);
+  const [selectedPoolCandidateId, setSelectedPoolCandidateId] = useState("");
+
+  const selectedGroups = candidates.filter((group) => group.rotation_selected || group.selected);
+  const selectedLandingGroups = candidates.filter((group) => group.landing_selected);
+  const supportedGroups = candidates.filter((group) => group.rotation_supported);
+  const selectedPoolCandidate =
+    supportedGroups.find((group) => idValue(group.group_id) === selectedPoolCandidateId) ?? null;
+  const poolCandidateOptions = supportedGroups.map((group) =>
+    buildGroupOption({
+      group_id: group.group_id,
+      name: group.name,
+      group_kind: group.group_kind,
+      platform: group.platform,
+      status: group.status,
+      is_exclusive: group.is_exclusive,
+      is_subscription: group.is_subscription,
+      rotation_supported: group.rotation_supported,
+      unsupported_reason: group.unsupported_reason
+    })
+  );
+  const runSummary = result ? {
+    planned: result.planned?.length ?? 0,
+    moved: result.moved?.length ?? 0,
+    skipped: result.skipped?.length ?? 0,
+    failed: result.failed?.length ?? 0,
+    synced: result.synced?.synced ?? 0,
+    newUsers: result.synced?.new_user_candidates ?? 0,
+    outsideRange: result.synced?.skipped_outside_schedule_range ?? 0,
+    seen: result.synced?.seen ?? 0
+  } : null;
+
+  async function loadDynamicConfig() {
+    setLoading(true);
+    try {
+      const [poolPayload, configPayload] = await Promise.all([
+        requestJson<RotationPoolCandidatesPayload>("/rotation/pool/candidates", { method: "GET" }, "加载轮转池失败"),
+        requestJson<AutoRotationConfigPayload>("/rotation/auto/config", { method: "GET" }, "加载动态配置失败")
+      ]);
+      setCandidates(poolPayload.items);
+      setConfig(configPayload.config);
+      setStatus({ message: `已加载 ${poolPayload.items.length} 个分组候选`, tone: "success" });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "加载动态配置失败"), tone: "error" });
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadDynamicConfig();
+  }, []);
+
+  async function saveConfig(nextConfig = config) {
+    setSaving(true);
+    try {
+      const payload = await requestJson<AutoRotationConfigPayload>(
+        "/rotation/auto/config",
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            ...nextConfig,
+            schedule_source_group_ids: [],
+            usage_thresholds: []
+          })
+        },
+        "保存动态配置失败"
+      );
+      setConfig(payload.config);
+      setStatus({ message: "动态配置已保存", tone: "success" });
+      return true;
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "保存动态配置失败"), tone: "error" });
+      }
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function togglePoolGroup(group: RotationPoolCandidate, poolKind: "landing" | "rotation") {
+    const selected = poolKind === "landing" ? group.landing_selected : group.rotation_selected || group.selected;
+    const poolSize = poolKind === "landing" ? selectedLandingGroups.length : selectedGroups.length;
+    setSaving(true);
+    try {
+      if (selected) {
+        await requestJson<ApiPayload>(
+          `/rotation/pool/groups/${encodeURIComponent(idValue(group.group_id))}?pool_kind=${poolKind}`,
+          { method: "DELETE" },
+          poolKind === "landing" ? "移出 Landing 池失败" : "移出轮转池失败"
+        );
+      } else {
+        await requestJson<ApiPayload>(
+          "/rotation/pool/groups",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              group_id: group.group_id,
+              pool_kind: poolKind,
+              priority: poolSize
+            })
+          },
+          poolKind === "landing" ? "加入 Landing 池失败" : "加入轮转池失败"
+        );
+      }
+      await loadDynamicConfig();
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "更新池配置失败"), tone: "error" });
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const renderSelectedPoolList = (
+    groups: RotationPoolCandidate[],
+    poolKind: "landing" | "rotation"
+  ) => (
+    <List
+      className="dynamic-selected-pool-list"
+      dataSource={groups}
+      locale={{ emptyText: poolKind === "landing" ? "Landing 池为空" : "轮转池为空" }}
+      renderItem={(group) => (
+        <List.Item
+          actions={[
+            <AntButton
+              key="remove"
+              size="small"
+              disabled={saving}
+              onClick={() => void togglePoolGroup(group, poolKind)}
+            >
+              移出
+            </AntButton>
+          ]}
+        >
+          <List.Item.Meta
+            avatar={poolKind === "landing" ? <UserOutlined /> : <ClusterOutlined />}
+            title={group.name || unknownToText(group.group_id)}
+            description={`Group ${unknownToText(group.group_id)} / Priority ${
+              poolKind === "landing" ? group.landing_priority ?? "-" : group.priority ?? "-"
+            }`}
+          />
+        </List.Item>
+      )}
+    />
+  );
+
+  async function runDynamic(dryRun: boolean) {
+    const saved = await saveConfig();
+    if (!saved) {
+      return;
+    }
+    setRunning(dryRun ? "preview" : "run");
+    setStatus({ message: dryRun ? "正在预览动态编排" : "正在执行动态编排", tone: "info" });
+    try {
+      const payload = await requestJson<AutoRotationRunPayload>(
+        "/rotation/auto/run",
+        {
+          method: "POST",
+          body: JSON.stringify({ dry_run: dryRun })
+        },
+        dryRun ? "动态编排预览失败" : "动态编排执行失败"
+      );
+      setResult(payload);
+      const failed = payload.failed?.length ?? 0;
+      setStatus({
+        message: dryRun
+          ? `预览完成：计划 ${payload.planned?.length ?? 0}，跳过 ${payload.skipped?.length ?? 0}，失败 ${failed}`
+          : `执行完成：迁移 ${payload.moved?.length ?? 0}，跳过 ${payload.skipped?.length ?? 0}，失败 ${failed}`,
+        tone: failed > 0 ? "error" : "success"
+      });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setResult({ success: false, detail: getErrorMessage(error, dryRun ? "动态编排预览失败" : "动态编排执行失败") });
+        setStatus({ message: getErrorMessage(error, dryRun ? "动态编排预览失败" : "动态编排执行失败"), tone: "error" });
+      }
+    } finally {
+      setRunning(null);
+    }
+  }
+
+  return (
+    <div className="dynamic-grid">
+      <Card
+        title={
+          <Space>
+            <ClusterOutlined />
+            <span>池配置</span>
+          </Space>
+        }
+        extra={<AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadDynamicConfig()}>刷新</AntButton>}
+      >
+        <div className="dynamic-pool-builder">
+          <div className="ant-field">
+            <Typography.Text strong>候选分组</Typography.Text>
+            <Select
+              value={selectedPoolCandidateId || undefined}
+              placeholder="搜索并选择一个专属标准分组"
+              showSearch
+              allowClear
+              loading={loading}
+              optionFilterProp="searchText"
+              onChange={(value) => setSelectedPoolCandidateId(value ?? "")}
+              options={poolCandidateOptions}
+              optionRender={renderGroupOption}
+              notFoundContent={loading ? <Spin size="small" /> : "暂无可用候选"}
+            />
+          </div>
+          <Space wrap>
+            <AntButton
+              type="primary"
+              disabled={!selectedPoolCandidate || selectedPoolCandidate.landing_selected || saving}
+              onClick={() => selectedPoolCandidate && void togglePoolGroup(selectedPoolCandidate, "landing")}
+            >
+              加入 Landing 池
+            </AntButton>
+            <AntButton
+              type="primary"
+              disabled={
+                !selectedPoolCandidate ||
+                selectedPoolCandidate.rotation_selected ||
+                selectedPoolCandidate.selected ||
+                saving
+              }
+              onClick={() => selectedPoolCandidate && void togglePoolGroup(selectedPoolCandidate, "rotation")}
+            >
+              加入轮转池
+            </AntButton>
+          </Space>
+        </div>
+
+        <div className="dynamic-pool-columns">
+          <section className="dynamic-pool-section">
+            <div className="dynamic-pool-section-header">
+              <Typography.Text strong>Landing 池</Typography.Text>
+              <Tag color="blue">{selectedLandingGroups.length}</Tag>
+            </div>
+            <Typography.Text type="secondary">
+              新用户或 managed-pool provisioning 的默认落点。自动分配只会从这里接入。
+            </Typography.Text>
+            {renderSelectedPoolList(selectedLandingGroups, "landing")}
+          </section>
+
+          <section className="dynamic-pool-section">
+            <div className="dynamic-pool-section-header">
+              <Typography.Text strong>轮转池</Typography.Text>
+              <Tag color="green">{selectedGroups.length}</Tag>
+            </div>
+            <Typography.Text type="secondary">
+              已接入用户的动态轮转目标。执行时会把所选时间窗口内的用量尽量摊平到这些组里。
+            </Typography.Text>
+            {renderSelectedPoolList(selectedGroups, "rotation")}
+          </section>
+        </div>
+      </Card>
+
+      <Card
+        title={
+          <Space>
+            <SyncOutlined />
+            <span>动态配置</span>
+          </Space>
+        }
+      >
+        <div className="dynamic-config-form">
+          <div className="dynamic-config-row">
+            <Typography.Text strong>启用执行</Typography.Text>
+            <AntSegmented
+              value={config.enabled ? "on" : "off"}
+              onChange={(value) => setConfig((current) => ({ ...current, enabled: value === "on" }))}
+              options={[
+                { label: "关闭", value: "off" },
+                { label: "开启", value: "on" }
+              ]}
+            />
+          </div>
+          <div className="dynamic-config-row">
+            <Typography.Text strong>自动分配新用户</Typography.Text>
+            <AntSegmented
+              value={config.auto_assign_new_users ? "on" : "off"}
+              onChange={(value) => setConfig((current) => ({ ...current, auto_assign_new_users: value === "on" }))}
+              options={[
+                { label: "关闭", value: "off" },
+                { label: "开启", value: "on" }
+              ]}
+            />
+          </div>
+          <div className="dynamic-config-row dynamic-config-row--stacked">
+            <Space>
+              <TimerReset size={16} aria-hidden="true" />
+              <Typography.Text strong>用量窗口</Typography.Text>
+            </Space>
+            <AntSegmented
+              value={config.usage_window}
+              onChange={(value) =>
+                setConfig((current) => ({
+                  ...current,
+                  usage_window: value as AutoRotationConfig["usage_window"]
+                }))
+              }
+              options={[...usageWindowOptions]}
+            />
+            <Typography.Text type="secondary">
+              动态编排会按这个时间范围汇总用户 API Key 用量，并把轮转池各组的总用量尽量拉平。
+            </Typography.Text>
+          </div>
+          <div className="ant-field">
+            <Typography.Text strong>Cooldown Minutes</Typography.Text>
+            <Input
+              type="number"
+              min={0}
+              value={config.cooldown_minutes}
+              onChange={(event) => setConfig((current) => ({
+                ...current,
+                cooldown_minutes: Math.max(0, Number(event.target.value) || 0)
+              }))}
+            />
+            <Typography.Text type="secondary">
+              用户刚被自动迁移后，冷却时间内不会再次被动态调度。
+            </Typography.Text>
+          </div>
+          <div className="dynamic-allocation-summary">
+            <Tag color={config.enabled ? "green" : "default"}>{config.enabled ? "允许执行" : "仅配置/预览"}</Tag>
+            <Tag color={config.auto_assign_new_users ? "green" : "default"}>{config.auto_assign_new_users ? "自动分配开启" : "自动分配关闭"}</Tag>
+            <Tag color="blue">Landing {selectedLandingGroups.length}</Tag>
+            <Tag color="processing">Rotation {selectedGroups.length}</Tag>
+            <Tag color="green">按用量均衡</Tag>
+            <Tag color="gold">{usageWindowOptions.find((item) => item.value === config.usage_window)?.label}</Tag>
+          </div>
+          {config.auto_assign_new_users && selectedLandingGroups.length === 0 ? (
+            <Alert
+              showIcon
+              type="warning"
+              message="自动分配新用户需要先配置 Landing 池；空 Landing 池不会自动接入任何用户。"
+            />
+          ) : null}
+          {status.message ? (
+            <Alert
+              showIcon
+              type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
+              message={status.message}
+            />
+          ) : null}
+          <Space wrap>
+            <AntButton
+              type="primary"
+              icon={<SendOutlined />}
+              loading={saving}
+              onClick={() => void saveConfig()}
+            >
+              保存配置
+            </AntButton>
+            <AntButton
+              icon={<NodeIndexOutlined />}
+              loading={running === "preview"}
+              disabled={running !== null || loading || selectedGroups.length === 0}
+              onClick={() => void runDynamic(true)}
+            >
+              预览动态编排
+            </AntButton>
+            <AntButton
+              danger
+              icon={<SyncOutlined />}
+              loading={running === "run"}
+              disabled={running !== null || loading || selectedGroups.length === 0 || !config.enabled}
+              onClick={() => void runDynamic(false)}
+            >
+              执行动态编排
+            </AntButton>
+          </Space>
+        </div>
+      </Card>
+
+      <Card
+        className="dynamic-result-card"
+        title={
+          <Space>
+            <ListChecks />
+            <span>运行结果</span>
+          </Space>
+        }
+      >
+        {runSummary ? (
+          <div className="dynamic-result-summary">
+            <Tag color="processing">同步 {runSummary.synced}/{runSummary.seen}</Tag>
+            <Tag color="purple">新用户候选 {runSummary.newUsers}</Tag>
+            <Tag color="default">范围外 {runSummary.outsideRange}</Tag>
+            <Tag color="blue">计划 {runSummary.planned}</Tag>
+            <Tag color="green">迁移 {runSummary.moved}</Tag>
+            <Tag>跳过 {runSummary.skipped}</Tag>
+            <Tag color={runSummary.failed > 0 ? "red" : "default"}>失败 {runSummary.failed}</Tag>
+          </div>
+        ) : (
+          <Empty description="暂无运行结果" />
+        )}
+        {result ? <pre className="drawer-payload dynamic-result-payload">{formatPayload(result)}</pre> : null}
+      </Card>
     </div>
   );
 }
@@ -1643,15 +2506,6 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value || "-"}</strong>
     </div>
-  );
-}
-
-function InfoNote({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <article className="note">
-      <strong>{title}</strong>
-      <p>{children}</p>
-    </article>
   );
 }
 

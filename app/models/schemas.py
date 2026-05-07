@@ -161,6 +161,7 @@ class OrchestrationApiKeyAssignRequest(BaseModel):
 class RotationPoolGroupRequest(BaseModel):
     group_id: Any
     priority: int | None = Field(default=None, ge=0)
+    pool_kind: str = "rotation"
 
 
 class RotationPoolCandidateResponse(BaseModel):
@@ -174,12 +175,41 @@ class RotationPoolCandidateResponse(BaseModel):
     rotation_supported: bool = True
     unsupported_reason: str | None = None
     selected: bool
+    rotation_selected: bool = False
+    landing_selected: bool = False
     priority: int | None = None
+    landing_priority: int | None = None
 
 
 class RotationPoolCandidatesEnvelope(BaseModel):
     success: bool = True
     items: list[RotationPoolCandidateResponse]
+
+
+class AutoRotationConfigResponse(BaseModel):
+    enabled: bool
+    auto_assign_new_users: bool = False
+    cooldown_minutes: int
+    usage_window: str
+    usage_thresholds: list[float]
+    schedule_source_group_ids: list[Any] = Field(default_factory=list)
+
+
+class AutoRotationConfigRequest(BaseModel):
+    enabled: bool = False
+    auto_assign_new_users: bool = False
+    cooldown_minutes: int = Field(default=0, ge=0)
+    usage_window: str
+    usage_thresholds: list[float] = Field(default_factory=list)
+    schedule_source_group_ids: list[Any] = Field(default_factory=list)
+
+
+class AutoRotationConfigEnvelope(BaseModel):
+    success: bool = True
+    config: AutoRotationConfigResponse
+    pool: list[RotationPoolCandidateResponse]
+    landing_pool: list[RotationPoolCandidateResponse] = Field(default_factory=list)
+    rotation_pool: list[RotationPoolCandidateResponse] = Field(default_factory=list)
 
 
 class ManualRotationRequest(BaseModel):
@@ -201,11 +231,20 @@ class RotationExecutionResponse(BaseModel):
     usage_window: str | None = None
     usage_value: float | None = None
     usage_snapshot: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AutoRotationRunRequest(BaseModel):
+    dry_run: bool = False
 
 
 class AutoRotationRunResponse(BaseModel):
     success: bool = True
     window: str
+    dry_run: bool = False
+    synced: dict[str, int] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    planned: list[RotationExecutionResponse] = Field(default_factory=list)
     moved: list[RotationExecutionResponse]
     skipped: list[RotationExecutionResponse]
     failed: list[RotationExecutionResponse]

@@ -1,8 +1,8 @@
 ## Context
 
-The current sidecar is a minimal provisioning orchestrator. `POST /provision/start` always creates a dedicated Sub2API group, creates a user, binds that user to the new group, and stores only flow metadata in SQLite. `POST /provision/oauth/complete` later creates the OAuth account and binds it back to the same `flow.group_id`.
+The current sidecar has both OAuth account provisioning and existing-resource orchestration concerns. OAuth provisioning creates a dedicated Sub2API group and later binds an OpenAI OAuth account to that group, while existing Sub2API users, API keys, and groups need a separate orchestration path.
 
-That implementation is intentionally simple, but it assumes "one user, one dedicated group, one bound account flow". The operating model behind this change is different: operators need to move users between a known set of dedicated Sub2API groups manually or automatically based on usage. Those groups are controlled rotation targets; public groups are explicitly out of scope for rotation.
+The operating model behind this change is specific to existing upstream users: operators need to move users between a known set of dedicated Sub2API groups manually or automatically based on usage. Those groups are controlled rotation targets; public groups are explicitly out of scope for rotation. This change does not make OAuth provisioning create, assign, or rotate Sub2API users.
 
 The upstream `infra/sub2api` backend already exposes the important primitives needed by the sidecar:
 
@@ -18,14 +18,13 @@ The sidecar therefore does not need to invent new backend behavior. It needs to 
 
 **Goals:**
 
-- Preserve today's dedicated-group provisioning as the default path.
-- Add a managed-pool provisioning mode for deployments that want new users assigned into a controlled pool of dedicated rotation groups.
+- Keep OAuth account provisioning separate from existing user/key/group rotation.
 - Let operators discover current upstream groups, classify them by exclusivity, and select dedicated groups into the local rotation pool.
 - Provide authenticated API-first manual rotation and automatic usage-based rotation.
 - Keep manual and automatic rotation on the same execution path so behavior stays consistent.
 - Let automatic rotation evaluate a configurable V1 usage window chosen from `5h`, `1d`, `7d`, or `30d`, and schedule users with no created API key last.
 - Persist assignment state and rotation audit data locally so restarts do not lose context.
-- Prevent unsafe rotations such as no-op moves, cooldown violations, or rotations during pending OAuth flows.
+- Prevent unsafe rotations such as no-op moves, cooldown violations, or treating pending OAuth account flows as user identities.
 
 **Non-Goals:**
 
@@ -36,17 +35,17 @@ The sidecar therefore does not need to invent new backend behavior. It needs to 
 
 ## Decisions
 
-### 1. Keep provisioning mode explicit: `dedicated` by default, `managed_pool` as opt-in
+### 1. Keep rotation scoped to existing upstream users
 
-New provisioning behavior should be controlled by a configuration setting rather than inferred from the presence of rotation data. In `dedicated` mode the sidecar continues to create one group per user exactly as it does today. In `managed_pool` mode the sidecar chooses a target group from a configured pool of dedicated rotation groups and records that choice on the flow.
+Rotation behavior should be controlled independently from OAuth account provisioning. Manual rotation requires an explicit existing upstream user id. Automatic rotation should discover or load existing upstream users and evaluate those users against usage data. Pending OAuth account flows are not user identities and should not be used as rotation candidates.
 
 Why this approach:
 
-- keeps current deployments backward compatible
-- makes rollout reversible with a single config change
-- avoids surprising operators who only want the existing dedicated behavior
+- matches the corrected provisioning model where the submitted OAuth email is external to the Sub2API user system
+- prevents the sidecar from inventing Sub2API users just to support rotation
+- keeps existing-user migration semantics tied to confirmed upstream admin APIs
 
-Alternative considered: replace dedicated provisioning with pooled provisioning everywhere. Rejected because it would force an operational migration even for installs that do not need rotation.
+Alternative considered: assign new OAuth provisioning flows into the rotation pool. Rejected because OAuth provisioning is account/group scoped and must not create or mutate Sub2API users.
 
 ### 2. Discover candidate groups from upstream and persist rotation-pool selection locally
 
@@ -63,21 +62,21 @@ Alternative considered: keep the rotation pool entirely in static configuration.
 
 ### 3. Persist assignment and audit as first-class SQLite tables
 
-Flow storage alone is not enough once users can be rotated after provisioning. The sidecar should keep:
+Flow storage alone is not enough once existing users can be rotated. The sidecar should keep:
 
 - `provision_flows` for pending/completed OAuth orchestration
 - `rotation_pool_groups` for the operator-selected exclusive target groups
 - `user_group_assignments` for the current effective assignment snapshot per user
 - `rotation_events` for append-only manual/automatic rotation outcomes
 
-Flow records should also gain assignment metadata such as `assignment_mode` and decision reason so callback completion can remain deterministic.
+Provisioning flow records remain useful for OAuth account lifecycle visibility, but rotation assignment state should be stored independently from those flows.
 
 Why this approach:
 
 - rotation needs indexed lookups by user, current group, and recent execution time
 - rotation pool membership is separate state from per-user assignment and should survive restart
 - audit and current-state queries serve different access patterns
-- callback completion should not need to recompute routing after a restart
+- callback completion should not be coupled to existing-user rotation state
 
 Alternative considered: store every new field inside the existing flow JSON only. Rejected because rotation acts on users long after OAuth completion and needs durable state outside the provisioning flow lifecycle.
 
@@ -88,7 +87,7 @@ The current client uses broad candidate-path fallbacks for a minimal provisionin
 - admin group listing for rotation-pool discovery
 - user group replacement with key migration via `POST /api/v1/admin/users/{user_id}/replace-group`
 - single API key group updates via `PUT /api/v1/admin/api-keys/{key_id}` when a future flow needs one-key migration
-- user allowed-group updates only for initial provisioning before keys exist
+- user allowed-group updates only for user-management flows that explicitly need them
 - per-user or batch usage retrieval
 
 Why this approach:
@@ -135,16 +134,16 @@ Why this approach:
 
 Alternative considered: only rely on external cron. Rejected because the feature should be usable from the sidecar alone and because the user explicitly asked for automatic rotation inside this service.
 
-### 7. Use a configurable V1 usage-window enum and schedule new users last
+### 7. Use a configurable V1 usage-window enum and schedule no-key users last
 
-Automatic rotation should evaluate users against a configurable V1 window chosen from `5h`, `1d`, `7d`, or `30d`. Users without any created API key should be treated as new users and evaluated after users who already have keys.
+Automatic rotation should evaluate existing users against a configurable V1 window chosen from `5h`, `1d`, `7d`, or `30d`. Existing users without any created API key should be evaluated after users who already have keys.
 
 Why this approach:
 
 - it matches the requested operating model more closely than a hardcoded 7-day band
 - it keeps the first implementation aligned with usage windows that are already easier to map onto upstream data
 - it lets operators tune sensitivity without changing the core rotation workflow
-- deprioritizing users with no key avoids unnecessary early churn for accounts that have not started using the system
+- deprioritizing users with no key avoids unnecessary early churn for existing users that have not started using the system
 
 Alternative considered: support arbitrary hour/day windows in V1. Rejected because the upstream usage interfaces do not cleanly expose every rolling window shape, which would add adapter complexity before the first usable release.
 
@@ -166,25 +165,22 @@ Alternative considered: implement rotation only in the HTML page. Rejected becau
 - [The upstream usage APIs do not expose the exact desired rolling window directly] -> Limit V1 to `5h`, `1d`, `7d`, and `30d`, and implement a usage adapter that selects the best available upstream source for those windows.
 - [A scheduled rotation cycle overlaps with a manual rotation request] -> Use a single-process execution lock so only one rotation executor mutates assignments at a time.
 - [Operators add the wrong exclusive group into the pool] -> Expose candidate discovery with exclusivity metadata and persist auditable pool membership changes.
-- [A user is rotated while OAuth is still pending] -> Treat `pending_oauth` as a hard skip condition for rotation.
-- [Rollback after moving users into the managed rotation pool is not instant] -> Make rollback configuration-only for new provisioning, and use the same manual rotation API to move existing users back if needed.
+- [A pending OAuth flow is mistaken for a Sub2API user] -> Keep rotation candidates sourced from upstream user discovery, explicit operator input, or persisted assignment state only.
+- [Rollback after moving users across rotation groups is not instant] -> Disable automatic rotation and use the same manual rotation API to move existing users back if needed.
 
 ## Migration Plan
 
-1. Ship the code with `dedicated` mode as the default so existing behavior does not change on deployment.
-2. Add automatic rotation settings in a disabled state and verify startup validation.
-3. Discover current groups through the sidecar API and select a small dedicated rotation pool.
-4. Enable `managed_pool` for new provisioning only and verify new users land in the expected exclusive groups.
-5. Use manual rotation for a small set of existing users and validate key migration and audit output.
-6. Enable automatic rotation on demand first, then turn on interval execution after thresholds and cooldowns are tuned.
+1. Ship automatic rotation settings in a disabled state and verify startup validation.
+2. Discover current groups through the sidecar API and select a small dedicated rotation pool.
+3. Use manual rotation for a small set of existing users and validate key migration and audit output.
+4. Enable automatic rotation on demand first, then turn on interval execution after thresholds and cooldowns are tuned.
 
 Rollback:
 
-- set provisioning mode back to `dedicated`
 - disable automatic rotation
 - stop invoking manual rotation
 - clear or adjust local rotation-pool membership if needed
-- rotate affected users back explicitly if managed-pool assignment must be undone
+- rotate affected users back explicitly if assignment changes must be undone
 
 ## Open Questions
 

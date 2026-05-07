@@ -51,12 +51,12 @@ class Sub2APIClient:
         "/admin/groups",
     )
     LIST_USERS_PATHS = (
-        "/api/v1/admin/users/all",
         "/api/v1/admin/users",
-        "/api/admin/users/all",
+        "/api/v1/admin/users/all",
         "/api/admin/users",
-        "/admin/users/all",
+        "/api/admin/users/all",
         "/admin/users",
+        "/admin/users/all",
     )
     USER_API_KEYS_PATHS = ("/api/v1/admin/users/{user_id}/api-keys",)
     USAGE_STATS_PATHS = ("/api/v1/admin/usage/stats",)
@@ -211,7 +211,9 @@ class Sub2APIClient:
 
     def list_users(self, email: str | None = None) -> list[dict[str, Any]]:
         last_error: Sub2APIError | None = None
-        params = {"email": email} if email else None
+        params: dict[str, Any] = {"page": 1, "page_size": 1000}
+        if email:
+            params["email"] = email
         for path in self.LIST_USERS_PATHS:
             try:
                 data = self._request("GET", path, params=params)
@@ -462,6 +464,19 @@ class Sub2APIClient:
             group_id = group.get("id") or group.get("group_id")
             if group_id not in (None, ""):
                 return group_id, group.get("name") or group.get("group_name")
+
+        for field_name in ("groups", "allowed_groups", "group_ids"):
+            raw_groups = item.get(field_name)
+            if not isinstance(raw_groups, list) or len(raw_groups) != 1:
+                continue
+            only_group = raw_groups[0]
+            if isinstance(only_group, dict):
+                group_id = only_group.get("id") or only_group.get("group_id")
+                group_name = only_group.get("name") or only_group.get("group_name")
+                if group_id not in (None, ""):
+                    return group_id, group_name
+            elif only_group not in (None, ""):
+                return only_group, self._extract_user_group_name(item)
 
         return None, self._extract_user_group_name(item)
 

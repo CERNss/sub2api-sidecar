@@ -14,7 +14,7 @@ from app.auth import ACCESS_KEY_COOKIE_NAME
 from app.clients.sub2api import Sub2APIClient
 from app.config import Sub2APIProvisioningDefaults, get_settings
 from app.models.flow import AssignmentMode
-from app.models.rotation import RotationPoolGroup, UserGroupAssignment
+from app.models.rotation import RotationPoolGroup, RotationPoolKind, UserGroupAssignment
 
 EXPECTED_REDIRECT_URI = "http://localhost:1455/callback"
 AUTH_PAYLOAD = {"username": "admin", "password": "test-admin-pass"}
@@ -639,6 +639,38 @@ def test_rotation_pool_candidates_and_exclusive_selection(client) -> None:
     assert selected[44]["rotation_supported"] is False
 
 
+def test_landing_and_rotation_pools_are_independent(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        landing = client.post(
+            "/rotation/pool/groups",
+            json={"group_id": 11, "pool_kind": "landing", "priority": 0},
+        )
+        rotation = client.post(
+            "/rotation/pool/groups",
+            json={"group_id": 11, "pool_kind": "rotation", "priority": 0},
+        )
+        candidates = client.get("/rotation/pool/candidates")
+        removed_landing = client.delete("/rotation/pool/groups/11?pool_kind=landing")
+        candidates_after_remove = client.get("/rotation/pool/candidates")
+
+    assert landing.status_code == 200
+    assert landing.json()["pool_kind"] == "landing"
+    assert rotation.status_code == 200
+    assert rotation.json()["pool_kind"] == "rotation"
+    item = {group["group_id"]: group for group in candidates.json()["items"]}[11]
+    assert item["landing_selected"] is True
+    assert item["rotation_selected"] is True
+    assert removed_landing.status_code == 200
+    item_after_remove = {
+        group["group_id"]: group for group in candidates_after_remove.json()["items"]
+    }[11]
+    assert item_after_remove["landing_selected"] is False
+    assert item_after_remove["rotation_selected"] is True
+
+
 def test_rotation_pool_rejects_public_group(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
@@ -732,7 +764,7 @@ def test_existing_user_group_orchestration_requires_direct_source_group(client) 
     assert backend.set_user_group_calls == []
 
 
-def test_existing_user_group_orchestration_rejects_allowed_group_as_source(client) -> None:
+def test_existing_user_group_orchestration_rejects_ambiguous_allowed_groups_as_source(client) -> None:
     backend = FakeRotationSub2API()
     backend.users = [
         {
@@ -740,7 +772,7 @@ def test_existing_user_group_orchestration_rejects_allowed_group_as_source(clien
             "email": "allowed-only@example.com",
             "name": "allowed-only@example.com",
             "status": "active",
-            "allowed_groups": [11],
+            "allowed_groups": [11, 22],
         }
     ]
     now = datetime.now(timezone.utc)
@@ -766,7 +798,7 @@ def test_existing_user_group_orchestration_rejects_allowed_group_as_source(clien
                 "email": "allowed-only@example.com",
                 "source_group_id": 11,
                 "target_group_id": 22,
-                "reason": "allowed group is not direct current group",
+                "reason": "ambiguous allowed groups are not direct current group",
             },
         )
 
@@ -815,6 +847,7 @@ def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch)
         main.get_flow_store().upsert_rotation_pool_group(
             RotationPoolGroup(
                 group_id=11,
+                pool_kind=RotationPoolKind.landing,
                 group_name="rotation-low",
                 platform="openai",
                 status="active",
@@ -837,12 +870,12 @@ def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch)
             )
 
     assert start_response.status_code == 200
-    assert start_response.json()["group_id"] == 11
+    assert start_response.json()["group_id"] == "11"
     assert backend.create_group_calls == 0
     assert complete_response.status_code == 200
     assignment = main.get_flow_store().get_user_assignment(101)
     assert assignment is not None
-    assert assignment.current_group_id == 11
+    assert assignment.current_group_id == "11"
     assert assignment.assignment_mode == AssignmentMode.managed_pool
 
 
@@ -920,15 +953,48 @@ def test_manual_rotation_success_skip_and_failure(client) -> None:
     assert len(events) >= 3
 
 
-def test_auto_rotation_reorders_new_users_last_and_moves_by_usage_window(
+def test_manual_rotation_does_not_require_dynamic_rotation_pool(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    now = datetime.now(timezone.utc)
+    store = main.get_flow_store()
+    store.upsert_user_assignment(
+        UserGroupAssignment(
+            user_id=101,
+            email="rotate@example.com",
+            current_group_id=11,
+            current_group_name="rotation-low",
+            assignment_mode=AssignmentMode.managed_pool,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/rotation/manual", json={"user_id": 101, "target_group_id": 22})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "moved"
+    assert response.json()["target_group_id"] == 22
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
+    ]
+    updated_assignment = store.get_user_assignment(101)
+    assert updated_assignment is not None
+    assert updated_assignment.current_group_id == 22
+
+
+def test_auto_rotation_balances_usage_across_rotation_pool(
     client, monkeypatch
 ) -> None:
     backend = FakeRotationSub2API()
-    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 10.0, "usage_7d": 20.0}]
-    backend.user_api_keys[202] = []
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 8.0, "usage_1d": 80.0, "usage_7d": 200.0}]
+    backend.user_api_keys[202] = [{"id": 2, "usage_5h": 1.0, "usage_1d": 10.0, "usage_7d": 20.0}]
     monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
     monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[10]")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
@@ -982,8 +1048,398 @@ def test_auto_rotation_reorders_new_users_last_and_moves_by_usage_window(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["window"] == "5h"
-    assert len(payload["moved"]) == 2
+    assert len(payload["moved"]) == 1
     assert backend.replace_calls[0]["user_id"] == 101
-    assert backend.replace_calls[1]["user_id"] == 202
-    assert payload["moved"][1]["usage_snapshot"]["has_api_keys"] is False
+    assert backend.replace_calls[0]["old_group_id"] == 22
+    assert backend.replace_calls[0]["new_group_id"] == "11"
+    assert payload["moved"][0]["usage_window"] == "5h"
+    assert payload["moved"][0]["usage_value"] == 8.0
+    assert payload["moved"][0]["metadata"]["decision_type"] == "usage_balancing"
+    assert "usage_loads_before" in payload["moved"][0]["metadata"]
+    assert len(payload["skipped"]) == 1
+
+
+def test_auto_rotation_dry_run_syncs_current_upstream_assignments_without_mutation(
+    client, monkeypatch
+) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[1]["group_id"] = 11
+    backend.users[1]["group_name"] = "rotation-low"
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=33,
+                pool_kind=RotationPoolKind.landing,
+                group_name="public-shared",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run", json={"dry_run": True})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dry_run"] is True
+    assert payload["synced"]["seen"] == 2
+    assert payload["synced"]["synced"] == 2
+    assert len(payload["planned"]) == 1
+    assert payload["planned"][0]["target_group_id"] == "22"
+    assert len(payload["skipped"]) == 1
+    assert backend.replace_calls == []
+    assert main.get_flow_store().get_user_assignment(101) is None
+    assert main.get_flow_store().list_rotation_events() == []
+
+
+def test_auto_rotation_runtime_config_can_be_saved_and_controls_execution(
+    client, monkeypatch
+) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 10.0, "usage_7d": 20.0}]
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=33,
+                pool_kind=RotationPoolKind.landing,
+                group_name="public-shared",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+
+        saved = auto_client.put(
+            "/rotation/auto/config",
+            json={
+                "enabled": False,
+                "auto_assign_new_users": False,
+                "cooldown_minutes": 7,
+                "usage_window": "5h",
+                "usage_thresholds": [],
+                "schedule_source_group_ids": [33],
+            },
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            preview = auto_client.post("/rotation/auto/run", json={"dry_run": True})
+            blocked = auto_client.post("/rotation/auto/run")
+
+        enabled = auto_client.put(
+            "/rotation/auto/config",
+            json={
+                "enabled": True,
+                "auto_assign_new_users": False,
+                "cooldown_minutes": 7,
+                "usage_window": "5h",
+                "usage_thresholds": [],
+                "schedule_source_group_ids": [33],
+            },
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            executed = auto_client.post("/rotation/auto/run")
+
+    assert saved.status_code == 200
+    assert saved.json()["config"]["enabled"] is False
+    assert saved.json()["config"]["auto_assign_new_users"] is False
+    assert saved.json()["config"]["cooldown_minutes"] == 7
+    assert saved.json()["config"]["usage_window"] == "5h"
+    assert saved.json()["config"]["usage_thresholds"] == []
+    assert saved.json()["config"]["schedule_source_group_ids"] == [33]
+    assert preview.status_code == 200
+    assert preview.json()["dry_run"] is True
+    assert blocked.status_code == 400
+    assert "disabled" in blocked.json()["detail"]
+    assert enabled.status_code == 200
+    assert enabled.json()["config"]["enabled"] is True
+    assert executed.status_code == 200
+    assert len(executed.json()["moved"]) == 1
+
+
+def test_auto_rotation_auto_assigns_new_users_only_within_schedule_range(
+    client, monkeypatch
+) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 101,
+            "email": "new-in-range@example.com",
+            "name": "new-in-range@example.com",
+            "status": "active",
+            "group_id": 33,
+            "group_name": "public-shared",
+        },
+        {
+            "id": 202,
+            "email": "outside-range@example.com",
+            "name": "outside-range@example.com",
+            "status": "active",
+            "group_id": 44,
+            "group_name": "subscription-dedicated",
+        },
+    ]
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=33,
+                pool_kind=RotationPoolKind.landing,
+                group_name="public-shared",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        config_response = auto_client.put(
+            "/rotation/auto/config",
+            json={
+                "enabled": True,
+                "auto_assign_new_users": True,
+                "cooldown_minutes": 0,
+                "usage_window": "5h",
+                "usage_thresholds": [],
+                "schedule_source_group_ids": [33],
+            },
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            preview = auto_client.post("/rotation/auto/run", json={"dry_run": True})
+            executed = auto_client.post("/rotation/auto/run")
+
+    assert config_response.status_code == 200
+    assert config_response.json()["config"]["auto_assign_new_users"] is True
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert preview_payload["synced"]["new_user_candidates"] == 1
+    assert preview_payload["synced"]["skipped_outside_schedule_range"] == 1
+    assert len(preview_payload["planned"]) == 1
+    assert preview_payload["planned"][0]["user_id"] == 101
+    assert preview_payload["planned"][0]["source_group_id"] == 33
+    assert preview_payload["planned"][0]["target_group_id"] == "11"
+    assert preview_payload["planned"][0]["usage_window"] == "5h"
+    assert preview_payload["planned"][0]["metadata"]["decision_type"] == "new_user_usage_assignment"
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 33, "new_group_id": "11"}
+    ]
+    assert executed.status_code == 200
+    executed_payload = executed.json()
+    assert executed_payload["synced"]["new_user_candidates"] == 1
+    assert len(executed_payload["moved"]) == 1
+    assert executed_payload["moved"][0]["user_id"] == 101
+
+
+def test_auto_rotation_empty_schedule_range_does_not_auto_assign_new_users(
+    client, monkeypatch
+) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 101,
+            "email": "new-without-range@example.com",
+            "name": "new-without-range@example.com",
+            "status": "active",
+            "group_id": 33,
+            "group_name": "public-shared",
+        }
+    ]
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        config_response = auto_client.put(
+            "/rotation/auto/config",
+            json={
+                "enabled": True,
+                "auto_assign_new_users": True,
+                "cooldown_minutes": 0,
+                "usage_window": "5h",
+                "usage_thresholds": [],
+                "schedule_source_group_ids": [],
+            },
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            preview = auto_client.post("/rotation/auto/run", json={"dry_run": True})
+            executed = auto_client.post("/rotation/auto/run")
+
+    assert config_response.status_code == 200
+    assert preview.status_code == 200
+    preview_payload = preview.json()
+    assert preview_payload["synced"]["new_user_candidates"] == 0
+    assert preview_payload["synced"]["skipped_outside_schedule_range"] == 1
+    assert preview_payload["planned"] == []
+    assert executed.status_code == 200
+    assert executed.json()["moved"] == []
+    assert backend.replace_calls == []
+
+
+def test_auto_rotation_skips_ambiguous_and_outside_pool_current_upstream_users(
+    client, monkeypatch
+) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 101,
+            "email": "ambiguous@example.com",
+            "name": "ambiguous@example.com",
+            "status": "active",
+            "allowed_groups": [11, 22],
+        },
+        {
+            "id": 202,
+            "email": "outside@example.com",
+            "name": "outside@example.com",
+            "status": "active",
+            "group_id": 33,
+            "group_name": "public-shared",
+        },
+    ]
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[10]")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="stale@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run", json={"dry_run": True})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["synced"]["seen"] == 2
+    assert payload["synced"]["synced"] == 0
+    assert payload["synced"]["skipped_without_current_group"] == 1
+    assert payload["synced"]["skipped_outside_schedule_range"] == 1
+    assert payload["synced"]["skipped_outside_pool"] == 0
+    assert payload["planned"] == []
+    assert payload["moved"] == []
+    assert payload["skipped"] == []
+    assert backend.replace_calls == []

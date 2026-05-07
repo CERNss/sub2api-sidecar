@@ -155,7 +155,11 @@ def test_sqlite_store_persists_rotation_pool_assignments_and_events(tmp_path: Pa
     events = second_store.list_rotation_events()
 
     assert len(groups) == 1
-    assert groups[0].group_id == 11
+    assert groups[0].group_id == "11"
+    assert second_store.get_rotation_pool_group(11) is not None
+    assert second_store.get_rotation_pool_group("11") is not None
+    second_store.delete_rotation_pool_group("11")
+    assert second_store.get_rotation_pool_group(11) is None
     assert assignment is not None
     assert assignment.current_group_id == 11
     assert len(events) == 1

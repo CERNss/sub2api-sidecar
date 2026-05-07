@@ -4,6 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -17,7 +18,12 @@ from app.config import Settings, get_settings
 from app.errors import FlowNotFoundError, ProvisioningError
 from app.logging_config import setup_logging
 from app.models.flow import AssignmentMode, FlowStatus
+from app.models.rotation import AutoRotationUsageWindow, RotationPoolGroup, RotationPoolKind
 from app.models.schemas import (
+    AutoRotationConfigEnvelope,
+    AutoRotationConfigRequest,
+    AutoRotationConfigResponse,
+    AutoRotationRunRequest,
     AutoRotationRunResponse,
     ErrorResponse,
     LoginRequest,
@@ -246,10 +252,24 @@ def serve_react_app() -> Response:
     )
 
 
+def safe_operator_next_path(value: str | None) -> str:
+    if value in {
+        "/orchestration",
+        "/orchestration/manual",
+        "/orchestration/dynamic",
+        "/dynamic",
+        "/dashboard",
+        "/provision",
+    }:
+        return value
+    return "/"
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> Response:
     if get_optional_auth_session(request):
-        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+        next_path = safe_operator_next_path(request.query_params.get("next"))
+        return RedirectResponse(url=next_path, status_code=status.HTTP_303_SEE_OTHER)
 
     return serve_react_app()
 
@@ -290,6 +310,23 @@ def index(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
         return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+
+    return RedirectResponse(url="/orchestration/manual", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/orchestration", response_class=HTMLResponse)
+@app.get("/orchestration/manual", response_class=HTMLResponse)
+@app.get("/orchestration/dynamic", response_class=HTMLResponse)
+@app.get("/dynamic", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/provision", response_class=HTMLResponse)
+def operator_view(request: Request) -> Response:
+    session = get_optional_auth_session(request)
+    if not session:
+        return RedirectResponse(
+            url=f"/login?next={request.url.path}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
     return serve_react_app()
 
@@ -526,18 +563,117 @@ def rotation_pool_candidates(_: AuthSession = Depends(require_api_auth)) -> JSON
     return JSONResponse(status_code=200, content=payload.model_dump())
 
 
+def parse_rotation_pool_kind(value: str | None) -> RotationPoolKind:
+    try:
+        return RotationPoolKind(value or RotationPoolKind.rotation.value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="pool_kind must be either landing or rotation",
+        ) from exc
+
+
+def selected_pool_response(group: RotationPoolGroup) -> RotationPoolCandidateResponse:
+    return RotationPoolCandidateResponse(
+        group_id=group.group_id,
+        name=group.group_name,
+        group_kind=group.group_kind,
+        platform=group.platform,
+        status=group.status,
+        is_exclusive=group.is_exclusive,
+        is_subscription=group.is_subscription,
+        rotation_supported=group.is_exclusive and not group.is_subscription,
+        unsupported_reason=None
+        if group.is_exclusive and not group.is_subscription
+        else "selected group is not supported for automatic rotation",
+        selected=True,
+        rotation_selected=group.pool_kind == RotationPoolKind.rotation,
+        landing_selected=group.pool_kind == RotationPoolKind.landing,
+        priority=group.priority if group.pool_kind == RotationPoolKind.rotation else None,
+        landing_priority=group.priority if group.pool_kind == RotationPoolKind.landing else None,
+    )
+
+
+def auto_rotation_config_response() -> AutoRotationConfigEnvelope:
+    service = get_rotation_service()
+    config = service.get_auto_rotation_config()
+    store = get_flow_store()
+    landing_pool = [
+        selected_pool_response(group)
+        for group in store.list_rotation_pool_groups(RotationPoolKind.landing)
+    ]
+    rotation_pool = [
+        selected_pool_response(group)
+        for group in store.list_rotation_pool_groups(RotationPoolKind.rotation)
+    ]
+    return AutoRotationConfigEnvelope(
+        config=AutoRotationConfigResponse(
+            enabled=config.enabled,
+            auto_assign_new_users=config.auto_assign_new_users,
+            cooldown_minutes=config.cooldown_minutes,
+            usage_window=config.usage_window.value,
+            usage_thresholds=list(config.usage_thresholds),
+            schedule_source_group_ids=list(config.schedule_source_group_ids),
+        ),
+        pool=rotation_pool,
+        landing_pool=landing_pool,
+        rotation_pool=rotation_pool,
+    )
+
+
+@app.get("/rotation/auto/config")
+def rotation_auto_config(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content=auto_rotation_config_response().model_dump(mode="json"),
+    )
+
+
+@app.put("/rotation/auto/config")
+def rotation_auto_config_update(
+    payload: AutoRotationConfigRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    try:
+        usage_window = AutoRotationUsageWindow(payload.usage_window)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="usage_window must be one of: 5h, 1d, 7d, 30d",
+        ) from exc
+
+    get_rotation_service().update_auto_rotation_config(
+        enabled=payload.enabled,
+        auto_assign_new_users=payload.auto_assign_new_users,
+        cooldown_minutes=payload.cooldown_minutes,
+        usage_window=usage_window,
+        usage_thresholds=tuple(payload.usage_thresholds),
+        schedule_source_group_ids=tuple(payload.schedule_source_group_ids),
+    )
+    return JSONResponse(
+        status_code=200,
+        content=auto_rotation_config_response().model_dump(mode="json"),
+    )
+
+
 @app.post("/rotation/pool/groups")
 def rotation_pool_add_group(
     payload: RotationPoolGroupRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     service = get_rotation_service()
-    group = service.add_group_to_pool(group_id=payload.group_id, priority=payload.priority)
+    pool_kind = parse_rotation_pool_kind(payload.pool_kind)
+    group = service.add_group_to_pool(
+        group_id=payload.group_id,
+        priority=payload.priority,
+        pool_kind=pool_kind,
+    )
     return JSONResponse(
         status_code=200,
         content={
             "success": True,
             "group_id": group.group_id,
+            "pool_kind": group.pool_kind.value,
             "name": group.group_name,
             "group_kind": group.group_kind,
             "priority": group.priority,
@@ -551,10 +687,22 @@ def rotation_pool_add_group(
 @app.delete("/rotation/pool/groups/{group_id}")
 def rotation_pool_remove_group(
     group_id: str,
+    pool_kind: str | None = Query(default=None),
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    get_rotation_service().remove_group_from_pool(group_id)
-    return JSONResponse(status_code=200, content={"success": True, "group_id": group_id})
+    coerced: Any = group_id
+    stripped = group_id.strip()
+    if stripped and (stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit())):
+        try:
+            coerced = int(stripped)
+        except ValueError:
+            coerced = group_id
+    parsed_pool_kind = parse_rotation_pool_kind(pool_kind)
+    get_rotation_service().remove_group_from_pool(coerced, parsed_pool_kind)
+    return JSONResponse(
+        status_code=200,
+        content={"success": True, "group_id": group_id, "pool_kind": parsed_pool_kind.value},
+    )
 
 
 @app.post("/rotation/manual")
@@ -572,10 +720,17 @@ def rotation_manual(
 
 
 @app.post("/rotation/auto/run")
-def rotation_auto_run(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
-    result = get_rotation_service().run_auto_rotation()
+def rotation_auto_run(
+    payload: AutoRotationRunRequest | None = None,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_rotation_service().run_auto_rotation(dry_run=payload.dry_run if payload else False)
     response = AutoRotationRunResponse(
         window=result["window"],
+        dry_run=result["dry_run"],
+        synced=result["synced"],
+        config=result["config"],
+        planned=[RotationExecutionResponse(**item) for item in result["planned"]],
         moved=[RotationExecutionResponse(**item) for item in result["moved"]],
         skipped=[RotationExecutionResponse(**item) for item in result["skipped"]],
         failed=[RotationExecutionResponse(**item) for item in result["failed"]],
