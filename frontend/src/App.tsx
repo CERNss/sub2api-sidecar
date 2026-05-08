@@ -11,7 +11,9 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Save,
   Search,
+  Send,
   TimerReset,
   UserRound
 } from "lucide-react";
@@ -85,7 +87,7 @@ type ProvisionStartPayload = ApiPayload & {
 
 type FlowStatusFilter = "" | "pending_oauth" | "completed" | "failed";
 type AssignmentModeFilter = "" | "dedicated" | "managed_pool";
-type OperatorView = "orchestration" | "provision";
+type OperatorView = "orchestration" | "provision" | "notification";
 type OrchestrationTab = "manual" | "dynamic";
 
 type ProvisionFlowSummary = {
@@ -247,6 +249,207 @@ type RunRecordsPanelProps = {
   onStatus?: (status: StatusState) => void;
 };
 
+type RunReasonSummary = {
+  reason: string;
+  count: number;
+};
+type NotificationRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq";
+type NotificationRuleAggregation = "latest" | "avg" | "max" | "min" | "sum";
+type NotificationSeverity = "info" | "warning" | "critical";
+
+type NotificationSignal = {
+  key: string;
+  label: string;
+  description: string;
+  source: string;
+  unit?: string;
+  defaultThreshold?: string;
+  defaultOperator?: NotificationRuleOperator;
+  defaultAggregation?: NotificationRuleAggregation;
+  defaultSeverity?: NotificationSeverity;
+  defaultReadIntervalMinutes?: number;
+  defaultEvaluationWindowMinutes?: number;
+};
+
+type NotificationSignalGroup = {
+  title: string;
+  description: string;
+  signals: NotificationSignal[];
+};
+
+type WebhookProvider = "generic" | "feishu" | "dingtalk" | "wecom" | "slack" | "discord";
+
+type NotificationWebhook = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  provider: WebhookProvider;
+  url: string;
+  secret: string;
+  mentionOnFailure: boolean;
+};
+
+const webhookProviderOptions: { value: WebhookProvider; label: string }[] = [
+  { value: "generic", label: "通用 / 自定义 JSON" },
+  { value: "feishu", label: "飞书 / Lark 自定义机器人" },
+  { value: "dingtalk", label: "钉钉自定义机器人" },
+  { value: "wecom", label: "企业微信群机器人" },
+  { value: "slack", label: "Slack Incoming Webhook" },
+  { value: "discord", label: "Discord Webhook" }
+];
+
+const webhookSecretHints: Record<WebhookProvider, string> = {
+  generic: "可选，用于签名或鉴权",
+  feishu: "可选，飞书加签密钥（HMAC-SHA256）",
+  dingtalk: "可选，钉钉加签密钥",
+  wecom: "通常留空（key 已包含在 URL 中）",
+  slack: "可选，签名/鉴权 header",
+  discord: "通常留空"
+};
+
+type NotificationRule = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  signalKey: string;
+  severity: NotificationSeverity;
+  operator: NotificationRuleOperator;
+  threshold: string;
+  warningThreshold: string;
+  recoveryThreshold: string;
+  thresholdUnit: string;
+  aggregation: NotificationRuleAggregation;
+  readIntervalMinutes: number;
+  evaluationWindowMinutes: number;
+  forMinutes: number;
+  cooldownMinutes: number;
+  targetWebhookIds: string[];
+  includeResolved: boolean;
+  includeSnapshot: boolean;
+};
+
+type NotificationRoutingPolicy = {
+  groupBy: "signal" | "source" | "severity";
+  groupWaitMinutes: number;
+  repeatIntervalMinutes: number;
+  quietHoursEnabled: boolean;
+  quietHoursStart: string;
+  quietHoursEnd: string;
+};
+
+type NotificationSettings = {
+  webhooks: NotificationWebhook[];
+  rules: NotificationRule[];
+  policy: NotificationRoutingPolicy;
+};
+const notificationSignalGroups: NotificationSignalGroup[] = [
+  {
+    title: "平台 API Key",
+    description: "平台 Key、额度、窗口限额、余额、模型和 Key 自身用量。",
+    signals: [
+      { key: "platform_key_health", label: "Key 有效性", description: "isValid、status、可用模型异常。", source: "/v1/usage", defaultThreshold: "1", defaultOperator: "eq", defaultAggregation: "latest", defaultSeverity: "critical", defaultReadIntervalMinutes: 5, defaultEvaluationWindowMinutes: 5 },
+      { key: "platform_key_quota", label: "Key 额度低", description: "quota、rate limits、remaining 接近阈值。", source: "/v1/usage", unit: "% remaining", defaultThreshold: "20", defaultOperator: "lte", defaultAggregation: "min", defaultSeverity: "warning", defaultReadIntervalMinutes: 10, defaultEvaluationWindowMinutes: 30 },
+      { key: "platform_key_expiry", label: "Key 即将过期", description: "expires_at、days_until_expiry。", source: "/v1/usage", unit: "days", defaultThreshold: "7", defaultOperator: "lte", defaultAggregation: "latest", defaultSeverity: "warning", defaultReadIntervalMinutes: 60, defaultEvaluationWindowMinutes: 60 },
+      { key: "subscription_usage", label: "订阅用量/过期", description: "日/周/月用量、限额、订阅到期。", source: "/v1/usage", unit: "% used", defaultThreshold: "85", defaultOperator: "gte", defaultAggregation: "max", defaultSeverity: "warning", defaultReadIntervalMinutes: 30, defaultEvaluationWindowMinutes: 120 },
+      { key: "api_key_usage_spike", label: "Key 用量突增", description: "requests、tokens、cost、rpm、tpm、模型统计。", source: "/v1/usage", unit: "% change", defaultThreshold: "150", defaultOperator: "gte", defaultAggregation: "max", defaultSeverity: "critical", defaultReadIntervalMinutes: 10, defaultEvaluationWindowMinutes: 60 }
+    ]
+  },
+  {
+    title: "普通用户",
+    description: "用户资料、余额、订阅、API Keys、使用趋势和公告状态。",
+    signals: [
+      { key: "user_balance_low", label: "用户余额低", description: "balance、通知阈值、额外通知邮箱。", source: "user routes", unit: "USD", defaultThreshold: "5", defaultOperator: "lte", defaultAggregation: "latest", defaultSeverity: "warning", defaultReadIntervalMinutes: 30, defaultEvaluationWindowMinutes: 30 },
+      { key: "user_api_key_state", label: "用户 Key 状态", description: "用户 API Key 状态、quota、过期、IP 规则。", source: "user routes", defaultThreshold: "1", defaultOperator: "gte", defaultAggregation: "sum", defaultSeverity: "warning", defaultReadIntervalMinutes: 30, defaultEvaluationWindowMinutes: 60 },
+      { key: "user_usage_summary", label: "用户使用摘要", description: "usage stats、trend、model stats、Key usage。", source: "user routes", unit: "% change", defaultThreshold: "120", defaultOperator: "gte", defaultAggregation: "max", defaultSeverity: "info", defaultReadIntervalMinutes: 60, defaultEvaluationWindowMinutes: 240 },
+      { key: "user_subscription", label: "用户订阅摘要", description: "活跃订阅、progress、summary。", source: "user routes", unit: "% used", defaultThreshold: "85", defaultOperator: "gte", defaultAggregation: "max", defaultSeverity: "warning", defaultReadIntervalMinutes: 60, defaultEvaluationWindowMinutes: 240 }
+    ]
+  },
+  {
+    title: "管理员运营",
+    description: "Dashboard、用户/分组/渠道/支付/运维告警等后台数据。",
+    signals: [
+      { key: "admin_dashboard", label: "运营 Dashboard", description: "总请求、成本、趋势、模型和分组统计。", source: "admin routes", unit: "% change", defaultThreshold: "100", defaultOperator: "gte", defaultAggregation: "max", defaultSeverity: "info", defaultReadIntervalMinutes: 15, defaultEvaluationWindowMinutes: 60 },
+      { key: "admin_usage_anomaly", label: "成本/错误突增", description: "usage log、错误率、上游错误、请求详情。", source: "admin routes", unit: "% change", defaultThreshold: "150", defaultOperator: "gte", defaultAggregation: "max", defaultSeverity: "critical", defaultReadIntervalMinutes: 5, defaultEvaluationWindowMinutes: 30 },
+      { key: "admin_group_channel", label: "分组和渠道监控", description: "分组限额、渠道绑定、监控失败。", source: "admin routes", unit: "failures", defaultThreshold: "1", defaultOperator: "gte", defaultAggregation: "sum", defaultSeverity: "warning", defaultReadIntervalMinutes: 5, defaultEvaluationWindowMinutes: 15 },
+      { key: "admin_payment", label: "支付/退款", description: "支付成功、失败、退款、订单状态。", source: "admin routes", unit: "events", defaultThreshold: "1", defaultOperator: "gte", defaultAggregation: "sum", defaultSeverity: "info", defaultReadIntervalMinutes: 10, defaultEvaluationWindowMinutes: 30 },
+      { key: "admin_ops_alert", label: "运维告警", description: "并发、实时流量、告警规则、系统日志。", source: "admin routes", unit: "events", defaultThreshold: "1", defaultOperator: "gte", defaultAggregation: "sum", defaultSeverity: "critical", defaultReadIntervalMinutes: 5, defaultEvaluationWindowMinutes: 15 }
+    ]
+  },
+  {
+    title: "AI 上游账号",
+    description: "账号状态、调度、限流、会话窗口、quota 和上游平台用量。",
+    signals: [
+      { key: "account_invalid", label: "账号失效", description: "status、error_message、expires_at。", source: "account usage", unit: "accounts", defaultThreshold: "1", defaultOperator: "gte", defaultAggregation: "sum", defaultSeverity: "critical", defaultReadIntervalMinutes: 5, defaultEvaluationWindowMinutes: 10 },
+      { key: "account_rate_limited", label: "限流/过载", description: "rate_limited_at、reset_at、overload_until。", source: "account usage", unit: "accounts", defaultThreshold: "1", defaultOperator: "gte", defaultAggregation: "sum", defaultSeverity: "warning", defaultReadIntervalMinutes: 5, defaultEvaluationWindowMinutes: 15 },
+      { key: "account_quota_low", label: "Quota/Credits 低", description: "总/日/周 quota、AI credits、通知阈值。", source: "account usage", unit: "% remaining", defaultThreshold: "15", defaultOperator: "lte", defaultAggregation: "min", defaultSeverity: "warning", defaultReadIntervalMinutes: 15, defaultEvaluationWindowMinutes: 60 },
+      { key: "account_reauth_needed", label: "需重授/验证/疑似封禁", description: "needs_verify、needs_reauth、is_banned、error_code。", source: "account usage", unit: "accounts", defaultThreshold: "1", defaultOperator: "gte", defaultAggregation: "sum", defaultSeverity: "critical", defaultReadIntervalMinutes: 10, defaultEvaluationWindowMinutes: 30 },
+      { key: "account_capacity_high", label: "并发/RPM/会话接近上限", description: "concurrency、rpm、max_sessions、active_sessions。", source: "account usage", unit: "% used", defaultThreshold: "85", defaultOperator: "gte", defaultAggregation: "max", defaultSeverity: "warning", defaultReadIntervalMinutes: 5, defaultEvaluationWindowMinutes: 15 }
+    ]
+  }
+];
+const notificationSignals = notificationSignalGroups.flatMap((group) => group.signals);
+const notificationSignalByKey = new Map(notificationSignals.map((signal) => [signal.key, signal]));
+const defaultNotificationSignalKeys = notificationSignalGroups.flatMap((group) =>
+  group.signals
+    .filter((signal) =>
+      [
+        "platform_key_quota",
+        "platform_key_expiry",
+        "user_balance_low",
+        "admin_usage_anomaly",
+        "account_invalid",
+        "account_rate_limited",
+        "account_quota_low",
+        "account_reauth_needed"
+      ].includes(signal.key)
+    )
+    .map((signal) => signal.key)
+);
+const defaultNotificationSettings: NotificationSettings = {
+  webhooks: [
+    {
+      id: "ops-default",
+      name: "Ops Webhook",
+      enabled: false,
+      provider: "generic",
+      url: "",
+      secret: "",
+      mentionOnFailure: true
+    }
+  ],
+  rules: defaultNotificationSignalKeys.map((signalKey) => {
+    const signal = notificationSignalByKey.get(signalKey);
+    return {
+      id: `rule-${signalKey}`,
+      name: signal?.label ?? signalKey,
+      enabled: true,
+      signalKey,
+      severity: signal?.defaultSeverity ?? "warning",
+      operator: signal?.defaultOperator ?? "gte",
+      threshold: signal?.defaultThreshold ?? "1",
+      warningThreshold: signal?.defaultThreshold ?? "1",
+      recoveryThreshold: "",
+      thresholdUnit: signal?.unit ?? "",
+      aggregation: signal?.defaultAggregation ?? "latest",
+      readIntervalMinutes: signal?.defaultReadIntervalMinutes ?? 10,
+      evaluationWindowMinutes: signal?.defaultEvaluationWindowMinutes ?? 30,
+      forMinutes: 5,
+      cooldownMinutes: 60,
+      targetWebhookIds: ["ops-default"],
+      includeResolved: true,
+      includeSnapshot: true
+    };
+  }),
+  policy: {
+    groupBy: "severity",
+    groupWaitMinutes: 2,
+    repeatIntervalMinutes: 120,
+    quietHoursEnabled: false,
+    quietHoursStart: "22:00",
+    quietHoursEnd: "08:00"
+  }
+};
+
 type RotationPoolCandidate = {
   group_id: unknown;
   name: string;
@@ -298,7 +501,8 @@ const usageWindowOptions = [
 ] as const;
 const operatorViewPaths: Record<OperatorView, string> = {
   orchestration: "/orchestration/manual",
-  provision: "/provision"
+  provision: "/provision",
+  notification: "/notifications"
 };
 const orchestrationTabPaths: Record<OrchestrationTab, string> = {
   manual: "/orchestration/manual",
@@ -509,6 +713,9 @@ function orchestrationTabFromPath(pathname: string): OrchestrationTab {
 function viewFromPath(pathname: string): OperatorView {
   if (pathname === operatorViewPaths.provision) {
     return "provision";
+  }
+  if (pathname === operatorViewPaths.notification) {
+    return "notification";
   }
   return "orchestration";
 }
@@ -784,6 +991,14 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
               <Plus size={17} aria-hidden="true" />
               OAuth 预配
             </button>
+            <button
+              className={activeView === "notification" ? "active" : ""}
+              type="button"
+              onClick={() => navigateView("notification")}
+            >
+              <ClipboardCheck size={17} aria-hidden="true" />
+              告警中心
+            </button>
           </div>
           <button className="button secondary compact" type="button" onClick={logout} disabled={logoutBusy}>
             {logoutBusy ? (
@@ -796,7 +1011,9 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
         </div>
       </section>
 
-      {activeView === "provision" ? (
+      {activeView === "notification" ? (
+        <NotificationSettingsPanel />
+      ) : activeView === "provision" ? (
         <ProvisionForm
           config={config}
           onAuthExpired={handleAuthExpired}
@@ -2427,6 +2644,747 @@ function DynamicOrchestrationView({
         </div>
       </Card>
 
+    </div>
+  );
+}
+
+function summarizeReasons(items?: RotationExecutionPayload[]): RunReasonSummary[] {
+  const counts = new Map<string, number>();
+  for (const item of items ?? []) {
+    const reason = item.reason?.trim() || "未提供原因";
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason));
+}
+function severityLabel(severity: NotificationSeverity): string {
+  if (severity === "critical") return "Critical";
+  if (severity === "warning") return "Warning";
+  return "Info";
+}
+
+function severityColor(severity: NotificationSeverity): string {
+  if (severity === "critical") return "red";
+  if (severity === "warning") return "gold";
+  return "blue";
+}
+
+function operatorLabel(operator: NotificationRuleOperator): string {
+  const labels: Record<NotificationRuleOperator, string> = {
+    gt: ">",
+    gte: ">=",
+    lt: "<",
+    lte: "<=",
+    eq: "=",
+    neq: "!="
+  };
+  return labels[operator];
+}
+
+function NotificationSettingsPanel() {
+  const [settings, setSettings] = useState<NotificationSettings>(() => {
+    const saved = window.localStorage.getItem("sub2api-notification-settings");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved) as Partial<NotificationSettings>;
+        const webhooks = Array.isArray(parsed.webhooks) && parsed.webhooks.length > 0
+          ? parsed.webhooks.map((webhook, index) => ({
+            id: webhook.id || `webhook-${index + 1}`,
+            name: webhook.name || `Webhook ${index + 1}`,
+            enabled: Boolean(webhook.enabled),
+            provider: (webhookProviderOptions.some((option) => option.value === webhook.provider)
+              ? webhook.provider
+              : "generic") as WebhookProvider,
+            url: webhook.url || "",
+            secret: webhook.secret || "",
+            mentionOnFailure: webhook.mentionOnFailure ?? true
+          }))
+          : defaultNotificationSettings.webhooks;
+        if (webhooks.length > 0) {
+          const rules = Array.isArray(parsed.rules) && parsed.rules.length > 0
+            ? parsed.rules.map((rule, index) => {
+              const signal = notificationSignalByKey.get(rule.signalKey || defaultNotificationSignalKeys[0]);
+              return {
+                id: rule.id || `rule-${index + 1}`,
+                name: rule.name || signal?.label || `规则 ${index + 1}`,
+                enabled: rule.enabled ?? true,
+                signalKey: rule.signalKey || signal?.key || defaultNotificationSignalKeys[0],
+                severity: rule.severity || signal?.defaultSeverity || "warning",
+                operator: rule.operator || signal?.defaultOperator || "gte",
+                threshold: rule.threshold || signal?.defaultThreshold || "1",
+                warningThreshold: rule.warningThreshold || signal?.defaultThreshold || "",
+                recoveryThreshold: rule.recoveryThreshold || "",
+                thresholdUnit: rule.thresholdUnit || signal?.unit || "",
+                aggregation: rule.aggregation || signal?.defaultAggregation || "latest",
+                readIntervalMinutes: Number(rule.readIntervalMinutes) || signal?.defaultReadIntervalMinutes || 10,
+                evaluationWindowMinutes: Number(rule.evaluationWindowMinutes) || signal?.defaultEvaluationWindowMinutes || 30,
+                forMinutes: Number(rule.forMinutes) || 5,
+                cooldownMinutes: Number(rule.cooldownMinutes) || 60,
+                targetWebhookIds: Array.isArray(rule.targetWebhookIds) ? rule.targetWebhookIds : [webhooks[0].id],
+                includeResolved: rule.includeResolved ?? true,
+                includeSnapshot: rule.includeSnapshot ?? true
+              };
+            })
+            : defaultNotificationSettings.rules.map((rule) => ({
+              ...rule,
+              targetWebhookIds: [webhooks[0].id]
+            }));
+          return {
+            webhooks,
+            rules,
+            policy: {
+              ...defaultNotificationSettings.policy,
+              ...(parsed.policy ?? {})
+            }
+          };
+        }
+      } catch {
+        return defaultNotificationSettings;
+      }
+    }
+    return defaultNotificationSettings;
+  });
+  const [selectedWebhookId, setSelectedWebhookId] = useState(() => defaultNotificationSettings.webhooks[0].id);
+  const [selectedRuleId, setSelectedRuleId] = useState(() => defaultNotificationSettings.rules[0]?.id ?? "");
+  const [status, setStatus] = useState<StatusState>(emptyStatus);
+  const selectedWebhook =
+    settings.webhooks.find((webhook) => webhook.id === selectedWebhookId) ?? settings.webhooks[0];
+  const selectedRule = settings.rules.find((rule) => rule.id === selectedRuleId) ?? settings.rules[0];
+  const selectedRuleSignal = selectedRule ? notificationSignalByKey.get(selectedRule.signalKey) : null;
+  const enabledWebhookCount = settings.webhooks.filter((webhook) => webhook.enabled).length;
+  const enabledRuleCount = settings.rules.filter((rule) => rule.enabled).length;
+  const configuredSignalCount = new Set(settings.rules.map((rule) => rule.signalKey)).size;
+
+  function updateWebhook(webhookId: string, partial: Partial<NotificationWebhook>) {
+    setSettings((current) => ({
+      ...current,
+      webhooks: current.webhooks.map((webhook) =>
+        webhook.id === webhookId ? { ...webhook, ...partial } : webhook
+      )
+    }));
+  }
+
+  function addWebhook() {
+    const nextId = `webhook-${Date.now()}`;
+    setSettings((current) => ({
+      ...current,
+      webhooks: [
+        ...current.webhooks,
+        {
+          id: nextId,
+          name: `Webhook ${current.webhooks.length + 1}`,
+          enabled: false,
+          provider: "generic",
+          url: "",
+          secret: "",
+          mentionOnFailure: true
+        }
+      ]
+    }));
+    setSelectedWebhookId(nextId);
+  }
+
+  function removeSelectedWebhook() {
+    if (settings.webhooks.length <= 1 || !selectedWebhook) {
+      setStatus({ message: "至少保留一个 Webhook。", tone: "error" });
+      return;
+    }
+    const remaining = settings.webhooks.filter((webhook) => webhook.id !== selectedWebhook.id);
+    setSettings((current) => ({
+      ...current,
+      webhooks: remaining,
+      rules: current.rules.map((rule) => ({
+        ...rule,
+        targetWebhookIds: rule.targetWebhookIds.filter((id) => id !== selectedWebhook.id)
+      }))
+    }));
+    setSelectedWebhookId(remaining[0].id);
+  }
+
+  function updateRule(ruleId: string, partial: Partial<NotificationRule>) {
+    setSettings((current) => ({
+      ...current,
+      rules: current.rules.map((rule) => (rule.id === ruleId ? { ...rule, ...partial } : rule))
+    }));
+  }
+
+  function addRule(signalKey = "account_invalid") {
+    const signal = notificationSignalByKey.get(signalKey) ?? notificationSignals[0];
+    const nextId = `rule-${Date.now()}`;
+    const targetWebhookId = selectedWebhook?.id ?? settings.webhooks[0]?.id ?? "";
+    setSettings((current) => ({
+      ...current,
+      rules: [
+        ...current.rules,
+        {
+          id: nextId,
+          name: signal.label,
+          enabled: true,
+          signalKey: signal.key,
+          severity: signal.defaultSeverity ?? "warning",
+          operator: signal.defaultOperator ?? "gte",
+          threshold: signal.defaultThreshold ?? "1",
+          warningThreshold: signal.defaultThreshold ?? "",
+          recoveryThreshold: "",
+          thresholdUnit: signal.unit ?? "",
+          aggregation: signal.defaultAggregation ?? "latest",
+          readIntervalMinutes: signal.defaultReadIntervalMinutes ?? 10,
+          evaluationWindowMinutes: signal.defaultEvaluationWindowMinutes ?? 30,
+          forMinutes: 5,
+          cooldownMinutes: 60,
+          targetWebhookIds: targetWebhookId ? [targetWebhookId] : [],
+          includeResolved: true,
+          includeSnapshot: true
+        }
+      ]
+    }));
+    setSelectedRuleId(nextId);
+  }
+
+  function removeSelectedRule() {
+    if (settings.rules.length <= 1 || !selectedRule) {
+      setStatus({ message: "至少保留一条告警规则。", tone: "error" });
+      return;
+    }
+    const remaining = settings.rules.filter((rule) => rule.id !== selectedRule.id);
+    setSettings((current) => ({ ...current, rules: remaining }));
+    setSelectedRuleId(remaining[0].id);
+  }
+
+  function updatePolicy(partial: Partial<NotificationRoutingPolicy>) {
+    setSettings((current) => ({
+      ...current,
+      policy: { ...current.policy, ...partial }
+    }));
+  }
+
+  function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    window.localStorage.setItem("sub2api-notification-settings", JSON.stringify(settings));
+    setStatus({ message: "Webhook 信息权限已保存。", tone: "success" });
+  }
+
+  function sendTestNotification() {
+    if (!selectedRule) {
+      setStatus({ message: "请先选择一条告警规则。", tone: "error" });
+      return;
+    }
+    const targetWebhooks = settings.webhooks.filter((webhook) => selectedRule.targetWebhookIds.includes(webhook.id));
+    if (targetWebhooks.length === 0) {
+      setStatus({ message: "请至少给当前规则选择一个 Webhook。", tone: "error" });
+      return;
+    }
+    if (targetWebhooks.some((webhook) => !webhook.enabled || !webhook.url.trim())) {
+      setStatus({ message: "当前规则包含未启用或未填写 URL 的 Webhook。", tone: "error" });
+      return;
+    }
+    setStatus({ message: `${selectedRule.name} 测试通知已准备好，将发送到 ${targetWebhooks.length} 个 Webhook。`, tone: "info" });
+  }
+
+  return (
+    <div className="notification-workspace">
+      <section className="panel form-panel notification-panel">
+        <div className="panel-title-row">
+          <div>
+            <p className="eyebrow">Alert Center</p>
+            <h2>综合信息告警</h2>
+          </div>
+          <div className="action-row">
+            <button className="button secondary compact" type="button" onClick={addWebhook}>
+              <Plus size={17} aria-hidden="true" />
+              新增 Webhook
+            </button>
+            <button className="button secondary compact" type="button" onClick={() => addRule()}>
+              <Plus size={17} aria-hidden="true" />
+              新增规则
+            </button>
+          </div>
+        </div>
+
+        <form className="form-stack" onSubmit={saveSettings}>
+          <div className="notification-section-title">
+            <div>
+              <h3>Webhook 接收器</h3>
+              <p>接收器只定义消息发到哪里；是否发送、阈值和频率由告警规则控制。</p>
+            </div>
+          </div>
+          <div className="webhook-list">
+            {settings.webhooks.map((webhook) => (
+              <button
+                key={webhook.id}
+                className={`webhook-row ${webhook.id === selectedWebhook?.id ? "active" : ""}`}
+                type="button"
+                onClick={() => setSelectedWebhookId(webhook.id)}
+              >
+                <span>
+                  <strong>{webhook.name || "未命名 Webhook"}</strong>
+                  <small>{webhook.url || "未配置 URL"}</small>
+                </span>
+                <Tag color={webhook.enabled ? "green" : "default"}>
+                  {settings.rules.filter((rule) => rule.targetWebhookIds.includes(webhook.id)).length} 条规则
+                </Tag>
+              </button>
+            ))}
+          </div>
+
+          {selectedWebhook ? (
+            <>
+              <label className="switch-row">
+                <input
+                  type="checkbox"
+                  checked={selectedWebhook.enabled}
+                  onChange={(event) => updateWebhook(selectedWebhook.id, { enabled: event.target.checked })}
+                />
+                <span>
+                  <strong>启用当前 Webhook</strong>
+                  <small>只有启用后才会接收它被授权的信息集合。</small>
+                </span>
+              </label>
+
+              <div className="form-grid-2">
+                <label className="field">
+                  <span>Webhook 名称</span>
+                  <input
+                    value={selectedWebhook.name}
+                    placeholder="Ops / Finance / Account Alerts"
+                    onChange={(event) => updateWebhook(selectedWebhook.id, { name: event.target.value })}
+                  />
+                </label>
+                <label className="field">
+                  <span>接收平台</span>
+                  <select
+                    value={selectedWebhook.provider}
+                    onChange={(event) =>
+                      updateWebhook(selectedWebhook.id, { provider: event.target.value as WebhookProvider })
+                    }
+                  >
+                    {webhookProviderOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <label className="field">
+                <span>Secret / 加签密钥</span>
+                <input
+                  value={selectedWebhook.secret}
+                  placeholder={webhookSecretHints[selectedWebhook.provider]}
+                  onChange={(event) => updateWebhook(selectedWebhook.id, { secret: event.target.value })}
+                />
+              </label>
+
+              <label className="field">
+                <span>Webhook URL</span>
+                <input
+                  type="url"
+                  value={selectedWebhook.url}
+                  placeholder="https://example.com/webhook"
+                  onChange={(event) => updateWebhook(selectedWebhook.id, { url: event.target.value })}
+                />
+              </label>
+
+              <label className="switch-row">
+                <input
+                  type="checkbox"
+                  checked={selectedWebhook.mentionOnFailure}
+                  onChange={(event) => updateWebhook(selectedWebhook.id, { mentionOnFailure: event.target.checked })}
+                />
+                <span>
+                  <strong>失败类消息提醒负责人</strong>
+                  <small>账号失效、限流、错误率突增、支付失败等消息可以追加负责人 mention。</small>
+                </span>
+              </label>
+            </>
+          ) : null}
+
+          <div className="notification-section-title">
+            <div>
+              <h3>告警规则</h3>
+              <p>为每类信息设置读取频率、计算窗口、阈值、持续时间和 Webhook 路由。</p>
+            </div>
+          </div>
+          <div className="rule-layout">
+            <div className="rule-list">
+              {settings.rules.map((rule) => {
+                const signal = notificationSignalByKey.get(rule.signalKey);
+                return (
+                  <button
+                    className={`rule-row ${rule.id === selectedRule?.id ? "active" : ""}`}
+                    key={rule.id}
+                    type="button"
+                    onClick={() => setSelectedRuleId(rule.id)}
+                  >
+                    <span>
+                      <strong>{rule.name || signal?.label || "未命名规则"}</strong>
+                      <small>
+                        {signal?.label || rule.signalKey} · 每 {rule.readIntervalMinutes} 分钟读取 · {rule.targetWebhookIds.length} 个 Webhook
+                      </small>
+                    </span>
+                    <Tag color={rule.enabled ? severityColor(rule.severity) : "default"}>
+                      {rule.enabled ? severityLabel(rule.severity) : "停用"}
+                    </Tag>
+                  </button>
+                );
+              })}
+            </div>
+
+            {selectedRule ? (
+              <section className="rule-editor">
+                <div className="notification-group-header">
+                  <div>
+                    <h3>{selectedRule.name || selectedRuleSignal?.label || "告警规则"}</h3>
+                    <p>{selectedRuleSignal?.description || "选择信息类型后配置阈值和投递策略。"}</p>
+                  </div>
+                  <label className="mini-toggle">
+                    <input
+                      type="checkbox"
+                      checked={selectedRule.enabled}
+                      onChange={(event) => updateRule(selectedRule.id, { enabled: event.target.checked })}
+                    />
+                    启用
+                  </label>
+                </div>
+
+                <div className="form-grid-2">
+                  <label className="field">
+                    <span>规则名称</span>
+                    <input
+                      value={selectedRule.name}
+                      onChange={(event) => updateRule(selectedRule.id, { name: event.target.value })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>信息类型</span>
+                    <select
+                      value={selectedRule.signalKey}
+                      onChange={(event) => {
+                        const signal = notificationSignalByKey.get(event.target.value);
+                        updateRule(selectedRule.id, {
+                          signalKey: event.target.value,
+                          name: signal?.label ?? selectedRule.name,
+                          threshold: signal?.defaultThreshold ?? selectedRule.threshold,
+                          warningThreshold: signal?.defaultThreshold ?? selectedRule.warningThreshold,
+                          thresholdUnit: signal?.unit ?? "",
+                          operator: signal?.defaultOperator ?? selectedRule.operator,
+                          aggregation: signal?.defaultAggregation ?? selectedRule.aggregation,
+                          severity: signal?.defaultSeverity ?? selectedRule.severity,
+                          readIntervalMinutes: signal?.defaultReadIntervalMinutes ?? selectedRule.readIntervalMinutes,
+                          evaluationWindowMinutes: signal?.defaultEvaluationWindowMinutes ?? selectedRule.evaluationWindowMinutes
+                        });
+                      }}
+                    >
+                      {notificationSignalGroups.map((group) => (
+                        <optgroup label={group.title} key={group.title}>
+                          {group.signals.map((signal) => (
+                            <option value={signal.key} key={signal.key}>
+                              {signal.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="rule-control-grid">
+                  <label className="field">
+                    <span>读取频率</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={selectedRule.readIntervalMinutes}
+                      onChange={(event) => updateRule(selectedRule.id, { readIntervalMinutes: Math.max(1, Number(event.target.value) || 1) })}
+                    />
+                    <small>分钟</small>
+                  </label>
+                  <label className="field">
+                    <span>评估窗口</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={selectedRule.evaluationWindowMinutes}
+                      onChange={(event) => updateRule(selectedRule.id, { evaluationWindowMinutes: Math.max(1, Number(event.target.value) || 1) })}
+                    />
+                    <small>分钟</small>
+                  </label>
+                  <label className="field">
+                    <span>持续时间</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={selectedRule.forMinutes}
+                      onChange={(event) => updateRule(selectedRule.id, { forMinutes: Math.max(0, Number(event.target.value) || 0) })}
+                    />
+                    <small>持续异常才发送</small>
+                  </label>
+                  <label className="field">
+                    <span>重复间隔</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={selectedRule.cooldownMinutes}
+                      onChange={(event) => updateRule(selectedRule.id, { cooldownMinutes: Math.max(1, Number(event.target.value) || 1) })}
+                    />
+                    <small>同一异常再次提醒</small>
+                  </label>
+                </div>
+
+                <div className="rule-control-grid">
+                  <label className="field">
+                    <span>聚合方式</span>
+                    <select
+                      value={selectedRule.aggregation}
+                      onChange={(event) => updateRule(selectedRule.id, { aggregation: event.target.value as NotificationRuleAggregation })}
+                    >
+                      <option value="latest">最新值</option>
+                      <option value="avg">平均值</option>
+                      <option value="max">最大值</option>
+                      <option value="min">最小值</option>
+                      <option value="sum">求和</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>条件</span>
+                    <select
+                      value={selectedRule.operator}
+                      onChange={(event) => updateRule(selectedRule.id, { operator: event.target.value as NotificationRuleOperator })}
+                    >
+                      <option value="gte">大于等于</option>
+                      <option value="gt">大于</option>
+                      <option value="lte">小于等于</option>
+                      <option value="lt">小于</option>
+                      <option value="eq">等于</option>
+                      <option value="neq">不等于</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>触发阈值</span>
+                    <input
+                      value={selectedRule.threshold}
+                      onChange={(event) => updateRule(selectedRule.id, { threshold: event.target.value })}
+                    />
+                    <small>{selectedRule.thresholdUnit || "按信息类型定义"}</small>
+                  </label>
+                  <label className="field">
+                    <span>恢复阈值</span>
+                    <input
+                      value={selectedRule.recoveryThreshold}
+                      placeholder="可选"
+                      onChange={(event) => updateRule(selectedRule.id, { recoveryThreshold: event.target.value })}
+                    />
+                    <small>达到该值后发送恢复</small>
+                  </label>
+                </div>
+
+                <div className="form-grid-2">
+                  <label className="field">
+                    <span>严重等级</span>
+                    <select
+                      value={selectedRule.severity}
+                      onChange={(event) => updateRule(selectedRule.id, { severity: event.target.value as NotificationSeverity })}
+                    >
+                      <option value="info">Info</option>
+                      <option value="warning">Warning</option>
+                      <option value="critical">Critical</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>目标 Webhook</span>
+                    <select
+                      multiple
+                      value={selectedRule.targetWebhookIds}
+                      onChange={(event) =>
+                        updateRule(selectedRule.id, {
+                          targetWebhookIds: Array.from(event.currentTarget.selectedOptions).map((option) => option.value)
+                        })
+                      }
+                    >
+                      {settings.webhooks.map((webhook) => (
+                        <option value={webhook.id} key={webhook.id}>
+                          {webhook.name || webhook.id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="notification-event-grid">
+                  <label className="switch-row compact-switch-row">
+                    <input
+                      type="checkbox"
+                      checked={selectedRule.includeResolved}
+                      onChange={(event) => updateRule(selectedRule.id, { includeResolved: event.target.checked })}
+                    />
+                    <span>
+                      <strong>发送恢复通知</strong>
+                      <small>告警恢复时通知相同 webhook。</small>
+                    </span>
+                  </label>
+                  <label className="switch-row compact-switch-row">
+                    <input
+                      type="checkbox"
+                      checked={selectedRule.includeSnapshot}
+                      onChange={(event) => updateRule(selectedRule.id, { includeSnapshot: event.target.checked })}
+                    />
+                    <span>
+                      <strong>附带数据快照</strong>
+                      <small>发送当前值、阈值、窗口、来源和对象。</small>
+                    </span>
+                  </label>
+                </div>
+
+                <div className="action-row">
+                  <button className="button tertiary" type="button" onClick={removeSelectedRule}>
+                    删除规则
+                  </button>
+                </div>
+              </section>
+            ) : null}
+          </div>
+
+          <section className="notification-signal-group">
+            <div className="notification-group-header">
+              <div>
+                <h3>路由与降噪</h3>
+                <p>控制多条告警如何合并、多久重复，以及是否在安静时段暂停发送。</p>
+              </div>
+            </div>
+            <div className="rule-control-grid">
+              <label className="field">
+                <span>分组方式</span>
+                <select
+                  value={settings.policy.groupBy}
+                  onChange={(event) => updatePolicy({ groupBy: event.target.value as NotificationRoutingPolicy["groupBy"] })}
+                >
+                  <option value="severity">按严重等级</option>
+                  <option value="signal">按信息类型</option>
+                  <option value="source">按数据来源</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>合并等待</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={settings.policy.groupWaitMinutes}
+                  onChange={(event) => updatePolicy({ groupWaitMinutes: Math.max(0, Number(event.target.value) || 0) })}
+                />
+                <small>分钟内把相近告警合并发送</small>
+              </label>
+              <label className="field">
+                <span>默认重复间隔</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={settings.policy.repeatIntervalMinutes}
+                  onChange={(event) => updatePolicy({ repeatIntervalMinutes: Math.max(1, Number(event.target.value) || 1) })}
+                />
+                <small>未被规则覆盖时使用</small>
+              </label>
+              <label className="switch-row compact-switch-row">
+                <input
+                  type="checkbox"
+                  checked={settings.policy.quietHoursEnabled}
+                  onChange={(event) => updatePolicy({ quietHoursEnabled: event.target.checked })}
+                />
+                <span>
+                  <strong>启用安静时段</strong>
+                  <small>非 critical 告警可以延迟到时段结束。</small>
+                </span>
+              </label>
+            </div>
+            <div className="form-grid-2">
+              <label className="field">
+                <span>安静时段开始</span>
+                <input
+                  type="time"
+                  value={settings.policy.quietHoursStart}
+                  onChange={(event) => updatePolicy({ quietHoursStart: event.target.value })}
+                />
+              </label>
+              <label className="field">
+                <span>安静时段结束</span>
+                <input
+                  type="time"
+                  value={settings.policy.quietHoursEnd}
+                  onChange={(event) => updatePolicy({ quietHoursEnd: event.target.value })}
+                />
+              </label>
+            </div>
+          </section>
+
+          <div className="action-row">
+            <button className="button primary" type="submit">
+              <Save size={18} aria-hidden="true" />
+              保存设置
+            </button>
+            <button className="button secondary" type="button" onClick={sendTestNotification}>
+              <Send size={18} aria-hidden="true" />
+              发送测试
+            </button>
+            <button className="button tertiary" type="button" onClick={removeSelectedWebhook}>
+              删除当前
+            </button>
+          </div>
+          <StatusLine status={status} />
+        </form>
+      </section>
+
+      <section className="panel result-panel notification-summary-panel">
+        <div className="panel-title-row">
+          <div>
+            <p className="eyebrow">Summary</p>
+            <h2>当前配置</h2>
+          </div>
+        </div>
+        <div className="summary-grid">
+          <SummaryItem label="Webhook" value={`${settings.webhooks.length}`} />
+          <SummaryItem label="已启用" value={`${enabledWebhookCount}`} />
+          <SummaryItem label="启用规则" value={`${enabledRuleCount}`} />
+          <SummaryItem label="信息类型" value={`${configuredSignalCount}`} />
+        </div>
+        <div className="notification-route-summary">
+          {settings.webhooks.map((webhook) => {
+            const providerLabel =
+              webhookProviderOptions.find((option) => option.value === webhook.provider)?.label ?? "通用";
+            return (
+              <div className="notification-route-card" key={webhook.id}>
+                <div>
+                  <strong>{webhook.name || "未命名 Webhook"}</strong>
+                  <small>
+                    {providerLabel} · {webhook.enabled ? "已启用" : "未启用"} · {settings.rules.filter((rule) => rule.targetWebhookIds.includes(webhook.id)).length} 条规则
+                  </small>
+                </div>
+                <code>{webhook.url || "未配置 URL"}</code>
+              </div>
+            );
+          })}
+        </div>
+        <div className="notification-route-summary">
+          {settings.rules.map((rule) => {
+            const signal = notificationSignalByKey.get(rule.signalKey);
+            return (
+              <div className="notification-route-card" key={rule.id}>
+                <div>
+                  <strong>{rule.name || signal?.label || "未命名规则"}</strong>
+                  <small>
+                    {severityLabel(rule.severity)} · 每 {rule.readIntervalMinutes} 分钟 · {operatorLabel(rule.operator)} {rule.threshold}{rule.thresholdUnit ? ` ${rule.thresholdUnit}` : ""}
+                  </small>
+                </div>
+                <code>{signal?.source || rule.signalKey}</code>
+              </div>
+            );
+          })}
+        </div>
+        <div className="hint-box notification-preview">
+          <span>Payload 范围</span>
+          <code>platform_key / user / admin_ops / ai_account / payment / usage_anomaly</code>
+        </div>
+      </section>
     </div>
   );
 }
