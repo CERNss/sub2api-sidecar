@@ -12,6 +12,8 @@ from app.models.flow import AssignmentMode
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
     AutoRotationUsageWindow,
+    OrchestrationRunKind,
+    OrchestrationRunRecord,
     RotationEvent,
     RotationPoolKind,
     RotationPoolGroup,
@@ -407,6 +409,28 @@ class RotationService:
         )
         return result
 
+    def save_manual_run_record(
+        self,
+        *,
+        tag: str,
+        result: RotationExecutionResult,
+    ) -> OrchestrationRunRecord:
+        serialized = self._serialize_result(result)
+        bucket = self._status_bucket(result.status)
+        return self._save_orchestration_run(
+            run_kind=OrchestrationRunKind.manual,
+            tag=tag,
+            trigger_type=RotationTrigger.manual,
+            dry_run=False,
+            window=result.usage_window,
+            synced={},
+            config={},
+            planned=[serialized] if bucket == "planned" else [],
+            moved=[serialized] if bucket == "moved" else [],
+            skipped=[serialized] if bucket == "skipped" else [],
+            failed=[serialized] if bucket == "failed" else [],
+        )
+
     def run_auto_rotation(
         self,
         trigger_type: RotationTrigger = RotationTrigger.automatic_api,
@@ -565,7 +589,7 @@ class RotationService:
             else:
                 failed.append(result)
 
-        return {
+        run_payload = {
             "window": self._window_enum().value,
             "dry_run": dry_run,
             "synced": sync_result.summary,
@@ -574,6 +598,31 @@ class RotationService:
             "moved": [self._serialize_result(result) for result in moved],
             "skipped": [self._serialize_result(result) for result in skipped],
             "failed": [self._serialize_result(result) for result in failed],
+        }
+        record = self._save_orchestration_run(
+            run_kind=OrchestrationRunKind.automatic,
+            tag="automatic_preview" if dry_run else "automatic_execution",
+            trigger_type=trigger_type,
+            dry_run=dry_run,
+            window=self._window_enum(),
+            synced=run_payload["synced"],
+            config=run_payload["config"],
+            planned=run_payload["planned"],
+            moved=run_payload["moved"],
+            skipped=run_payload["skipped"],
+            failed=run_payload["failed"],
+        )
+        return {
+            **run_payload,
+            "run_id": record.run_id,
+            "run_kind": record.run_kind.value,
+            "tag": record.tag,
+            "status": record.status,
+            "created_at": record.created_at.isoformat(),
+            "updated_at": record.updated_at.isoformat(),
+            "rollback_status": record.rollback_status,
+            "rollback_reason": record.rollback_reason,
+            "rollback_results": record.rollback_results,
         }
 
     def get_auto_rotation_config(self) -> AutoRotationRuntimeConfig:
@@ -745,6 +794,74 @@ class RotationService:
             updated_at=now,
         )
         return self.store.upsert_user_assignment(assignment)
+
+    def list_orchestration_runs(self, limit: int = 50) -> list[OrchestrationRunRecord]:
+        return self.store.list_orchestration_runs(limit=limit)
+
+    def get_orchestration_run(self, run_id: str) -> OrchestrationRunRecord | None:
+        return self.store.get_orchestration_run(run_id)
+
+    def rollback_orchestration_run(self, run_id: str) -> OrchestrationRunRecord:
+        record = self.store.get_orchestration_run(run_id)
+        if record is None:
+            raise RotationExecutionError("Run record not found")
+        if record.run_kind != OrchestrationRunKind.automatic:
+            raise RotationExecutionError("Manual run records cannot be rolled back")
+        if record.dry_run:
+            raise RotationExecutionError("Preview run records cannot be rolled back")
+        if record.rollback_status:
+            raise RotationExecutionError("Run record was already rolled back")
+        if not record.moved:
+            raise RotationExecutionError("Run record has no moved items to roll back")
+
+        rollback_results: list[dict[str, Any]] = []
+        for item in record.moved:
+            source_group_id = item.get("target_group_id")
+            target_group_id = item.get("source_group_id")
+            if target_group_id in (None, ""):
+                rollback_results.append(
+                    {
+                        **item,
+                        "source_group_id": source_group_id,
+                        "target_group_id": target_group_id,
+                        "trigger_type": RotationTrigger.manual.value,
+                        "status": RotationResultStatus.failed.value,
+                        "reason": "Original source group is missing; rollback skipped",
+                        "migrated_keys": 0,
+                    }
+                )
+                continue
+
+            assignment = UserGroupAssignment(
+                user_id=item.get("user_id"),
+                email=str(item.get("email") or ""),
+                current_group_id=source_group_id,
+                current_group_name=self._metadata_text(item, "target_group_name"),
+                assignment_mode=AssignmentMode.managed_pool,
+                last_decision_reason="rollback source state",
+            )
+            rollback_result = self._rollback_result(
+                assignment=assignment,
+                source_group_id=source_group_id,
+                target_group_id=target_group_id,
+                reason=f"rollback run {record.run_id}",
+            )
+            rollback_results.append(self._serialize_result(rollback_result))
+
+        failed_count = sum(
+            1
+            for item in rollback_results
+            if item.get("status") == RotationResultStatus.failed.value
+        )
+        record.rollback_results = rollback_results
+        record.rollback_status = "failed" if failed_count == len(rollback_results) else "completed"
+        record.rollback_reason = (
+            f"{failed_count} rollback item(s) failed"
+            if failed_count
+            else "Rollback completed"
+        )
+        record.updated_at = datetime.now(timezone.utc)
+        return self.store.save_orchestration_run(record)
 
     def _execute_rotation(
         self,
@@ -1030,6 +1147,135 @@ class RotationService:
         )
         self.store.save_rotation_event(event)
         return result
+
+    def _rollback_result(
+        self,
+        *,
+        assignment: UserGroupAssignment,
+        source_group_id: Any,
+        target_group_id: Any,
+        reason: str,
+    ) -> RotationExecutionResult:
+        try:
+            target_group = self._get_upstream_group(target_group_id)
+            response = self.sub2api_client.replace_exclusive_user_group(
+                user_id=assignment.user_id,
+                old_group_id=source_group_id,
+                new_group_id=target_group_id,
+            )
+        except Sub2APIError as exc:
+            logger.exception("Rollback failed for user_id=%s", assignment.user_id)
+            return self._record_result(
+                assignment=assignment,
+                source_group_id=source_group_id,
+                target_group_id=target_group_id,
+                trigger_type=RotationTrigger.manual,
+                status=RotationResultStatus.failed,
+                reason=f"Upstream rollback replace-group failed: {exc}",
+            )
+
+        now = datetime.now(timezone.utc)
+        updated_assignment = UserGroupAssignment(
+            user_id=assignment.user_id,
+            email=assignment.email,
+            current_group_id=target_group_id,
+            current_group_name=target_group["name"],
+            assignment_mode=AssignmentMode.managed_pool,
+            last_rotation_at=now,
+            last_decision_reason=reason,
+            has_api_keys=assignment.has_api_keys,
+            created_at=assignment.created_at,
+            updated_at=now,
+        )
+        self.store.upsert_user_assignment(updated_assignment)
+        return self._record_result(
+            assignment=updated_assignment,
+            source_group_id=source_group_id,
+            target_group_id=target_group_id,
+            trigger_type=RotationTrigger.manual,
+            status=RotationResultStatus.moved,
+            reason=reason,
+            migrated_keys=int(response.get("migrated_keys") or 0),
+            metadata={
+                "rollback": "true",
+                "source_group_name": assignment.current_group_name or "",
+                "target_group_name": target_group["name"],
+            },
+        )
+
+    def _save_orchestration_run(
+        self,
+        *,
+        run_kind: OrchestrationRunKind,
+        tag: str,
+        trigger_type: RotationTrigger,
+        dry_run: bool,
+        window: AutoRotationUsageWindow | None,
+        synced: dict[str, int],
+        config: dict[str, Any],
+        planned: list[dict[str, Any]],
+        moved: list[dict[str, Any]],
+        skipped: list[dict[str, Any]],
+        failed: list[dict[str, Any]],
+    ) -> OrchestrationRunRecord:
+        now = datetime.now(timezone.utc)
+        record = OrchestrationRunRecord(
+            run_kind=run_kind,
+            tag=tag,
+            trigger_type=trigger_type,
+            dry_run=dry_run,
+            status=self._run_status(
+                planned=planned,
+                moved=moved,
+                skipped=skipped,
+                failed=failed,
+            ),
+            window=window,
+            synced=synced,
+            config=config,
+            planned=planned,
+            moved=moved,
+            skipped=skipped,
+            failed=failed,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.store.save_orchestration_run(record)
+
+    def _run_status(
+        self,
+        *,
+        planned: list[dict[str, Any]],
+        moved: list[dict[str, Any]],
+        skipped: list[dict[str, Any]],
+        failed: list[dict[str, Any]],
+    ) -> str:
+        if failed and not moved and not planned:
+            return "failed"
+        if failed:
+            return "partial_failed"
+        if moved:
+            return "moved"
+        if planned:
+            return "planned"
+        if skipped:
+            return "skipped"
+        return "empty"
+
+    def _status_bucket(self, status: RotationResultStatus) -> str:
+        if status == RotationResultStatus.moved:
+            return "moved"
+        if status == RotationResultStatus.planned:
+            return "planned"
+        if status == RotationResultStatus.failed:
+            return "failed"
+        return "skipped"
+
+    def _metadata_text(self, item: dict[str, Any], key: str) -> str | None:
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict) and metadata.get(key) not in (None, ""):
+            return str(metadata[key])
+        return None
 
     def _get_upstream_group(self, group_id: Any) -> dict[str, Any]:
         target_key = self._normalize_key(group_id)

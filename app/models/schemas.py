@@ -220,6 +220,9 @@ class ManualRotationRequest(BaseModel):
 
 class RotationExecutionResponse(BaseModel):
     success: bool = True
+    run_id: str | None = None
+    run_kind: str | None = None
+    tag: str | None = None
     user_id: Any
     email: EmailStr
     source_group_id: Any | None = None
@@ -240,14 +243,30 @@ class AutoRotationRunRequest(BaseModel):
 
 class AutoRotationRunResponse(BaseModel):
     success: bool = True
+    run_id: str | None = None
+    run_kind: str | None = None
+    tag: str | None = None
+    status: str | None = None
     window: str
     dry_run: bool = False
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     synced: dict[str, int] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
+    dead_band_skipped: bool = False
     planned: list[RotationExecutionResponse] = Field(default_factory=list)
     moved: list[RotationExecutionResponse]
     skipped: list[RotationExecutionResponse]
     failed: list[RotationExecutionResponse]
+    rollback_results: list[RotationExecutionResponse] = Field(default_factory=list)
+    rollback_status: str | None = None
+    rollback_reason: str | None = None
+
+
+class AutoRotationRunsEnvelope(BaseModel):
+    success: bool = True
+    items: list[AutoRotationRunResponse]
+    total: int
 
 
 class ErrorResponse(BaseModel):

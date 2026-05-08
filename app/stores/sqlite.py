@@ -8,6 +8,7 @@ from typing import Any
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
+    OrchestrationRunRecord,
     RotationEvent,
     RotationPoolGroup,
     RotationPoolKind,
@@ -403,6 +404,70 @@ class SQLiteFlowStore(FlowStore):
             RotationEvent,
         )
 
+    def save_orchestration_run(
+        self,
+        record: OrchestrationRunRecord,
+    ) -> OrchestrationRunRecord:
+        payload = record.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO orchestration_runs (
+                    run_id,
+                    run_kind,
+                    tag,
+                    trigger_type,
+                    status,
+                    dry_run,
+                    payload,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    run_kind = excluded.run_kind,
+                    tag = excluded.tag,
+                    trigger_type = excluded.trigger_type,
+                    status = excluded.status,
+                    dry_run = excluded.dry_run,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    record.run_id,
+                    record.run_kind.value,
+                    record.tag,
+                    record.trigger_type.value,
+                    record.status,
+                    1 if record.dry_run else 0,
+                    payload,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return record
+
+    def get_orchestration_run(self, run_id: str) -> OrchestrationRunRecord | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM orchestration_runs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+            OrchestrationRunRecord,
+        )
+
+    def list_orchestration_runs(self, limit: int = 50) -> list[OrchestrationRunRecord]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM orchestration_runs
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+            OrchestrationRunRecord,
+        )
+
     def _prepare_database_path(self) -> None:
         if self.database_path == ":memory:" or self._use_uri:
             return
@@ -526,6 +591,21 @@ class SQLiteFlowStore(FlowStore):
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS orchestration_runs (
+                    run_id TEXT PRIMARY KEY,
+                    run_kind TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    dry_run INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_user_group_assignments_group
                 ON user_group_assignments(group_id_key)
                 """
@@ -534,6 +614,12 @@ class SQLiteFlowStore(FlowStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_rotation_events_user
                 ON rotation_events(user_id_key, created_at DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orchestration_runs_list
+                ON orchestration_runs(created_at DESC, run_kind, tag)
                 """
             )
             connection.commit()
@@ -618,7 +704,7 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent],
+        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent] | type[OrchestrationRunRecord],
     ) -> Any:
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
@@ -630,7 +716,7 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent],
+        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent] | type[OrchestrationRunRecord],
     ) -> list[Any]:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()

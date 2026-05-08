@@ -25,6 +25,7 @@ from app.models.schemas import (
     AutoRotationConfigResponse,
     AutoRotationRunRequest,
     AutoRotationRunResponse,
+    AutoRotationRunsEnvelope,
     ErrorResponse,
     LoginRequest,
     LoginResponse,
@@ -361,6 +362,37 @@ def rotation_execution_response(result: RotationExecutionResult) -> RotationExec
         usage_window=result.usage_window.value if result.usage_window else None,
         usage_value=result.usage_value,
         usage_snapshot=result.usage_snapshot,
+        metadata=result.metadata,
+    )
+
+
+def rotation_execution_response_from_item(item: dict[str, Any]) -> RotationExecutionResponse:
+    return RotationExecutionResponse(**item)
+
+
+def auto_rotation_run_response(record: Any) -> AutoRotationRunResponse:
+    return AutoRotationRunResponse(
+        run_id=record.run_id,
+        run_kind=record.run_kind.value,
+        tag=record.tag,
+        status=record.status,
+        window=record.window.value if record.window else "",
+        dry_run=record.dry_run,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        synced=record.synced,
+        config=record.config,
+        dead_band_skipped=record.dead_band_skipped,
+        planned=[rotation_execution_response_from_item(item) for item in record.planned],
+        moved=[rotation_execution_response_from_item(item) for item in record.moved],
+        skipped=[rotation_execution_response_from_item(item) for item in record.skipped],
+        failed=[rotation_execution_response_from_item(item) for item in record.failed],
+        rollback_results=[
+            rotation_execution_response_from_item(item)
+            for item in record.rollback_results
+        ],
+        rollback_status=record.rollback_status,
+        rollback_reason=record.rollback_reason,
     )
 
 
@@ -462,7 +494,14 @@ def orchestration_replace_group(
         target_group_id=payload.target_group_id,
         reason=payload.reason,
     )
+    run_record = get_rotation_service().save_manual_run_record(
+        tag="manual_user_group",
+        result=result,
+    )
     response = rotation_execution_response(result)
+    response.run_id = run_record.run_id
+    response.run_kind = run_record.run_kind.value
+    response.tag = run_record.tag
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
@@ -479,7 +518,14 @@ def orchestration_update_api_key_group(
         target_group_id=payload.target_group_id,
         reason=payload.reason,
     )
+    run_record = get_rotation_service().save_manual_run_record(
+        tag="manual_api_key",
+        result=result,
+    )
     response = rotation_execution_response(result)
+    response.run_id = run_record.run_id
+    response.run_kind = run_record.run_kind.value
+    response.tag = run_record.tag
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
@@ -715,7 +761,14 @@ def rotation_manual(
         target_group_id=payload.target_group_id,
         reason=payload.reason,
     )
+    run_record = get_rotation_service().save_manual_run_record(
+        tag="manual_user_group",
+        result=result,
+    )
     response = rotation_execution_response(result)
+    response.run_id = run_record.run_id
+    response.run_kind = run_record.run_kind.value
+    response.tag = run_record.tag
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
@@ -726,13 +779,65 @@ def rotation_auto_run(
 ) -> JSONResponse:
     result = get_rotation_service().run_auto_rotation(dry_run=payload.dry_run if payload else False)
     response = AutoRotationRunResponse(
+        run_id=result.get("run_id"),
+        run_kind=result.get("run_kind"),
+        tag=result.get("tag"),
+        status=result.get("status"),
         window=result["window"],
         dry_run=result["dry_run"],
+        created_at=result.get("created_at"),
+        updated_at=result.get("updated_at"),
         synced=result["synced"],
         config=result["config"],
+        dead_band_skipped=bool(result.get("dead_band_skipped", False)),
         planned=[RotationExecutionResponse(**item) for item in result["planned"]],
         moved=[RotationExecutionResponse(**item) for item in result["moved"]],
         skipped=[RotationExecutionResponse(**item) for item in result["skipped"]],
         failed=[RotationExecutionResponse(**item) for item in result["failed"]],
+        rollback_results=[
+            RotationExecutionResponse(**item)
+            for item in result.get("rollback_results", [])
+        ],
+        rollback_status=result.get("rollback_status"),
+        rollback_reason=result.get("rollback_reason"),
     )
-    return JSONResponse(status_code=200, content=response.model_dump())
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/rotation/auto/runs")
+def rotation_auto_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    records = get_rotation_service().list_orchestration_runs(limit=limit)
+    payload = AutoRotationRunsEnvelope(
+        items=[auto_rotation_run_response(record) for record in records],
+        total=len(records),
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/rotation/auto/runs/{run_id}")
+def rotation_auto_run_detail(
+    run_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    record = get_rotation_service().get_orchestration_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Run record not found")
+    return JSONResponse(
+        status_code=200,
+        content=auto_rotation_run_response(record).model_dump(mode="json"),
+    )
+
+
+@app.post("/rotation/auto/runs/{run_id}/rollback")
+def rotation_auto_run_rollback(
+    run_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    record = get_rotation_service().rollback_orchestration_run(run_id)
+    return JSONResponse(
+        status_code=200,
+        content=auto_rotation_run_response(record).model_dump(mode="json"),
+    )

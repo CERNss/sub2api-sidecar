@@ -740,6 +740,10 @@ def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups
     assignment = main.get_flow_store().get_user_assignment(101)
     assert assignment is not None
     assert assignment.current_group_id == 22
+    runs = main.get_flow_store().list_orchestration_runs()
+    assert runs[0].run_kind.value == "manual"
+    assert runs[0].tag == "manual_user_group"
+    assert runs[0].moved[0]["user_id"] == 101
 
 
 def test_existing_user_group_orchestration_requires_direct_source_group(client) -> None:
@@ -831,10 +835,16 @@ def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> 
 
     assert response.status_code == 200
     assert response.json()["status"] == "moved"
+    assert response.json()["run_id"]
+    assert response.json()["run_kind"] == "manual"
+    assert response.json()["tag"] == "manual_api_key"
     assert response.json()["migrated_keys"] == 1
     assert backend.replace_calls == []
     assert backend.set_user_group_calls == []
     assert backend.api_key_group_calls == [{"key_id": "key-101", "group_id": 22}]
+    runs = main.get_flow_store().list_orchestration_runs()
+    assert runs[0].tag == "manual_api_key"
+    assert runs[0].moved[0]["metadata"]["key_id"] == "key-101"
 
 
 def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch) -> None:
@@ -1057,6 +1067,132 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     assert payload["moved"][0]["metadata"]["decision_type"] == "usage_balancing"
     assert "usage_loads_before" in payload["moved"][0]["metadata"]
     assert len(payload["skipped"]) == 1
+    runs_response = auto_client.get("/rotation/auto/runs?limit=5")
+    assert runs_response.status_code == 200
+    run = runs_response.json()["items"][0]
+    assert run["run_kind"] == "automatic"
+    assert run["tag"] == "automatic_execution"
+    assert run["status"] == "moved"
+    assert len(run["moved"]) == 1
+    assert run["moved"][0]["user_id"] == 101
+
+
+def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 8.0, "usage_1d": 80.0, "usage_7d": 200.0}]
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            executed = auto_client.post("/rotation/auto/run")
+            run_id = executed.json()["run_id"]
+            rollback = auto_client.post(f"/rotation/auto/runs/{run_id}/rollback")
+
+    assert executed.status_code == 200
+    assert rollback.status_code == 200
+    payload = rollback.json()
+    assert payload["rollback_status"] == "completed"
+    assert payload["rollback_results"][0]["status"] == "moved"
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 22, "new_group_id": "11"},
+        {"user_id": 101, "old_group_id": "11", "new_group_id": 22},
+    ]
+
+
+def test_manual_and_preview_run_records_reject_rollback(client, monkeypatch) -> None:
+    backend = FakeRotationSub2API()
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="rotate@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            manual = auto_client.post("/rotation/manual", json={"user_id": 101, "target_group_id": 22})
+            preview = auto_client.post("/rotation/auto/run", json={"dry_run": True})
+            manual_rollback = auto_client.post(
+                f"/rotation/auto/runs/{manual.json()['run_id']}/rollback"
+            )
+            preview_rollback = auto_client.post(
+                f"/rotation/auto/runs/{preview.json()['run_id']}/rollback"
+            )
+
+    assert manual_rollback.status_code == 400
+    assert "Manual run records cannot be rolled back" in manual_rollback.json()["detail"]
+    assert preview_rollback.status_code == 400
+    assert "Preview run records cannot be rolled back" in preview_rollback.json()["detail"]
 
 
 def test_auto_rotation_dry_run_syncs_current_upstream_assignments_without_mutation(

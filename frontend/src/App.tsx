@@ -23,10 +23,10 @@ import {
   Card,
   Checkbox,
   Descriptions,
-  Drawer,
   Empty,
   Input,
   List,
+  Modal,
   Segmented as AntSegmented,
   Select,
   Space,
@@ -188,25 +188,52 @@ type OrchestrationApiKeysPayload = ApiPayload & {
 };
 
 type RotationExecutionPayload = ApiPayload & {
+  run_id?: string | null;
+  run_kind?: string | null;
+  tag?: string | null;
   user_id?: unknown;
   email?: string;
+  key_id?: unknown;
   source_group_id?: unknown | null;
   target_group_id?: unknown | null;
   trigger_type?: string;
   status?: string;
   reason?: string;
   migrated_keys?: number;
+  metadata?: Record<string, unknown> | null;
 };
 
 type AutoRotationRunPayload = ApiPayload & {
+  run_id?: string | null;
+  run_kind?: string | null;
+  tag?: string | null;
+  status?: string | null;
   window?: string;
   dry_run?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
   synced?: Record<string, number>;
-  config?: AutoRotationConfig;
+  config?: Record<string, unknown>;
+  dead_band_skipped?: boolean;
   planned?: RotationExecutionPayload[];
   moved?: RotationExecutionPayload[];
   skipped?: RotationExecutionPayload[];
   failed?: RotationExecutionPayload[];
+  rollback_status?: string | null;
+  rollback_results?: RotationExecutionPayload[];
+  rollback_reason?: string | null;
+};
+
+type AutoRotationRunsPayload = ApiPayload & {
+  items: AutoRotationRunPayload[];
+  total: number;
+};
+
+type RunRecordsPanelProps = {
+  className?: string;
+  onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+  refreshSignal?: number;
+  onStatus?: (status: StatusState) => void;
 };
 
 type RotationPoolCandidate = {
@@ -337,6 +364,29 @@ function unknownToText(value: unknown): string {
     return String(value);
   }
   return JSON.stringify(value);
+}
+
+function runKindLabel(run: AutoRotationRunPayload): string {
+  if (run.run_kind === "manual") {
+    return run.tag === "manual_api_key" ? "手动 Key" : "手动用户";
+  }
+  return run.dry_run ? "动态预览" : "动态执行";
+}
+
+function runKindColor(run: AutoRotationRunPayload): string {
+  if (run.run_kind === "manual") {
+    return "gold";
+  }
+  return run.dry_run ? "blue" : "green";
+}
+
+function runCounts(run: AutoRotationRunPayload) {
+  return {
+    planned: run.planned?.length ?? 0,
+    moved: run.moved?.length ?? 0,
+    skipped: run.skipped?.length ?? 0,
+    failed: run.failed?.length ?? 0
+  };
 }
 
 function idValue(value: unknown): string {
@@ -727,7 +777,7 @@ function ExistingOrchestrationView({
   const [selectedKeyIds, setSelectedKeyIds] = useState<string[]>([]);
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState<StatusState>(emptyStatus);
-  const [result, setResult] = useState<RotationExecutionPayload[] | null>(null);
+  const [recordsRefreshSignal, setRecordsRefreshSignal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -1239,7 +1289,7 @@ function ExistingOrchestrationView({
           },
           "编排执行失败"
         );
-        setResult([payload]);
+        setRecordsRefreshSignal((value) => value + 1);
         setStatus({
           message: payload.status === "failed" ? payload.reason || "编排执行失败" : "编排执行完成",
           tone: payload.status === "failed" ? "error" : "success"
@@ -1282,10 +1332,10 @@ function ExistingOrchestrationView({
           }
         }
         if (authExpired) {
-          if (results.length > 0) setResult(results);
+          if (results.length > 0) setRecordsRefreshSignal((value) => value + 1);
           return;
         }
-        setResult(results);
+        setRecordsRefreshSignal((value) => value + 1);
         const total = results.length;
         if (failedCount === 0) {
           setStatus({ message: `编排执行完成（${total} 个 Key）`, tone: "success" });
@@ -1299,7 +1349,6 @@ function ExistingOrchestrationView({
       await loadApiKeys(idValue(selectedUser.user_id));
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
-        setResult([{ success: false, detail: getErrorMessage(error, "编排执行失败") }]);
         setStatus({ message: getErrorMessage(error, "编排执行失败"), tone: "error" });
       }
     } finally {
@@ -1554,7 +1603,10 @@ function ExistingOrchestrationView({
             </section>
           </form>
         ) : (
-          <DynamicOrchestrationView onAuthExpired={onAuthExpired} />
+          <DynamicOrchestrationView
+            onAuthExpired={onAuthExpired}
+            onRunRecorded={() => setRecordsRefreshSignal((value) => value + 1)}
+          />
         )}
       </section>
 
@@ -1593,35 +1645,12 @@ function ExistingOrchestrationView({
         </div>
       </section>
 
-      <Drawer
-        title={result && result.length > 1 ? `执行结果（${result.length} 个 Key）` : "执行结果"}
-        open={Boolean(result && result.length > 0)}
-        width={560}
-        onClose={() => setResult(null)}
-      >
-        {result ? (
-          <Space direction="vertical" size={16} className="drawer-stack">
-            {result.map((item, index) => (
-              <div key={index} className="drawer-result-block">
-                {result.length > 1 ? (
-                  <Typography.Text strong className="drawer-result-title">
-                    #{index + 1} · {unknownToText(item.key_id) || unknownToText(item.email || item.user_id)}
-                  </Typography.Text>
-                ) : null}
-                <Descriptions bordered size="small" column={1}>
-                  <Descriptions.Item label="Status">{unknownToText(item.status)}</Descriptions.Item>
-                  <Descriptions.Item label="User">{unknownToText(item.email || item.user_id)}</Descriptions.Item>
-                  <Descriptions.Item label="Source Group">{unknownToText(item.source_group_id)}</Descriptions.Item>
-                  <Descriptions.Item label="Target Group">{unknownToText(item.target_group_id)}</Descriptions.Item>
-                  <Descriptions.Item label="Migrated Keys">{unknownToText(item.migrated_keys)}</Descriptions.Item>
-                  <Descriptions.Item label="Reason">{unknownToText(item.reason)}</Descriptions.Item>
-                </Descriptions>
-                <pre className="drawer-payload">{formatPayload(item)}</pre>
-              </div>
-            ))}
-          </Space>
-        ) : null}
-      </Drawer>
+      <RunRecordsPanel
+        className="orchestration-records-island"
+        onAuthExpired={onAuthExpired}
+        refreshSignal={recordsRefreshSignal}
+        onStatus={setStatus}
+      />
     </div>
   );
 }
@@ -1653,10 +1682,227 @@ function GraphNode({
   );
 }
 
+function RunRecordsPanel({
+  className,
+  onAuthExpired,
+  refreshSignal = 0,
+  onStatus
+}: RunRecordsPanelProps) {
+  const [records, setRecords] = useState<AutoRotationRunPayload[]>([]);
+  const [selectedRecord, setSelectedRecord] = useState<AutoRotationRunPayload | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [rollbackRunId, setRollbackRunId] = useState<string | null>(null);
+
+  async function loadRecords() {
+    setLoading(true);
+    try {
+      const payload = await requestJson<AutoRotationRunsPayload>(
+        "/rotation/auto/runs?limit=20",
+        { method: "GET" },
+        "加载运行记录失败"
+      );
+      setRecords(payload.items);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, onStatus)) {
+        onStatus?.({ message: getErrorMessage(error, "加载运行记录失败"), tone: "error" });
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function rollbackRun(runId: string) {
+    setRollbackRunId(runId);
+    onStatus?.({ message: "正在回滚动态编排记录", tone: "info" });
+    try {
+      const payload = await requestJson<AutoRotationRunPayload>(
+        `/rotation/auto/runs/${encodeURIComponent(runId)}/rollback`,
+        { method: "POST" },
+        "回滚失败"
+      );
+      setSelectedRecord(payload);
+      await loadRecords();
+      const failed = payload.rollback_results?.filter((item) => item.status === "failed").length ?? 0;
+      onStatus?.({
+        message: failed > 0 ? `回滚完成，但失败 ${failed} 项` : "回滚完成",
+        tone: failed > 0 ? "error" : "success"
+      });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, onStatus)) {
+        onStatus?.({ message: getErrorMessage(error, "回滚失败"), tone: "error" });
+      }
+    } finally {
+      setRollbackRunId(null);
+    }
+  }
+
+  useEffect(() => {
+    void loadRecords();
+  }, [refreshSignal]);
+
+  const stats = useMemo(() => {
+    const rollbackable = records.filter((record) => {
+      const counts = runCounts(record);
+      return record.run_kind !== "manual" && !record.dry_run && counts.moved > 0 && !record.rollback_status;
+    }).length;
+    return {
+      total: records.length,
+      manual: records.filter((record) => record.run_kind === "manual").length,
+      automatic: records.filter((record) => record.run_kind !== "manual").length,
+      rollbackable
+    };
+  }, [records]);
+
+  return (
+    <section
+      className={`run-records-island ${className ?? ""}`.trim()}
+      aria-labelledby="run-records-title"
+    >
+      <header className="run-records-header">
+        <div className="run-records-heading">
+          <span className="run-records-heading-icon" aria-hidden="true">
+            <ListChecks size={18} />
+          </span>
+          <div>
+            <Typography.Text strong id="run-records-title">运行记录</Typography.Text>
+            <Typography.Text type="secondary">手动 / 动态 / 回滚</Typography.Text>
+          </div>
+        </div>
+        <Space wrap className="run-records-toolbar">
+          <Tag color={loading ? "processing" : "default"}>{loading ? "同步中" : "最近 20 条"}</Tag>
+          <AntButton size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadRecords()}>
+            刷新
+          </AntButton>
+        </Space>
+      </header>
+      <div className="run-records-summary" aria-label="运行记录摘要">
+        <div className="run-record-stat run-record-stat--total">
+          <span>全部</span>
+          <strong>{stats.total}</strong>
+        </div>
+        <div className="run-record-stat run-record-stat--manual">
+          <span>手动</span>
+          <strong>{stats.manual}</strong>
+        </div>
+        <div className="run-record-stat run-record-stat--automatic">
+          <span>自动</span>
+          <strong>{stats.automatic}</strong>
+        </div>
+        <div className="run-record-stat run-record-stat--rollback">
+          <span>可回滚</span>
+          <strong>{stats.rollbackable}</strong>
+        </div>
+      </div>
+      <div className="run-record-list-shell">
+        {records.length === 0 ? (
+          <Empty description={loading ? "正在加载运行记录" : "暂无运行记录"} />
+        ) : (
+          <div className="run-record-list" role="list">
+            {records.map((run) => {
+              const counts = runCounts(run);
+              const canRollback =
+                run.run_kind !== "manual" && !run.dry_run && counts.moved > 0 && !run.rollback_status;
+              const runKey = run.run_id ?? `${run.created_at ?? "record"}-${run.tag ?? run.status ?? "unknown"}`;
+              return (
+                <article
+                  key={runKey}
+                  className="run-record-row"
+                  role="listitem"
+                >
+                  <span className={`run-record-marker run-record-marker--${run.run_kind === "manual" ? "manual" : "automatic"}`} />
+                  <div className="run-record-main">
+                    <div className="run-record-title-line">
+                      <Typography.Text strong>{runKindLabel(run)}</Typography.Text>
+                      <Tag color={runKindColor(run)}>{run.run_kind === "manual" ? "手动" : "自动"}</Tag>
+                      <Tag color={run.status === "failed" ? "red" : "default"}>{run.status ?? "-"}</Tag>
+                      {run.rollback_status ? <Tag color="gold">{run.rollback_status}</Tag> : null}
+                    </div>
+                    <div className="run-record-meta-line">
+                      <span>{run.created_at ? formatDate(run.created_at) : "-"}</span>
+                      <span>Run {run.run_id?.slice(0, 8) ?? "-"}</span>
+                      {run.window ? <span>{run.window}</span> : null}
+                    </div>
+                  </div>
+                  <div className="run-record-counts" aria-label="执行结果">
+                    <span><strong>{counts.moved}</strong> 迁移</span>
+                    <span><strong>{counts.planned}</strong> 计划</span>
+                    <span><strong>{counts.skipped}</strong> 跳过</span>
+                    <span className={counts.failed > 0 ? "run-record-count-danger" : ""}>
+                      <strong>{counts.failed}</strong> 失败
+                    </span>
+                  </div>
+                  <div className="run-record-actions">
+                    <AntButton
+                      size="small"
+                      icon={<Eye size={15} aria-hidden="true" />}
+                      onClick={() => setSelectedRecord(run)}
+                    >
+                      查看
+                    </AntButton>
+                    <AntButton
+                      size="small"
+                      danger
+                      icon={<TimerReset size={15} aria-hidden="true" />}
+                      loading={rollbackRunId === run.run_id}
+                      disabled={!run.run_id || !canRollback || rollbackRunId !== null}
+                      onClick={() => run.run_id && void rollbackRun(run.run_id)}
+                    >
+                      回滚
+                    </AntButton>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <Modal
+        title="运行记录详情"
+        open={Boolean(selectedRecord)}
+        width={760}
+        footer={null}
+        onCancel={() => setSelectedRecord(null)}
+      >
+        {selectedRecord ? (
+          <div className="run-record-detail">
+            <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="Run ID" span={2}>{selectedRecord.run_id}</Descriptions.Item>
+              <Descriptions.Item label="类型">{runKindLabel(selectedRecord)}</Descriptions.Item>
+              <Descriptions.Item label="状态">{selectedRecord.status ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="用量窗口">{selectedRecord.window ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">
+                {selectedRecord.created_at ? formatDate(selectedRecord.created_at) : "-"}
+              </Descriptions.Item>
+              <Descriptions.Item label="回滚状态">{selectedRecord.rollback_status ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="回滚原因">{selectedRecord.rollback_reason ?? "-"}</Descriptions.Item>
+            </Descriptions>
+            <div className="run-record-summary">
+              {(() => {
+                const counts = runCounts(selectedRecord);
+                return (
+                  <>
+                    <Tag color="blue">计划 {counts.planned}</Tag>
+                    <Tag color="green">迁移 {counts.moved}</Tag>
+                    <Tag>跳过 {counts.skipped}</Tag>
+                    <Tag color={counts.failed > 0 ? "red" : "default"}>失败 {counts.failed}</Tag>
+                  </>
+                );
+              })()}
+            </div>
+            <pre className="drawer-payload">{formatPayload(selectedRecord)}</pre>
+          </div>
+        ) : null}
+      </Modal>
+    </section>
+  );
+}
+
 function DynamicOrchestrationView({
-  onAuthExpired
+  onAuthExpired,
+  onRunRecorded
 }: {
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+  onRunRecorded: () => void;
 }) {
   const [candidates, setCandidates] = useState<RotationPoolCandidate[]>([]);
   const [config, setConfig] = useState<AutoRotationConfig>({
@@ -1671,7 +1917,6 @@ function DynamicOrchestrationView({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState<"preview" | "run" | null>(null);
-  const [result, setResult] = useState<AutoRotationRunPayload | null>(null);
   const [selectedPoolCandidateId, setSelectedPoolCandidateId] = useState("");
 
   const selectedGroups = candidates.filter((group) => group.rotation_selected || group.selected);
@@ -1692,17 +1937,6 @@ function DynamicOrchestrationView({
       unsupported_reason: group.unsupported_reason
     })
   );
-  const runSummary = result ? {
-    planned: result.planned?.length ?? 0,
-    moved: result.moved?.length ?? 0,
-    skipped: result.skipped?.length ?? 0,
-    failed: result.failed?.length ?? 0,
-    synced: result.synced?.synced ?? 0,
-    newUsers: result.synced?.new_user_candidates ?? 0,
-    outsideRange: result.synced?.skipped_outside_schedule_range ?? 0,
-    seen: result.synced?.seen ?? 0
-  } : null;
-
   async function loadDynamicConfig() {
     setLoading(true);
     try {
@@ -1838,7 +2072,7 @@ function DynamicOrchestrationView({
         },
         dryRun ? "动态编排预览失败" : "动态编排执行失败"
       );
-      setResult(payload);
+      onRunRecorded();
       const failed = payload.failed?.length ?? 0;
       setStatus({
         message: dryRun
@@ -1848,7 +2082,6 @@ function DynamicOrchestrationView({
       });
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
-        setResult({ success: false, detail: getErrorMessage(error, dryRun ? "动态编排预览失败" : "动态编排执行失败") });
         setStatus({ message: getErrorMessage(error, dryRun ? "动态编排预览失败" : "动态编排执行失败"), tone: "error" });
       }
     } finally {
@@ -2048,30 +2281,6 @@ function DynamicOrchestrationView({
         </div>
       </Card>
 
-      <Card
-        className="dynamic-result-card"
-        title={
-          <Space>
-            <ListChecks />
-            <span>运行结果</span>
-          </Space>
-        }
-      >
-        {runSummary ? (
-          <div className="dynamic-result-summary">
-            <Tag color="processing">同步 {runSummary.synced}/{runSummary.seen}</Tag>
-            <Tag color="purple">新用户候选 {runSummary.newUsers}</Tag>
-            <Tag color="default">范围外 {runSummary.outsideRange}</Tag>
-            <Tag color="blue">计划 {runSummary.planned}</Tag>
-            <Tag color="green">迁移 {runSummary.moved}</Tag>
-            <Tag>跳过 {runSummary.skipped}</Tag>
-            <Tag color={runSummary.failed > 0 ? "red" : "default"}>失败 {runSummary.failed}</Tag>
-          </div>
-        ) : (
-          <Empty description="暂无运行结果" />
-        )}
-        {result ? <pre className="drawer-payload dynamic-result-payload">{formatPayload(result)}</pre> : null}
-      </Card>
     </div>
   );
 }

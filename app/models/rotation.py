@@ -30,6 +30,11 @@ class RotationResultStatus(str, Enum):
     failed = "failed"
 
 
+class OrchestrationRunKind(str, Enum):
+    manual = "manual"
+    automatic = "automatic"
+
+
 class RotationPoolKind(str, Enum):
     landing = "landing"
     rotation = "rotation"
@@ -101,5 +106,29 @@ class RotationEvent(BaseModel):
     usage_value: float | None = None
     usage_snapshot: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OrchestrationRunRecord(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_kind: OrchestrationRunKind
+    tag: str
+    trigger_type: RotationTrigger
+    dry_run: bool = False
+    status: str
+    window: AutoRotationUsageWindow | None = None
+    synced: dict[str, int] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    dead_band_skipped: bool = False
+    planned: list[dict[str, Any]] = Field(default_factory=list)
+    moved: list[dict[str, Any]] = Field(default_factory=list)
+    skipped: list[dict[str, Any]] = Field(default_factory=list)
+    failed: list[dict[str, Any]] = Field(default_factory=list)
+    rollback_results: list[dict[str, Any]] = Field(default_factory=list)
+    rollback_status: str | None = None
+    rollback_reason: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
