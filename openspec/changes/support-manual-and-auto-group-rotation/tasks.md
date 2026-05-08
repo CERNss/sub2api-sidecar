@@ -29,6 +29,7 @@
 - [x] 5.4 Add dynamic allocation preview and synchronize automatic rotation candidates from current upstream user/group relationships
 - [x] 5.5 Add separate dynamic orchestration UI/API configuration for pool, enablement, window, cooldown, and thresholds
 - [x] 5.6 Add account scheduling range and automatic new-user assignment into dynamic orchestration
+- [x] 5.7 Add usage-balance dead band (`imbalance_epsilon`) and per-move improvement threshold (`improvement_delta`) tunables to dynamic orchestration config, runtime API, and React UI; persist `dead_band_skipped` on the orchestration run record
 
 ## 6. Verification and rollout
 
@@ -38,3 +39,4 @@
 - [x] 6.4 Add tests for dry-run dynamic allocation, upstream candidate synchronization, and ambiguous current-group skipping
 - [x] 6.5 Add tests for runtime dynamic configuration persistence and execution gating
 - [x] 6.6 Add tests for new-user auto-assignment only within the configured scheduling range
+- [x] 6.7 Add tests for `imbalance_epsilon` dead-band skip and `improvement_delta` blocking marginal swaps

@@ -436,6 +436,8 @@ def orchestration_users(
                 user_id=user["id"],
                 email=str(user.get("email") or ""),
                 name=user.get("name") if user.get("name") is not None else None,
+                username=str(user.get("username")) if user.get("username") is not None else None,
+                display_name=str(user.get("display_name")) if user.get("display_name") is not None else None,
                 status=user.get("status") if user.get("status") is not None else None,
                 current_group_id=current_group_id,
                 current_group_name=current_group_name,
@@ -659,6 +661,8 @@ def auto_rotation_config_response() -> AutoRotationConfigEnvelope:
             cooldown_minutes=config.cooldown_minutes,
             usage_window=config.usage_window.value,
             usage_thresholds=list(config.usage_thresholds),
+            imbalance_epsilon=config.imbalance_epsilon,
+            improvement_delta=config.improvement_delta,
             schedule_source_group_ids=list(config.schedule_source_group_ids),
         ),
         pool=rotation_pool,
@@ -694,6 +698,8 @@ def rotation_auto_config_update(
         cooldown_minutes=payload.cooldown_minutes,
         usage_window=usage_window,
         usage_thresholds=tuple(payload.usage_thresholds),
+        imbalance_epsilon=payload.imbalance_epsilon,
+        improvement_delta=payload.improvement_delta,
         schedule_source_group_ids=tuple(payload.schedule_source_group_ids),
     )
     return JSONResponse(

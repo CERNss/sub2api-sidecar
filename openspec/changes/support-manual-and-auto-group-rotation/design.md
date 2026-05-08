@@ -147,7 +147,24 @@ Why this approach:
 
 Alternative considered: support arbitrary hour/day windows in V1. Rejected because the upstream usage interfaces do not cleanly expose every rolling window shape, which would add adapter complexity before the first usable release.
 
-### 8. Keep the contract API-first
+### 8. Gate dynamic rotation with a dead band and a per-move improvement threshold
+
+Dynamic orchestration uses an LPT-style greedy load balancer (sort candidates by descending usage, assign each to the least-loaded Rotation pool group) plus a per-user improvement check and a cooldown window. To prevent churn near the optimum, the configuration also exposes two non-negative tunables:
+
+- `imbalance_epsilon`: when the spread between the highest- and lowest-loaded Rotation pool group is `<= epsilon`, the rebalance candidate loop is skipped entirely and the run is reported as dead-band skipped on the orchestration run record and the API response.
+- `improvement_delta`: a per-user move only fires when `after_gap < before_gap - delta`, replacing the strict `after_gap < before_gap` gate with a configurable margin.
+
+Both values default to `0.0`, which preserves the original strict behavior. Dead-band evaluation reuses the per-iteration `target_loads` snapshot already maintained by the executor, so no additional usage queries are needed.
+
+Why this approach:
+
+- it directly targets the two failure modes operators have flagged: redundant rotations when the pool is already balanced, and oscillation between near-equal targets driven by tiny load deltas
+- the gates compose with the existing cooldown window: cooldown bounds the rate of churn per user, while these tunables bound when churn is worth attempting at all
+- stronger heuristics such as Multifit, swap-improvement passes, or Karmarkar–Karp would add implementation complexity that is not justified by the small group counts and periodic re-evaluation cadence
+
+Alternative considered: derive a single global "imbalance ratio" threshold from the average load. Rejected because absolute deltas are easier to reason about against the visible per-group usage figures and avoid divide-by-zero edge cases when the pool is briefly idle.
+
+### 9. Keep the contract API-first
 
 The existing sidecar has an HTML operator page, but this change should define the primary interface as authenticated JSON APIs. A UI can call those APIs later, but the implementation should not depend on browser-only workflows.
 

@@ -49,3 +49,7 @@ auto_rotation:
   cooldown_minutes: 0
   usage_window: 1d
   usage_thresholds: []
+  # Skip the rebalance loop entirely when (max group load - min group load) <= imbalance_epsilon.
+  imbalance_epsilon: 0.0
+  # Per-user move requires after_gap < before_gap - improvement_delta to avoid flapping near optimum.
+  improvement_delta: 0.0

@@ -12,6 +12,7 @@ Operators need a safe way to discover existing groups, select dedicated groups i
 - Extend the Sub2API admin client to use confirmed user-group replacement and usage APIs needed for rotation.
 - Keep OAuth account provisioning out of this rotation-pool feature; provisioning remains account/group scoped and does not create or assign Sub2API users.
 - Let automatic rotation evaluate usage over a configurable V1 window chosen from `5h`, `1d`, `7d`, or `30d`, and evaluate existing users without any created API key after existing key holders.
+- Add two stability tunables to dynamic orchestration: `imbalance_epsilon` to skip the rebalance loop when the pool is already within tolerance, and `improvement_delta` to block per-user moves whose imbalance reduction is below the configured floor.
 
 ## Capabilities
 

@@ -203,3 +203,35 @@ The system SHALL skip or reject rotation when the requested or computed target g
 - **WHEN** the upstream group replacement call fails
 - **THEN** the system records the failure in the rotation audit
 - **THEN** the system leaves the stored current assignment unchanged
+
+### Requirement: Tunable balance dead band and per-move improvement threshold
+The system SHALL expose two non-negative tunables, `imbalance_epsilon` and `improvement_delta`, that gate automatic usage-balanced rotation so that already-balanced pools and marginally-improving moves do not trigger churn.
+
+#### Scenario: Dead band skips the rebalance loop when load spread is within epsilon
+- **GIVEN** automatic rotation is enabled and the configured `imbalance_epsilon` is greater than zero
+- **WHEN** a dynamic orchestration cycle computes per-group usage loads for the Rotation pool
+- **AND** the spread between the highest and lowest group load is less than or equal to `imbalance_epsilon`
+- **THEN** the system does not iterate existing-user candidates for usage balancing
+- **THEN** the system reports the cycle as dead-band skipped on the run record and response
+- **THEN** the system still performs new-user assignment from the Landing pool when configured
+
+#### Scenario: Improvement delta blocks marginal per-user moves
+- **GIVEN** automatic rotation is enabled and the configured `improvement_delta` is greater than zero
+- **WHEN** the system evaluates moving a candidate from its current group to the lowest-loaded Rotation pool group
+- **AND** the post-move imbalance gap is not strictly less than the pre-move gap minus `improvement_delta`
+- **THEN** the system keeps the user in the current group instead of moving
+- **THEN** the system records the result as a skipped no-improvement rotation
+
+#### Scenario: Default tunables preserve prior behavior
+- **GIVEN** neither `imbalance_epsilon` nor `improvement_delta` is configured
+- **WHEN** automatic rotation runs
+- **THEN** the dead band does not skip any candidate iteration
+- **THEN** the per-move gate uses strict imbalance reduction without any delta
+- **THEN** the response and run record indicate that the dead band was not triggered
+
+#### Scenario: Operator configures tunables from the dynamic orchestration UI and API
+- **GIVEN** an authenticated operator opens the dynamic orchestration view
+- **WHEN** the operator sets `imbalance_epsilon` and `improvement_delta` to non-negative numeric values and saves configuration
+- **THEN** the authenticated configuration API persists both fields without requiring a service restart
+- **THEN** subsequent preview and execution cycles apply the saved values
+- **THEN** invalid or negative values are rejected by the authenticated API

@@ -81,6 +81,8 @@ class AutoRotationSettings:
     cooldown_minutes: int = 0
     usage_window: AutoRotationUsageWindow = AutoRotationUsageWindow.window_1d
     usage_thresholds: tuple[float, ...] = ()
+    imbalance_epsilon: float = 0.0
+    improvement_delta: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -232,12 +234,28 @@ class Settings:
             ),
             usage_window=_usage_window_setting(config),
             usage_thresholds=_thresholds_setting(config),
+            imbalance_epsilon=_float_setting(
+                config,
+                "AUTO_ROTATION_IMBALANCE_EPSILON",
+                ("auto_rotation", "imbalance_epsilon"),
+                default=0.0,
+            ),
+            improvement_delta=_float_setting(
+                config,
+                "AUTO_ROTATION_IMPROVEMENT_DELTA",
+                ("auto_rotation", "improvement_delta"),
+                default=0.0,
+            ),
         )
 
         if values["auto_rotation"].interval_seconds < 0:
             raise ConfigurationError("AUTO_ROTATION_INTERVAL_SECONDS must be >= 0")
         if values["auto_rotation"].cooldown_minutes < 0:
             raise ConfigurationError("AUTO_ROTATION_COOLDOWN_MINUTES must be >= 0")
+        if values["auto_rotation"].imbalance_epsilon < 0:
+            raise ConfigurationError("AUTO_ROTATION_IMBALANCE_EPSILON must be >= 0")
+        if values["auto_rotation"].improvement_delta < 0:
+            raise ConfigurationError("AUTO_ROTATION_IMPROVEMENT_DELTA must be >= 0")
 
         return cls(**values)
 
@@ -341,6 +359,32 @@ def _parse_int_value(raw_value: Any, *, source: str) -> int:
         return int(raw_value)
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(f"{source} must be an integer") from exc
+
+
+def _float_setting(
+    config: Mapping[str, Any],
+    env_name: str,
+    config_path: tuple[str, ...],
+    *,
+    default: float,
+) -> float:
+    env_value = _env_string(env_name)
+    if env_value is not None:
+        return _parse_float_value(env_value, source=env_name)
+
+    raw_value = _config_value(config, config_path)
+    if raw_value is None or raw_value == "":
+        return default
+    return _parse_float_value(raw_value, source=_config_label(config_path))
+
+
+def _parse_float_value(raw_value: Any, *, source: str) -> float:
+    if isinstance(raw_value, bool):
+        raise ConfigurationError(f"{source} must be numeric")
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"{source} must be numeric") from exc
 
 
 def _bool_setting(

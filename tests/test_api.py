@@ -58,7 +58,8 @@ class FakeRotationSub2API:
             {
                 "id": 101,
                 "email": "rotate@example.com",
-                "name": "rotate@example.com",
+                "name": "Rotate Operator",
+                "username": "rotator",
                 "status": "active",
                 "group_id": 11,
                 "group_name": "rotation-low",
@@ -705,6 +706,8 @@ def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
     assert users_response.status_code == 200
     assert users_response.json()["total"] == 1
     assert users_response.json()["items"][0]["user_id"] == 101
+    assert users_response.json()["items"][0]["username"] == "rotator"
+    assert users_response.json()["items"][0]["display_name"] == "Rotate Operator"
     assert users_response.json()["items"][0]["current_group_id"] == 11
     assert groups_response.status_code == 200
     groups = {item["group_id"]: item for item in groups_response.json()["items"]}
@@ -1193,6 +1196,147 @@ def test_manual_and_preview_run_records_reject_rollback(client, monkeypatch) -> 
     assert "Manual run records cannot be rolled back" in manual_rollback.json()["detail"]
     assert preview_rollback.status_code == 400
     assert "Preview run records cannot be rolled back" in preview_rollback.json()["detail"]
+
+
+def test_auto_rotation_dead_band_skips_when_spread_within_epsilon(
+    client, monkeypatch
+) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    backend.user_api_keys[202] = [{"id": 2, "usage_5h": 4.0, "usage_1d": 40.0, "usage_7d": 80.0}]
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    monkeypatch.setenv("AUTO_ROTATION_IMBALANCE_EPSILON", "10.0")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=202,
+                email="newbie@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dead_band_skipped"] is True
+    assert payload["moved"] == []
+    assert payload["skipped"] == []
+    assert backend.replace_calls == []
+
+
+def test_auto_rotation_improvement_delta_blocks_marginal_swap(
+    client, monkeypatch
+) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    backend.user_api_keys[202] = [{"id": 2, "usage_5h": 0.0, "usage_1d": 0.0, "usage_7d": 0.0}]
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    monkeypatch.setenv("AUTO_ROTATION_IMPROVEMENT_DELTA", "10.0")
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=202,
+                email="newbie@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["moved"] == []
+    assert backend.replace_calls == []
+    assert any(result["status"] == "skipped" for result in payload["skipped"])
 
 
 def test_auto_rotation_dry_run_syncs_current_upstream_assignments_without_mutation(

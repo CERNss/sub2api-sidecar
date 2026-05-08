@@ -224,6 +224,9 @@ class Sub2APIClient:
                         user
                         for user in users
                         if needle in str(user.get("email") or "").lower()
+                        or needle in str(user.get("username") or "").lower()
+                        or needle in str(user.get("display_name") or "").lower()
+                        or needle in str(user.get("name") or "").lower()
                     ]
                 return users
             except Sub2APIError as exc:
@@ -435,16 +438,26 @@ class Sub2APIClient:
             if not isinstance(item, dict):
                 continue
             current_group_id, current_group_name = self._extract_user_current_group(item)
+            username = str(item.get("username")) if item.get("username") is not None else None
+            email = str(item.get("email") or username or item.get("name") or "")
+            display_name_value = (
+                item.get("display_name")
+                or item.get("nickname")
+                or item.get("full_name")
+                or item.get("name")
+                or username
+                or email.split("@", 1)[0]
+            )
+            display_name = str(display_name_value)
+            if display_name.lower() == email.lower():
+                display_name = email.split("@", 1)[0]
             users.append(
                 {
                     "id": self._extract_id(item, "id", "user_id"),
-                    "email": str(
-                        item.get("email")
-                        or item.get("username")
-                        or item.get("name")
-                        or ""
-                    ),
-                    "name": item.get("name") or item.get("username") or item.get("email"),
+                    "email": email,
+                    "username": username,
+                    "name": item.get("name") or username or email,
+                    "display_name": display_name,
                     "status": item.get("status"),
                     "current_group_id": current_group_id,
                     "current_group_name": current_group_name,

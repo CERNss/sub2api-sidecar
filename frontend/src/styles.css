@@ -664,6 +664,15 @@ pre {
   min-height: 40px;
 }
 
+.manual-zone--target .ant-select-selector {
+  min-height: 48px !important;
+  align-items: center;
+}
+
+.manual-zone--target .ant-select-selection-item {
+  line-height: 1.35 !important;
+}
+
 .manual-route-flow .ant-select-selector {
   height: 40px !important;
   min-height: 40px !important;
@@ -772,6 +781,31 @@ pre {
   white-space: nowrap;
 }
 
+.user-option {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  line-height: 1.35;
+}
+
+.user-option-name,
+.user-option-email {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-option-name {
+  color: #111827;
+  font-weight: 650;
+}
+
+.user-option-email {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .group-option {
   min-width: 0;
   display: grid;
@@ -833,6 +867,16 @@ pre {
   background: #ffffff;
 }
 
+.panel-help-icon {
+  color: #64748b;
+  cursor: help;
+  transition: color 0.16s ease;
+}
+
+.panel-help-icon:hover {
+  color: #0f766e;
+}
+
 .orchestration-key-list .ant-list-item {
   min-width: 0;
   padding: 12px;
@@ -860,9 +904,22 @@ pre {
 }
 
 .orchestration-key-list .ant-tag {
-  max-width: 132px;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.api-key-meta-tags {
+  min-width: 0;
+  max-width: 220px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.api-key-meta-tags .ant-tag {
+  margin: 0;
 }
 
 .orchestration-action-form textarea {

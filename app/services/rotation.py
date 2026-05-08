@@ -537,12 +537,21 @@ class RotationService:
                 else:
                     failed.append(result)
 
+        imbalance_epsilon = max(0.0, float(runtime_config.imbalance_epsilon))
+        improvement_delta = max(0.0, float(runtime_config.improvement_delta))
+        dead_band_skipped = False
         for candidate in ordered_candidates:
+            if imbalance_epsilon > 0 and target_loads:
+                spread = max(target_loads.values()) - min(target_loads.values())
+                if spread <= imbalance_epsilon:
+                    dead_band_skipped = True
+                    break
             assignment = candidate.assignment
             target_group = self._select_usage_balancing_target_group(
                 candidate,
                 sorted_pool,
                 target_loads,
+                improvement_delta=improvement_delta,
             )
             source_key = self._normalize_key(assignment.current_group_id)
             target_key = self._normalize_key(target_group.group_id)
@@ -550,6 +559,8 @@ class RotationService:
             metadata = {
                 "decision_type": "usage_balancing",
                 "usage_loads_before": self._serialize_usage_loads(target_loads),
+                "imbalance_epsilon": imbalance_epsilon,
+                "improvement_delta": improvement_delta,
             }
             if dry_run:
                 result = self._preview_rotation(
@@ -594,6 +605,7 @@ class RotationService:
             "dry_run": dry_run,
             "synced": sync_result.summary,
             "config": self._serialize_config(runtime_config),
+            "dead_band_skipped": dead_band_skipped,
             "planned": [self._serialize_result(result) for result in planned],
             "moved": [self._serialize_result(result) for result in moved],
             "skipped": [self._serialize_result(result) for result in skipped],
@@ -607,6 +619,7 @@ class RotationService:
             window=self._window_enum(),
             synced=run_payload["synced"],
             config=run_payload["config"],
+            dead_band_skipped=dead_band_skipped,
             planned=run_payload["planned"],
             moved=run_payload["moved"],
             skipped=run_payload["skipped"],
@@ -635,6 +648,8 @@ class RotationService:
             cooldown_minutes=self.settings.auto_rotation.cooldown_minutes,
             usage_window=AutoRotationUsageWindow(self.settings.auto_rotation.usage_window.value),
             usage_thresholds=self.settings.auto_rotation.usage_thresholds,
+            imbalance_epsilon=self.settings.auto_rotation.imbalance_epsilon,
+            improvement_delta=self.settings.auto_rotation.improvement_delta,
             schedule_source_group_ids=(),
         )
 
@@ -647,9 +662,15 @@ class RotationService:
         usage_window: AutoRotationUsageWindow,
         usage_thresholds: tuple[float, ...],
         schedule_source_group_ids: tuple[Any, ...],
+        imbalance_epsilon: float = 0.0,
+        improvement_delta: float = 0.0,
     ) -> AutoRotationRuntimeConfig:
         if cooldown_minutes < 0:
             raise RotationExecutionError("cooldown_minutes must be >= 0")
+        if imbalance_epsilon < 0:
+            raise RotationExecutionError("imbalance_epsilon must be >= 0")
+        if improvement_delta < 0:
+            raise RotationExecutionError("improvement_delta must be >= 0")
         now = datetime.now(timezone.utc)
         existing = self.store.get_auto_rotation_config()
         config = AutoRotationRuntimeConfig(
@@ -658,6 +679,8 @@ class RotationService:
             cooldown_minutes=cooldown_minutes,
             usage_window=usage_window,
             usage_thresholds=usage_thresholds,
+            imbalance_epsilon=imbalance_epsilon,
+            improvement_delta=improvement_delta,
             schedule_source_group_ids=schedule_source_group_ids,
             created_at=existing.created_at if existing else now,
             updated_at=now,
@@ -1217,6 +1240,7 @@ class RotationService:
         moved: list[dict[str, Any]],
         skipped: list[dict[str, Any]],
         failed: list[dict[str, Any]],
+        dead_band_skipped: bool = False,
     ) -> OrchestrationRunRecord:
         now = datetime.now(timezone.utc)
         record = OrchestrationRunRecord(
@@ -1233,6 +1257,7 @@ class RotationService:
             window=window,
             synced=synced,
             config=config,
+            dead_band_skipped=dead_band_skipped,
             planned=planned,
             moved=moved,
             skipped=skipped,
@@ -1331,6 +1356,7 @@ class RotationService:
         candidate: UsageRotationCandidate,
         pool_groups: list[RotationPoolGroup],
         loads: dict[str, float],
+        improvement_delta: float = 0.0,
     ) -> RotationPoolGroup:
         assignment = candidate.assignment
         current_key = self._normalize_key(assignment.current_group_id)
@@ -1341,7 +1367,7 @@ class RotationService:
         if current_key in loads and current_key != least_key:
             before_gap = current_load - least_load
             after_gap = abs((current_load - candidate.usage_value) - (least_load + candidate.usage_value))
-            if before_gap > 0 and after_gap < before_gap:
+            if before_gap > 0 and after_gap < before_gap - improvement_delta:
                 return least_loaded
         if current_key in loads:
             current_group = next(
@@ -1431,6 +1457,8 @@ class RotationService:
             "cooldown_minutes": config.cooldown_minutes,
             "usage_window": config.usage_window.value,
             "usage_thresholds": list(config.usage_thresholds),
+            "imbalance_epsilon": config.imbalance_epsilon,
+            "improvement_delta": config.improvement_delta,
             "schedule_source_group_ids": list(config.schedule_source_group_ids),
             "created_at": config.created_at.isoformat(),
             "updated_at": config.updated_at.isoformat(),

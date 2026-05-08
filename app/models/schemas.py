@@ -92,6 +92,8 @@ class OrchestrationUserResponse(BaseModel):
     user_id: Any
     email: str
     name: str | None = None
+    username: str | None = None
+    display_name: str | None = None
     status: str | None = None
     current_group_id: Any | None = None
     current_group_name: str | None = None
@@ -192,6 +194,8 @@ class AutoRotationConfigResponse(BaseModel):
     cooldown_minutes: int
     usage_window: str
     usage_thresholds: list[float]
+    imbalance_epsilon: float = 0.0
+    improvement_delta: float = 0.0
     schedule_source_group_ids: list[Any] = Field(default_factory=list)
 
 
@@ -201,6 +205,8 @@ class AutoRotationConfigRequest(BaseModel):
     cooldown_minutes: int = Field(default=0, ge=0)
     usage_window: str
     usage_thresholds: list[float] = Field(default_factory=list)
+    imbalance_epsilon: float = Field(default=0.0, ge=0.0)
+    improvement_delta: float = Field(default=0.0, ge=0.0)
     schedule_source_group_ids: list[Any] = Field(default_factory=list)
 
 

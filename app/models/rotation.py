@@ -86,6 +86,8 @@ class AutoRotationRuntimeConfig(BaseModel):
     cooldown_minutes: int = 0
     usage_window: AutoRotationUsageWindow = AutoRotationUsageWindow.window_1d
     usage_thresholds: tuple[float, ...] = ()
+    imbalance_epsilon: float = 0.0
+    improvement_delta: float = 0.0
     schedule_source_group_ids: tuple[Any, ...] = ()
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
