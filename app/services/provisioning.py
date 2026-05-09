@@ -25,8 +25,6 @@ from app.models.flow import (
 )
 from app.models.rotation import RotationPoolKind
 from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
-from app.services.rotation import RotationService
-from app.stores.base import FlowStore
 from app.stores.sqlite import SQLiteFlowStore
 
 logger = logging.getLogger(__name__)
@@ -35,23 +33,17 @@ logger = logging.getLogger(__name__)
 class ProvisioningService:
     def __init__(
         self,
-        flow_store: FlowStore,
+        flow_store: SQLiteFlowStore,
         sub2api_client: Sub2APIClient,
-        default_user_password: str,
         group_name_prefix: str,
         openai_oauth_redirect_uri: str,
         assignment_mode: ProvisioningAssignmentMode,
-        rotation_store: SQLiteFlowStore,
-        rotation_service: RotationService,
     ) -> None:
         self.flow_store = flow_store
         self.sub2api_client = sub2api_client
-        self.default_user_password = default_user_password
         self.group_name_prefix = group_name_prefix
         self.openai_oauth_redirect_uri = openai_oauth_redirect_uri
         self.assignment_mode = assignment_mode
-        self.rotation_store = rotation_store
-        self.rotation_service = rotation_service
 
     def start_flow(self, email: str) -> ProvisionStartResponse:
         logger.info("Starting provisioning flow for email=%s", email)
@@ -65,17 +57,6 @@ class ProvisioningService:
             details={"email": email},
         )
         try:
-            user = self.sub2api_client.create_user(
-                email=email,
-                password=self.default_user_password,
-            )
-            self._record_event(
-                flow_id=flow_id,
-                event_type=ProvisionEventType.user_created,
-                status=ProvisionEventStatus.succeeded,
-                message="Sub2API user created",
-                details={"user_id": user["id"], "email": email},
-            )
             group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(email)
             self._record_event(
                 flow_id=flow_id,
@@ -87,14 +68,6 @@ class ProvisioningService:
                     "assignment_mode": assignment_mode.value,
                     "reason": assignment_reason,
                 },
-            )
-            self.sub2api_client.set_user_group(user_id=user["id"], group_id=group_id)
-            self._record_event(
-                flow_id=flow_id,
-                event_type=ProvisionEventType.user_bound,
-                status=ProvisionEventStatus.succeeded,
-                message="User bound to target group",
-                details={"user_id": user["id"], "group_id": group_id},
             )
             oauth = self.sub2api_client.generate_openai_auth_url(
                 email=email,
@@ -121,7 +94,6 @@ class ProvisioningService:
         flow = ProvisionFlow(
             flow_id=flow_id,
             email=email,
-            user_id=user["id"],
             group_id=group_id,
             state=state,
             status=FlowStatus.pending_oauth,
@@ -139,16 +111,14 @@ class ProvisioningService:
             details={"state": state},
         )
         logger.info(
-            "Provisioning flow created | flow_id=%s | user_id=%s | group_id=%s",
+            "Provisioning flow created | flow_id=%s | group_id=%s",
             flow_id,
-            user["id"],
             group_id,
         )
 
         return ProvisionStartResponse(
             flow_id=flow.flow_id,
             email=flow.email,
-            user_id=flow.user_id,
             group_id=flow.group_id,
             account_name=flow.account_name,
             oauth_url=flow.oauth_url or "",
@@ -249,13 +219,6 @@ class ProvisioningService:
             message="Provisioning flow completed",
             details={"oauth_account_id": account["id"], "group_id": flow.group_id},
         )
-        self.rotation_service.sync_assignment_after_provision(
-            user_id=flow.user_id,
-            email=flow.email,
-            group_id=flow.group_id,
-            assignment_mode=flow.assignment_mode,
-            reason=flow.assignment_reason,
-        )
         logger.info(
             "OAuth flow completed | flow_id=%s | oauth_account_id=%s",
             flow.flow_id,
@@ -311,7 +274,7 @@ class ProvisioningService:
             group = self.sub2api_client.create_group(group_name)
             return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
 
-        default_group = self.rotation_store.get_default_rotation_pool_group(RotationPoolKind.landing)
+        default_group = self.flow_store.get_default_rotation_pool_group(RotationPoolKind.landing)
         if default_group is None:
             raise RotationPoolEmptyError(
                 "Managed-pool provisioning is enabled but no landing pool group is available"

@@ -45,7 +45,7 @@ class ProvisionFlow(BaseModel):
 
     flow_id: str
     email: str
-    user_id: Any
+    user_id: Any | None = None
     group_id: Any
     state: str
     status: FlowStatus

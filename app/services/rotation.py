@@ -57,6 +57,12 @@ class UsageRotationCandidate:
     usage_value: float
 
 
+@dataclass
+class _PreconditionBlock:
+    status: RotationResultStatus
+    reason: str
+
+
 class RotationService:
     def __init__(
         self,
@@ -409,6 +415,13 @@ class RotationService:
         )
         return result
 
+    _STATUS_BUCKETS = {
+        RotationResultStatus.moved: "moved",
+        RotationResultStatus.planned: "planned",
+        RotationResultStatus.failed: "failed",
+        RotationResultStatus.skipped: "skipped",
+    }
+
     def save_manual_run_record(
         self,
         *,
@@ -416,7 +429,13 @@ class RotationService:
         result: RotationExecutionResult,
     ) -> OrchestrationRunRecord:
         serialized = self._serialize_result(result)
-        bucket = self._status_bucket(result.status)
+        buckets: dict[str, list[dict[str, Any]]] = {
+            "planned": [],
+            "moved": [],
+            "skipped": [],
+            "failed": [],
+        }
+        buckets[self._STATUS_BUCKETS[result.status]].append(serialized)
         return self._save_orchestration_run(
             run_kind=OrchestrationRunKind.manual,
             tag=tag,
@@ -425,10 +444,7 @@ class RotationService:
             window=result.usage_window,
             synced={},
             config={},
-            planned=[serialized] if bucket == "planned" else [],
-            moved=[serialized] if bucket == "moved" else [],
-            skipped=[serialized] if bucket == "skipped" else [],
-            failed=[serialized] if bucket == "failed" else [],
+            **buckets,
         )
 
     def run_auto_rotation(
@@ -436,7 +452,7 @@ class RotationService:
         trigger_type: RotationTrigger = RotationTrigger.automatic_api,
         *,
         dry_run: bool = False,
-    ) -> dict[str, Any]:
+    ) -> OrchestrationRunRecord:
         runtime_config = self.get_auto_rotation_config()
         if not dry_run and not runtime_config.enabled:
             raise RotationExecutionError("Automatic rotation is disabled")
@@ -600,43 +616,20 @@ class RotationService:
             else:
                 failed.append(result)
 
-        run_payload = {
-            "window": self._window_enum().value,
-            "dry_run": dry_run,
-            "synced": sync_result.summary,
-            "config": self._serialize_config(runtime_config),
-            "dead_band_skipped": dead_band_skipped,
-            "planned": [self._serialize_result(result) for result in planned],
-            "moved": [self._serialize_result(result) for result in moved],
-            "skipped": [self._serialize_result(result) for result in skipped],
-            "failed": [self._serialize_result(result) for result in failed],
-        }
-        record = self._save_orchestration_run(
+        return self._save_orchestration_run(
             run_kind=OrchestrationRunKind.automatic,
             tag="automatic_preview" if dry_run else "automatic_execution",
             trigger_type=trigger_type,
             dry_run=dry_run,
             window=self._window_enum(),
-            synced=run_payload["synced"],
-            config=run_payload["config"],
+            synced=sync_result.summary,
+            config=self._serialize_config(runtime_config),
             dead_band_skipped=dead_band_skipped,
-            planned=run_payload["planned"],
-            moved=run_payload["moved"],
-            skipped=run_payload["skipped"],
-            failed=run_payload["failed"],
+            planned=[self._serialize_result(result) for result in planned],
+            moved=[self._serialize_result(result) for result in moved],
+            skipped=[self._serialize_result(result) for result in skipped],
+            failed=[self._serialize_result(result) for result in failed],
         )
-        return {
-            **run_payload,
-            "run_id": record.run_id,
-            "run_kind": record.run_kind.value,
-            "tag": record.tag,
-            "status": record.status,
-            "created_at": record.created_at.isoformat(),
-            "updated_at": record.updated_at.isoformat(),
-            "rollback_status": record.rollback_status,
-            "rollback_reason": record.rollback_reason,
-            "rollback_results": record.rollback_results,
-        }
 
     def get_auto_rotation_config(self) -> AutoRotationRuntimeConfig:
         stored = self.store.get_auto_rotation_config()
@@ -886,6 +879,43 @@ class RotationService:
         record.updated_at = datetime.now(timezone.utc)
         return self.store.save_orchestration_run(record)
 
+    def _evaluate_rotation_preconditions(
+        self,
+        *,
+        assignment: UserGroupAssignment,
+        target_group_id: Any,
+    ) -> tuple[RotationPoolGroup | None, _PreconditionBlock | None]:
+        target_group = self.store.get_rotation_pool_group(target_group_id)
+        if target_group is None or not target_group.is_exclusive:
+            return None, _PreconditionBlock(
+                RotationResultStatus.failed,
+                "Target group is not a selected exclusive rotation target",
+            )
+        if target_group.is_subscription:
+            return target_group, _PreconditionBlock(
+                RotationResultStatus.failed,
+                "Target group is a subscription group; replace-group supports only dedicated standard groups",
+            )
+        if self.store.has_pending_flow_for_user(assignment.user_id):
+            return target_group, _PreconditionBlock(
+                RotationResultStatus.skipped,
+                "User still has a pending OAuth provisioning flow",
+            )
+        if self._normalize_key(assignment.current_group_id) == self._normalize_key(target_group_id):
+            return target_group, _PreconditionBlock(
+                RotationResultStatus.skipped,
+                "Target group matches the current assignment",
+            )
+        cooldown = self.get_auto_rotation_config().cooldown_minutes
+        if cooldown > 0 and assignment.last_rotation_at is not None:
+            earliest_allowed = assignment.last_rotation_at + timedelta(minutes=cooldown)
+            if earliest_allowed > datetime.now(timezone.utc):
+                return target_group, _PreconditionBlock(
+                    RotationResultStatus.skipped,
+                    "Rotation is still within the configured cooldown window",
+                )
+        return target_group, None
+
     def _execute_rotation(
         self,
         *,
@@ -898,69 +928,21 @@ class RotationService:
         usage_snapshot: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RotationExecutionResult:
-        target_group = self.store.get_rotation_pool_group(target_group_id)
-        if target_group is None or not target_group.is_exclusive:
+        target_group, block = self._evaluate_rotation_preconditions(
+            assignment=assignment,
+            target_group_id=target_group_id,
+        )
+        if block is not None:
             return self._record_result(
                 assignment=assignment,
                 target_group_id=target_group_id,
                 trigger_type=trigger_type,
-                status=RotationResultStatus.failed,
-                reason="Target group is not a selected exclusive rotation target",
+                status=block.status,
+                reason=block.reason,
                 usage_window=usage_window,
                 usage_value=usage_value,
                 usage_snapshot=usage_snapshot,
             )
-
-        if target_group.is_subscription:
-            return self._record_result(
-                assignment=assignment,
-                target_group_id=target_group_id,
-                trigger_type=trigger_type,
-                status=RotationResultStatus.failed,
-                reason="Target group is a subscription group; replace-group supports only dedicated standard groups",
-                usage_window=usage_window,
-                usage_value=usage_value,
-                usage_snapshot=usage_snapshot,
-            )
-
-        if self.store.has_pending_flow_for_user(assignment.user_id):
-            return self._record_result(
-                assignment=assignment,
-                target_group_id=target_group_id,
-                trigger_type=trigger_type,
-                status=RotationResultStatus.skipped,
-                reason="User still has a pending OAuth provisioning flow",
-                usage_window=usage_window,
-                usage_value=usage_value,
-                usage_snapshot=usage_snapshot,
-            )
-
-        if self._normalize_key(assignment.current_group_id) == self._normalize_key(target_group_id):
-            return self._record_result(
-                assignment=assignment,
-                target_group_id=target_group_id,
-                trigger_type=trigger_type,
-                status=RotationResultStatus.skipped,
-                reason="Target group matches the current assignment",
-                usage_window=usage_window,
-                usage_value=usage_value,
-                usage_snapshot=usage_snapshot,
-            )
-
-        cooldown = self.get_auto_rotation_config().cooldown_minutes
-        if cooldown > 0 and assignment.last_rotation_at is not None:
-            earliest_allowed = assignment.last_rotation_at + timedelta(minutes=cooldown)
-            if earliest_allowed > datetime.now(timezone.utc):
-                return self._record_result(
-                    assignment=assignment,
-                    target_group_id=target_group_id,
-                    trigger_type=trigger_type,
-                    status=RotationResultStatus.skipped,
-                    reason="Rotation is still within the configured cooldown window",
-                    usage_window=usage_window,
-                    usage_value=usage_value,
-                    usage_snapshot=usage_snapshot,
-                )
 
         try:
             response = self.sub2api_client.replace_exclusive_user_group(
@@ -1026,97 +1008,24 @@ class RotationService:
         usage_snapshot: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RotationExecutionResult:
-        target_group = self.store.get_rotation_pool_group(target_group_id)
+        target_group, block = self._evaluate_rotation_preconditions(
+            assignment=assignment,
+            target_group_id=target_group_id,
+        )
         result_metadata = metadata.copy() if metadata else None
         if result_metadata is not None and target_group is not None:
             result_metadata.setdefault("source_group_name", assignment.current_group_name or "")
             result_metadata.setdefault("target_group_name", target_group.group_name)
-        if target_group is None or not target_group.is_exclusive:
-            return RotationExecutionResult(
-                user_id=assignment.user_id,
-                email=assignment.email,
-                source_group_id=assignment.current_group_id,
-                target_group_id=target_group_id,
-                trigger_type=trigger_type,
-                status=RotationResultStatus.failed,
-                reason="Target group is not a selected exclusive rotation target",
-                usage_window=usage_window,
-                usage_value=usage_value,
-                usage_snapshot=usage_snapshot,
-                metadata=result_metadata,
-            )
-
-        if target_group.is_subscription:
-            return RotationExecutionResult(
-                user_id=assignment.user_id,
-                email=assignment.email,
-                source_group_id=assignment.current_group_id,
-                target_group_id=target_group_id,
-                trigger_type=trigger_type,
-                status=RotationResultStatus.failed,
-                reason="Target group is a subscription group; replace-group supports only dedicated standard groups",
-                usage_window=usage_window,
-                usage_value=usage_value,
-                usage_snapshot=usage_snapshot,
-                metadata=result_metadata,
-            )
-
-        if self.store.has_pending_flow_for_user(assignment.user_id):
-            return RotationExecutionResult(
-                user_id=assignment.user_id,
-                email=assignment.email,
-                source_group_id=assignment.current_group_id,
-                target_group_id=target_group_id,
-                trigger_type=trigger_type,
-                status=RotationResultStatus.skipped,
-                reason="User still has a pending OAuth provisioning flow",
-                usage_window=usage_window,
-                usage_value=usage_value,
-                usage_snapshot=usage_snapshot,
-                metadata=result_metadata,
-            )
-
-        if self._normalize_key(assignment.current_group_id) == self._normalize_key(target_group_id):
-            return RotationExecutionResult(
-                user_id=assignment.user_id,
-                email=assignment.email,
-                source_group_id=assignment.current_group_id,
-                target_group_id=target_group_id,
-                trigger_type=trigger_type,
-                status=RotationResultStatus.skipped,
-                reason="Target group matches the current assignment",
-                usage_window=usage_window,
-                usage_value=usage_value,
-                usage_snapshot=usage_snapshot,
-                metadata=result_metadata,
-            )
-
-        cooldown = self.get_auto_rotation_config().cooldown_minutes
-        if cooldown > 0 and assignment.last_rotation_at is not None:
-            earliest_allowed = assignment.last_rotation_at + timedelta(minutes=cooldown)
-            if earliest_allowed > datetime.now(timezone.utc):
-                return RotationExecutionResult(
-                    user_id=assignment.user_id,
-                    email=assignment.email,
-                    source_group_id=assignment.current_group_id,
-                    target_group_id=target_group_id,
-                    trigger_type=trigger_type,
-                    status=RotationResultStatus.skipped,
-                    reason="Rotation is still within the configured cooldown window",
-                    usage_window=usage_window,
-                    usage_value=usage_value,
-                    usage_snapshot=usage_snapshot,
-                    metadata=result_metadata,
-                )
-
+        status = block.status if block else RotationResultStatus.planned
+        result_reason = block.reason if block else reason
         return RotationExecutionResult(
             user_id=assignment.user_id,
             email=assignment.email,
             source_group_id=assignment.current_group_id,
             target_group_id=target_group_id,
             trigger_type=trigger_type,
-            status=RotationResultStatus.planned,
-            reason=reason,
+            status=status,
+            reason=result_reason,
             usage_window=usage_window,
             usage_value=usage_value,
             usage_snapshot=usage_snapshot,
@@ -1286,15 +1195,6 @@ class RotationService:
         if skipped:
             return "skipped"
         return "empty"
-
-    def _status_bucket(self, status: RotationResultStatus) -> str:
-        if status == RotationResultStatus.moved:
-            return "moved"
-        if status == RotationResultStatus.planned:
-            return "planned"
-        if status == RotationResultStatus.failed:
-            return "failed"
-        return "skipped"
 
     def _metadata_text(self, item: dict[str, Any], key: str) -> str | None:
         metadata = item.get("metadata")

@@ -30,12 +30,6 @@ class Sub2APIClient:
     """
 
     CREATE_GROUP_PATHS = ("/api/v1/admin/groups", "/api/admin/groups", "/admin/groups")
-    CREATE_USER_PATHS = ("/api/v1/admin/users", "/api/admin/users", "/admin/users")
-    SET_USER_GROUP_PATHS = (
-        "/api/v1/admin/users/{user_id}",
-        "/api/admin/users/{user_id}/groups",
-        "/admin/users/{user_id}/groups",
-    )
     UPDATE_API_KEY_GROUP_PATHS = ("/api/v1/admin/api-keys/{key_id}",)
     REPLACE_EXCLUSIVE_GROUP_PATHS = (
         "/api/v1/admin/users/{user_id}/replace-group",
@@ -115,37 +109,6 @@ class Sub2APIClient:
         )
         return {"id": group_id, "name": name, "raw": data}
 
-    def create_user(self, email: str, password: str) -> dict[str, Any]:
-        payload = {
-            "email": email,
-            "name": email,
-            "username": email,
-            "password": password,
-        }
-        data = self._request_candidates("POST", self.CREATE_USER_PATHS, json=payload)
-        body = self._unwrap_data(data)
-        user_id = self._extract_id(
-            body,
-            "id",
-            "user_id",
-            "data.id",
-            "data.user_id",
-            "user.id",
-            "data.user.id",
-        )
-        return {"id": user_id, "email": email, "raw": data}
-
-    def set_user_group(self, user_id: Any, group_id: Any) -> dict[str, Any]:
-        """Set a user's allowed groups for initial provisioning before API keys exist."""
-        payload = {
-            "allowed_groups": [group_id],
-            "group_ids": [group_id],
-            "group_id": group_id,
-        }
-        path_candidates = tuple(path.format(user_id=user_id) for path in self.SET_USER_GROUP_PATHS)
-        data = self._request_candidates("PUT", path_candidates, json=payload)
-        return {"user_id": user_id, "group_id": group_id, "raw": data}
-
     def update_api_key_group(self, *, key_id: Any, group_id: Any) -> dict[str, Any]:
         payload = {"group_id": group_id}
         path_candidates = tuple(
@@ -153,19 +116,6 @@ class Sub2APIClient:
         )
         data = self._request_candidates("PUT", path_candidates, json=payload)
         return {"key_id": key_id, "group_id": group_id, "raw": data}
-
-    def replace_user_group(
-        self,
-        *,
-        user_id: Any,
-        old_group_id: Any,
-        new_group_id: Any,
-    ) -> dict[str, Any]:
-        return self.replace_exclusive_user_group(
-            user_id=user_id,
-            old_group_id=old_group_id,
-            new_group_id=new_group_id,
-        )
 
     def replace_exclusive_user_group(
         self,

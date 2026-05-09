@@ -484,7 +484,6 @@ type AutoRotationConfig = {
 
 type AutoRotationConfigPayload = ApiPayload & {
   config: AutoRotationConfig;
-  pool: RotationPoolCandidate[];
   landing_pool?: RotationPoolCandidate[];
   rotation_pool?: RotationPoolCandidate[];
 };

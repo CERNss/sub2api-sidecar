@@ -135,12 +135,9 @@ def get_provisioning_service() -> ProvisioningService:
     return ProvisioningService(
         flow_store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
-        default_user_password=settings.default_user_password,
         group_name_prefix=settings.group_name_prefix,
         openai_oauth_redirect_uri=settings.openai_oauth_redirect_uri,
         assignment_mode=settings.assignment_mode,
-        rotation_store=get_flow_store(),
-        rotation_service=get_rotation_service(),
     )
 
 
@@ -349,8 +346,15 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def rotation_execution_response(result: RotationExecutionResult) -> RotationExecutionResponse:
+def rotation_execution_response(
+    result: RotationExecutionResult,
+    *,
+    run_record: Any | None = None,
+) -> RotationExecutionResponse:
     return RotationExecutionResponse(
+        run_id=run_record.run_id if run_record else None,
+        run_kind=run_record.run_kind.value if run_record else None,
+        tag=run_record.tag if run_record else None,
         user_id=result.user_id,
         email=result.email,
         source_group_id=result.source_group_id,
@@ -366,10 +370,6 @@ def rotation_execution_response(result: RotationExecutionResult) -> RotationExec
     )
 
 
-def rotation_execution_response_from_item(item: dict[str, Any]) -> RotationExecutionResponse:
-    return RotationExecutionResponse(**item)
-
-
 def auto_rotation_run_response(record: Any) -> AutoRotationRunResponse:
     return AutoRotationRunResponse(
         run_id=record.run_id,
@@ -383,13 +383,12 @@ def auto_rotation_run_response(record: Any) -> AutoRotationRunResponse:
         synced=record.synced,
         config=record.config,
         dead_band_skipped=record.dead_band_skipped,
-        planned=[rotation_execution_response_from_item(item) for item in record.planned],
-        moved=[rotation_execution_response_from_item(item) for item in record.moved],
-        skipped=[rotation_execution_response_from_item(item) for item in record.skipped],
-        failed=[rotation_execution_response_from_item(item) for item in record.failed],
+        planned=[RotationExecutionResponse(**item) for item in record.planned],
+        moved=[RotationExecutionResponse(**item) for item in record.moved],
+        skipped=[RotationExecutionResponse(**item) for item in record.skipped],
+        failed=[RotationExecutionResponse(**item) for item in record.failed],
         rollback_results=[
-            rotation_execution_response_from_item(item)
-            for item in record.rollback_results
+            RotationExecutionResponse(**item) for item in record.rollback_results
         ],
         rollback_status=record.rollback_status,
         rollback_reason=record.rollback_reason,
@@ -406,9 +405,9 @@ def group_response(candidate: dict[str, object]) -> OrchestrationGroupResponse:
     return OrchestrationGroupResponse(
         group_id=candidate["id"],
         name=str(candidate.get("name") or ""),
-        group_kind=candidate.get("group_kind") if candidate.get("group_kind") is not None else None,
-        platform=candidate.get("platform") if candidate.get("platform") is not None else None,
-        status=candidate.get("status") if candidate.get("status") is not None else None,
+        group_kind=candidate.get("group_kind"),
+        platform=candidate.get("platform"),
+        status=candidate.get("status"),
         is_exclusive=bool(candidate.get("is_exclusive")),
         is_subscription=bool(candidate.get("is_subscription")),
         rotation_supported=bool(candidate.get("rotation_supported")),
@@ -429,18 +428,18 @@ def orchestration_users(
     items: list[OrchestrationUserResponse] = []
     for user in upstream_users:
         local_assignment = local_assignments.get(str(user["id"]))
-        current_group_id = user.get("current_group_id")
-        current_group_name = user.get("current_group_name")
+        username = user.get("username")
+        display_name = user.get("display_name")
         items.append(
             OrchestrationUserResponse(
                 user_id=user["id"],
                 email=str(user.get("email") or ""),
-                name=user.get("name") if user.get("name") is not None else None,
-                username=str(user.get("username")) if user.get("username") is not None else None,
-                display_name=str(user.get("display_name")) if user.get("display_name") is not None else None,
-                status=user.get("status") if user.get("status") is not None else None,
-                current_group_id=current_group_id,
-                current_group_name=current_group_name,
+                name=user.get("name"),
+                username=str(username) if username is not None else None,
+                display_name=str(display_name) if display_name is not None else None,
+                status=user.get("status"),
+                current_group_id=user.get("current_group_id"),
+                current_group_name=user.get("current_group_name"),
                 local_group_id=local_assignment.current_group_id if local_assignment else None,
                 local_group_name=local_assignment.current_group_name if local_assignment else None,
                 has_local_assignment=local_assignment is not None,
@@ -489,21 +488,16 @@ def orchestration_replace_group(
     payload: OrchestrationAssignRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    result = get_rotation_service().orchestrate_existing_assignment(
+    service = get_rotation_service()
+    result = service.orchestrate_existing_assignment(
         user_id=payload.user_id,
         email=payload.email,
         source_group_id=payload.source_group_id,
         target_group_id=payload.target_group_id,
         reason=payload.reason,
     )
-    run_record = get_rotation_service().save_manual_run_record(
-        tag="manual_user_group",
-        result=result,
-    )
-    response = rotation_execution_response(result)
-    response.run_id = run_record.run_id
-    response.run_kind = run_record.run_kind.value
-    response.tag = run_record.tag
+    run_record = service.save_manual_run_record(tag="manual_user_group", result=result)
+    response = rotation_execution_response(result, run_record=run_record)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
@@ -512,7 +506,8 @@ def orchestration_update_api_key_group(
     payload: OrchestrationApiKeyAssignRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    result = get_rotation_service().orchestrate_existing_api_key(
+    service = get_rotation_service()
+    result = service.orchestrate_existing_api_key(
         user_id=payload.user_id,
         email=payload.email,
         key_id=payload.key_id,
@@ -520,14 +515,8 @@ def orchestration_update_api_key_group(
         target_group_id=payload.target_group_id,
         reason=payload.reason,
     )
-    run_record = get_rotation_service().save_manual_run_record(
-        tag="manual_api_key",
-        result=result,
-    )
-    response = rotation_execution_response(result)
-    response.run_id = run_record.run_id
-    response.run_kind = run_record.run_kind.value
-    response.tag = run_record.tag
+    run_record = service.save_manual_run_record(tag="manual_api_key", result=result)
+    response = rotation_execution_response(result, run_record=run_record)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
@@ -622,6 +611,8 @@ def parse_rotation_pool_kind(value: str | None) -> RotationPoolKind:
 
 
 def selected_pool_response(group: RotationPoolGroup) -> RotationPoolCandidateResponse:
+    is_rotation = group.pool_kind == RotationPoolKind.rotation
+    is_landing = group.pool_kind == RotationPoolKind.landing
     return RotationPoolCandidateResponse(
         group_id=group.group_id,
         name=group.group_name,
@@ -630,15 +621,15 @@ def selected_pool_response(group: RotationPoolGroup) -> RotationPoolCandidateRes
         status=group.status,
         is_exclusive=group.is_exclusive,
         is_subscription=group.is_subscription,
-        rotation_supported=group.is_exclusive and not group.is_subscription,
+        rotation_supported=group.rotation_supported,
         unsupported_reason=None
-        if group.is_exclusive and not group.is_subscription
+        if group.rotation_supported
         else "selected group is not supported for automatic rotation",
         selected=True,
-        rotation_selected=group.pool_kind == RotationPoolKind.rotation,
-        landing_selected=group.pool_kind == RotationPoolKind.landing,
-        priority=group.priority if group.pool_kind == RotationPoolKind.rotation else None,
-        landing_priority=group.priority if group.pool_kind == RotationPoolKind.landing else None,
+        rotation_selected=is_rotation,
+        landing_selected=is_landing,
+        priority=group.priority if is_rotation else None,
+        landing_priority=group.priority if is_landing else None,
     )
 
 
@@ -665,7 +656,6 @@ def auto_rotation_config_response() -> AutoRotationConfigEnvelope:
             improvement_delta=config.improvement_delta,
             schedule_source_group_ids=list(config.schedule_source_group_ids),
         ),
-        pool=rotation_pool,
         landing_pool=landing_pool,
         rotation_pool=rotation_pool,
     )
@@ -731,7 +721,7 @@ def rotation_pool_add_group(
             "priority": group.priority,
             "is_exclusive": group.is_exclusive,
             "is_subscription": group.is_subscription,
-            "rotation_supported": group.is_exclusive and not group.is_subscription,
+            "rotation_supported": group.rotation_supported,
         },
     )
 
@@ -742,15 +732,8 @@ def rotation_pool_remove_group(
     pool_kind: str | None = Query(default=None),
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    coerced: Any = group_id
-    stripped = group_id.strip()
-    if stripped and (stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit())):
-        try:
-            coerced = int(stripped)
-        except ValueError:
-            coerced = group_id
     parsed_pool_kind = parse_rotation_pool_kind(pool_kind)
-    get_rotation_service().remove_group_from_pool(coerced, parsed_pool_kind)
+    get_rotation_service().remove_group_from_pool(group_id, parsed_pool_kind)
     return JSONResponse(
         status_code=200,
         content={"success": True, "group_id": group_id, "pool_kind": parsed_pool_kind.value},
@@ -762,19 +745,14 @@ def rotation_manual(
     payload: ManualRotationRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    result = get_rotation_service().manual_rotate(
+    service = get_rotation_service()
+    result = service.manual_rotate(
         user_id=payload.user_id,
         target_group_id=payload.target_group_id,
         reason=payload.reason,
     )
-    run_record = get_rotation_service().save_manual_run_record(
-        tag="manual_user_group",
-        result=result,
-    )
-    response = rotation_execution_response(result)
-    response.run_id = run_record.run_id
-    response.run_kind = run_record.run_kind.value
-    response.tag = run_record.tag
+    run_record = service.save_manual_run_record(tag="manual_user_group", result=result)
+    response = rotation_execution_response(result, run_record=run_record)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
@@ -783,31 +761,11 @@ def rotation_auto_run(
     payload: AutoRotationRunRequest | None = None,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    result = get_rotation_service().run_auto_rotation(dry_run=payload.dry_run if payload else False)
-    response = AutoRotationRunResponse(
-        run_id=result.get("run_id"),
-        run_kind=result.get("run_kind"),
-        tag=result.get("tag"),
-        status=result.get("status"),
-        window=result["window"],
-        dry_run=result["dry_run"],
-        created_at=result.get("created_at"),
-        updated_at=result.get("updated_at"),
-        synced=result["synced"],
-        config=result["config"],
-        dead_band_skipped=bool(result.get("dead_band_skipped", False)),
-        planned=[RotationExecutionResponse(**item) for item in result["planned"]],
-        moved=[RotationExecutionResponse(**item) for item in result["moved"]],
-        skipped=[RotationExecutionResponse(**item) for item in result["skipped"]],
-        failed=[RotationExecutionResponse(**item) for item in result["failed"]],
-        rollback_results=[
-            RotationExecutionResponse(**item)
-            for item in result.get("rollback_results", [])
-        ],
-        rollback_status=result.get("rollback_status"),
-        rollback_reason=result.get("rollback_reason"),
+    record = get_rotation_service().run_auto_rotation(dry_run=payload.dry_run if payload else False)
+    return JSONResponse(
+        status_code=200,
+        content=auto_rotation_run_response(record).model_dump(mode="json"),
     )
-    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
 @app.get("/rotation/auto/runs")

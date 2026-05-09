@@ -62,6 +62,10 @@ class RotationPoolGroup(BaseModel):
             raise ValueError("group_id is required")
         return str(value)
 
+    @property
+    def rotation_supported(self) -> bool:
+        return self.is_exclusive and not self.is_subscription
+
 
 class UserGroupAssignment(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)

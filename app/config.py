@@ -98,7 +98,6 @@ class Settings:
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
     sqlite_db_path: str = "data/sub2api-sidecar.db"
-    default_user_password: str = "ChangeMe123!"
     group_name_prefix: str = "openai-oauth-"
     request_timeout_seconds: int = 30
 
@@ -125,7 +124,6 @@ class Settings:
 
         for field_name, env_name in (
             ("sub2api_admin_api_key", "SUB2API_ADMIN_API_KEY"),
-            ("default_user_password", "DEFAULT_USER_PASSWORD"),
         ):
             value = _env_string(env_name)
             if value is None:

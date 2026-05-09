@@ -432,13 +432,14 @@ def test_provision_start_persists_flow_in_sqlite_with_cookie_auth(client) -> Non
     payload = response.json()
     assert payload["success"] is True
     assert payload["account_name"] == "user@example.com"
-    assert payload["user_id"] == "u-1"
+    assert payload.get("user_id") is None
     assert payload["group_id"] == "g-1"
     assert payload["oauth_redirect_uri"] == EXPECTED_REDIRECT_URI
 
     stored_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
     assert stored_flow is not None
     assert stored_flow.email == "user@example.com"
+    assert stored_flow.user_id is None
     assert stored_flow.status.value == "pending_oauth"
 
 
@@ -886,10 +887,11 @@ def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch)
     assert start_response.json()["group_id"] == "11"
     assert backend.create_group_calls == 0
     assert complete_response.status_code == 200
-    assignment = main.get_flow_store().get_user_assignment(101)
-    assert assignment is not None
-    assert assignment.current_group_id == "11"
-    assert assignment.assignment_mode == AssignmentMode.managed_pool
+    completed_flow = main.get_flow_store().get_by_flow_id(start_response.json()["flow_id"])
+    assert completed_flow is not None
+    assert completed_flow.user_id is None
+    assert completed_flow.group_id == "11"
+    assert completed_flow.assignment_mode == AssignmentMode.managed_pool
 
 
 def test_manual_rotation_success_skip_and_failure(client) -> None:

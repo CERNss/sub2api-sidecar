@@ -242,16 +242,15 @@ cp .env.example .env
 
 ```env
 SUB2API_ADMIN_API_KEY=replace-me
-DEFAULT_USER_PASSWORD=ChangeMe123!
 # APP_AUTH_PASSWORD=optional-test-override
 ```
 
 说明：
 
 - `SUB2API_ADMIN_API_KEY` 是调用 Sub2API admin API 的密钥。
-- `DEFAULT_USER_PASSWORD` 用于创建 Sub2API 用户。
 - `APP_AUTH_PASSWORD` 默认不需要填写；不填时服务会在每次启动时生成一个新密码并打印到日志中。这个变量主要用于测试或调试。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
+- 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
 
 环境变量仍然可以覆盖 `config.yaml` 中的同名旧配置项，方便兼容已有部署和测试环境；新配置建议优先改 `config.yaml`。
 

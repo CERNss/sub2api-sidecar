@@ -1,21 +1,23 @@
 # openai-oauth-provisioning Specification
 
 ## Purpose
-Define the required behavior for a minimal Sub2API-managed OpenAI OAuth orchestration service, including email-driven provisioning, manual OAuth handoff, callback completion, group bindings, configuration, and replaceable flow persistence.
+Define the required behavior for a minimal Sub2API-managed OpenAI OAuth orchestration service. The submitted email is treated as an external OAuth account identifier — the service creates a dedicated group, completes OAuth handoff, and binds the OAuth account to that group without creating or mutating any Sub2API user.
 ## Requirements
 ### Requirement: Start provisioning flow from email
-The system SHALL expose a `POST /provision/start` endpoint that accepts an email address, validates it, provisions the required Sub2API resources, persists flow context, and returns the pending OAuth handoff details.
+The system SHALL expose a `POST /provision/start` endpoint that accepts an external OAuth account email, validates it, provisions the required Sub2API group resource, persists flow context, and returns the pending OAuth handoff details. The submitted email MUST NOT be treated as a Sub2API user-system email.
 
-#### Scenario: Valid email creates a pending OAuth flow
-- **GIVEN** the client submits a valid email address to `POST /provision/start`
+#### Scenario: Valid external email creates a pending OAuth flow
+- **GIVEN** the client submits a valid external OAuth account email address to `POST /provision/start`
 - **WHEN** the system starts a provisioning flow
 - **THEN** the system creates a dedicated group whose name is derived from the configured group prefix and the submitted email
 - **THEN** the dedicated group creation request includes the configured OpenAI platform value
-- **THEN** the system creates a user for the submitted email through the Sub2API admin API
-- **THEN** the system binds that user to the dedicated group
+- **THEN** the system does not create a Sub2API user for the submitted email
+- **THEN** the system does not bind a Sub2API user to the dedicated group
 - **THEN** the system generates an OpenAI OAuth login URL through the Sub2API admin API using the configured OAuth provider redirect URI
-- **THEN** the system stores a flow record containing `flow_id`, `email`, `user_id`, `group_id`, `state`, and `status=pending_oauth`
-- **THEN** the response includes `success=true`, `flow_id`, `email`, `user_id`, `group_id`, `account_name`, `oauth_url`, and the configured OAuth provider redirect URI
+- **THEN** the system stores a flow record containing `flow_id`, `email`, `group_id`, `state`, and `status=pending_oauth`
+- **THEN** the flow record does not require `user_id`
+- **THEN** the response includes `success=true`, `flow_id`, `email`, `group_id`, `account_name`, `oauth_url`, and the configured OAuth provider redirect URI
+- **THEN** the response does not require `user_id`
 - **THEN** `account_name` equals the submitted email value
 
 #### Scenario: Invalid email is rejected before provisioning
@@ -24,8 +26,14 @@ The system SHALL expose a `POST /provision/start` endpoint that accepts an email
 - **THEN** the system rejects the request with a client error response
 - **THEN** the system does not create a group, user, or flow record
 
+#### Scenario: External email is not reconciled with the Sub2API user system
+- **GIVEN** the submitted email matches or does not match an existing Sub2API user
+- **WHEN** the system starts a provisioning flow
+- **THEN** the system does not look up, create, or mutate a Sub2API user because of that email
+- **THEN** the provisioning flow remains scoped to the dedicated group and future OAuth account
+
 ### Requirement: Complete OAuth using stored flow context
-The system SHALL complete OpenAI OAuth from the stored flow context by accepting a pasted localhost callback URL, and MUST use the original entry email as the OpenAI OAuth account name instead of any email returned by the OAuth provider.
+The system SHALL complete OpenAI OAuth from the stored flow context by accepting a pasted localhost callback URL, and MUST use the original external email as the OpenAI OAuth account name instead of any email returned by the OAuth provider.
 
 #### Scenario: Pasted callback URL completes a previously started flow
 - **GIVEN** a provisioning flow exists in `pending_oauth` status for a generated `state` value
@@ -41,6 +49,7 @@ The system SHALL complete OpenAI OAuth from the stored flow context by accepting
 - **THEN** the account creation request sets the configured workspace mode for context-pool scheduling
 - **THEN** the account creation request targets the dedicated group created for the flow
 - **THEN** the system binds the created OAuth account to `flow.group_id`
+- **THEN** the system does not create, look up, bind, or mutate a Sub2API user during OAuth completion
 - **THEN** the system updates the flow status to `completed`
 - **THEN** the response returns a success payload describing the completed flow
 

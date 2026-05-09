@@ -26,7 +26,7 @@ class ProvisionStartResponse(BaseModel):
     success: bool = True
     flow_id: str
     email: EmailStr
-    user_id: Any
+    user_id: Any | None = None
     group_id: Any
     account_name: str
     oauth_url: str
@@ -49,9 +49,9 @@ class ProvisionCompleteResponse(BaseModel):
 class ProvisionFlowSummaryResponse(BaseModel):
     flow_id: str
     email: EmailStr
-    user_id: Any
+    user_id: Any | None = None
     group_id: Any
-    assignment_mode: str
+    assignment_mode: str | None = None
     status: str
     account_name: str
     oauth_account_id: Any | None = None
@@ -213,7 +213,6 @@ class AutoRotationConfigRequest(BaseModel):
 class AutoRotationConfigEnvelope(BaseModel):
     success: bool = True
     config: AutoRotationConfigResponse
-    pool: list[RotationPoolCandidateResponse]
     landing_pool: list[RotationPoolCandidateResponse] = Field(default_factory=list)
     rotation_pool: list[RotationPoolCandidateResponse] = Field(default_factory=list)
 

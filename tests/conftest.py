@@ -35,7 +35,6 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("APP_AUTH_PASSWORD", "test-admin-pass")
     monkeypatch.setenv("APP_ACCESS_KEY_TTL_HOURS", "12")
     monkeypatch.setenv("SQLITE_DB_PATH", str(db_path))
-    monkeypatch.setenv("DEFAULT_USER_PASSWORD", "ChangeMe123!")
     monkeypatch.setenv("GROUP_NAME_PREFIX", "openai-oauth-")
     monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "dedicated")
     monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")

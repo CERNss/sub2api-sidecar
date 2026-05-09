@@ -17,7 +17,6 @@ CONFIG_ENV_NAMES = (
     "APP_AUTH_PASSWORD",
     "APP_ACCESS_KEY_TTL_HOURS",
     "SQLITE_DB_PATH",
-    "DEFAULT_USER_PASSWORD",
     "GROUP_NAME_PREFIX",
     "PROVISIONING_ASSIGNMENT_MODE",
     "AUTO_ROTATION_ENABLED",
@@ -88,7 +87,6 @@ auto_rotation:
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
-    monkeypatch.setenv("DEFAULT_USER_PASSWORD", "ChangeMe123!")
 
     settings = Settings.from_env()
 
@@ -137,7 +135,6 @@ sub2api:
     monkeypatch.setenv("SUB2API_BASE_URL", "http://env-sub2api.local")
     monkeypatch.setenv("APP_ACCESS_KEY_TTL_HOURS", "18")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
-    monkeypatch.setenv("DEFAULT_USER_PASSWORD", "ChangeMe123!")
 
     settings = Settings.from_env()
 
@@ -151,7 +148,6 @@ def test_settings_parse_sub2api_provisioning_overrides(monkeypatch) -> None:
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-    monkeypatch.setenv("DEFAULT_USER_PASSWORD", "ChangeMe123!")
     monkeypatch.setenv("SUB2API_GROUP_PLATFORM", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PROVIDER", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PLATFORM", "openai")
@@ -189,7 +185,6 @@ def test_settings_parse_managed_pool_and_auto_rotation(monkeypatch) -> None:
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-    monkeypatch.setenv("DEFAULT_USER_PASSWORD", "ChangeMe123!")
     monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "managed_pool")
     monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
     monkeypatch.setenv("AUTO_ROTATION_INTERVAL_SECONDS", "900")
@@ -213,7 +208,6 @@ def test_settings_reject_invalid_auto_rotation_window(monkeypatch) -> None:
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-    monkeypatch.setenv("DEFAULT_USER_PASSWORD", "ChangeMe123!")
     monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "2h")
 
     with pytest.raises(Exception) as exc_info:
