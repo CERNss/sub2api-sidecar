@@ -337,16 +337,18 @@ cp .env.example .env
 
 然后按需修改 `config.yaml` 和 `.env`。如果你希望容器内的 SQLite 文件稳定落在挂载卷里，推荐保持 `storage.sqlite_db_path: ./data/sub2api-sidecar.db`。
 
-构建并启动：
+拉取镜像并启动：
 
 ```bash
-docker compose up --build
+docker pull cernss/sub2api-sidecar:latest
+docker compose up -d
 ```
 
-后台启动：
+更新到最新镜像：
 
 ```bash
-docker compose up --build -d
+docker pull cernss/sub2api-sidecar:latest
+docker compose up -d
 ```
 
 停止服务：
@@ -368,7 +370,7 @@ docker compose logs -f
 
 说明：
 
-- Dockerfile 会先用 Node 构建 React 前端，再把 `app/static/ui` 产物复制进运行镜像
+- `docker-compose.yaml` 默认直接使用 `cernss/sub2api-sidecar:latest`，不会依赖本地 Dockerfile 构建
 - `docker-compose.yaml` 会读取项目根目录下的 `.env`，并把 `config.yaml` 挂载到容器内
 - `docker-compose.yaml` 会显式创建并使用 `sub2api-sidecar` bridge network，方便与其它 Compose 服务按固定网络名互通
 - `./data:/app/data` 会把 SQLite 数据库持久化到宿主机 `data/` 目录

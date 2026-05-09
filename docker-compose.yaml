@@ -1,8 +1,7 @@
 services:
   sub2api-sidecar:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: cernss/sub2api-sidecar:latest
+    pull_policy: always
     container_name: sub2api-sidecar
     env_file:
       - .env
