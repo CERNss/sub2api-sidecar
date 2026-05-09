@@ -322,6 +322,7 @@ Ephemeral admin credentials ready | username=admin | password=... | note=Copy th
 - 登录页：[http://127.0.0.1:8000/login](http://127.0.0.1:8000/login)
 - 首页/编排看板：[http://127.0.0.1:8000](http://127.0.0.1:8000)
 - 健康检查：[http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+- Ping 检查：[http://127.0.0.1:8000/ping](http://127.0.0.1:8000/ping)
 
 登录后 React UI 默认进入“用户分组编排”。这里可以在拖放图上按 Key、用户、分组三列查看全局关系；点击图上的用户或 key 会同步左侧选择，再通过左侧面板选择目标分组执行整体 `replace-group` 或单 key 分组更新。切到“历史看板”可以查看历史 flow、按状态/email/分配模式过滤、刷新列表，并在详情面板查看 OAuth handoff、callback 示例、错误信息和步骤时间线。切到“OAuth 预配”可以继续使用原来的 email 发起和 callback paste-back 流程。
 
@@ -369,6 +370,7 @@ docker compose logs -f
 
 - Dockerfile 会先用 Node 构建 React 前端，再把 `app/static/ui` 产物复制进运行镜像
 - `docker-compose.yaml` 会读取项目根目录下的 `.env`，并把 `config.yaml` 挂载到容器内
+- `docker-compose.yaml` 会显式创建并使用 `sub2api-sidecar` bridge network，方便与其它 Compose 服务按固定网络名互通
 - `./data:/app/data` 会把 SQLite 数据库持久化到宿主机 `data/` 目录
 - 如果你的 `sub2api.base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
 

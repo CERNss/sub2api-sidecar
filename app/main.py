@@ -258,6 +258,7 @@ def safe_operator_next_path(value: str | None) -> str:
         "/dynamic",
         "/dashboard",
         "/provision",
+        "/notifications",
     }:
         return value
     return "/"
@@ -318,6 +319,7 @@ def index(request: Request) -> Response:
 @app.get("/dynamic", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
 @app.get("/provision", response_class=HTMLResponse)
+@app.get("/notifications", response_class=HTMLResponse)
 def operator_view(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
@@ -343,6 +345,11 @@ def ui_config(request: Request) -> dict[str, str | None]:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/ping")
+def ping() -> dict[str, str]:
     return {"status": "ok"}
 
 

@@ -373,6 +373,22 @@ def test_login_page_serves_react_shell(client) -> None:
     assert 'id="root"' in response.text
 
 
+@pytest.mark.parametrize("path", ["/orchestration/manual", "/provision", "/notifications"])
+def test_operator_pages_redirect_to_login_when_unauthenticated(client, path: str) -> None:
+    response = client.get(path, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/login?next={path}"
+
+
+@pytest.mark.parametrize("path", ["/health", "/ping"])
+def test_probe_endpoints_return_ok_without_auth(client, path: str) -> None:
+    response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_ui_config_exposes_login_context_and_current_user(client) -> None:
     response = client.get("/ui/config")
 

@@ -10,6 +10,8 @@ services:
       CONFIG_PATH: /app/config.yaml
     ports:
       - "8000:8000"
+    networks:
+      - sub2api-sidecar
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./data:/app/data
@@ -20,9 +22,14 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"
+          "import urllib.request; [urllib.request.urlopen(f'http://127.0.0.1:8000{path}') for path in ('/health', '/ping')]"
         ]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+networks:
+  sub2api-sidecar:
+    name: sub2api-sidecar
+    driver: bridge

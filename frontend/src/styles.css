@@ -926,6 +926,25 @@ pre {
   resize: vertical;
 }
 
+.operator-status-alert,
+.manual-status-alert {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.operator-status-alert .ant-alert-content,
+.manual-status-alert .ant-alert-content {
+  min-width: 0;
+}
+
+.operator-status-alert .ant-alert-message,
+.manual-status-alert .ant-alert-message {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .manual-zone--submit {
   grid-template-rows: auto auto auto 1fr;
 }
@@ -947,8 +966,31 @@ pre {
   align-items: center;
 }
 
+.manual-user-select.ant-select-single .ant-select-selector {
+  padding-top: 5px !important;
+  padding-bottom: 5px !important;
+}
+
+.manual-user-select.ant-select-single .ant-select-selection-search {
+  inset-inline-start: 11px;
+  inset-inline-end: 34px;
+}
+
+.manual-user-select.ant-select-single .ant-select-selection-search-input {
+  height: 36px !important;
+  line-height: 36px !important;
+}
+
+.manual-user-select.ant-select-single:not(.ant-select-open) .ant-select-selection-search-input {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .manual-zone--target .ant-select-selection-item {
-  line-height: 1.35 !important;
+  min-width: 0;
+  line-height: normal !important;
+  display: flex;
+  align-items: center;
 }
 
 .manual-route-flow .ant-select-selector {
@@ -1061,6 +1103,7 @@ pre {
 
 .user-option {
   min-width: 0;
+  width: 100%;
   display: grid;
   gap: 2px;
   line-height: 1.35;
@@ -1894,6 +1937,8 @@ pre {
   background: #fef2f2;
   font-size: 14px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .payload-box {
@@ -1974,6 +2019,8 @@ pre {
   min-height: 22px;
   color: #64748b;
   font-size: 14px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .status-line.info {

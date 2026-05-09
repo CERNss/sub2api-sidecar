@@ -37,6 +37,7 @@ import {
   Tooltip,
   Typography
 } from "antd";
+import type { RefSelectProps } from "antd/es/select";
 import {
   ApiOutlined,
   ArrowDownOutlined,
@@ -1055,6 +1056,7 @@ function ExistingOrchestrationView({
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const userSelectRef = useRef<RefSelectProps | null>(null);
   const userSearchTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1726,6 +1728,8 @@ function ExistingOrchestrationView({
               <div className="ant-field">
                 <Typography.Text strong>User</Typography.Text>
                 <Select
+                  ref={userSelectRef}
+                  className="manual-user-select"
                   value={selectedUserId || undefined}
                   placeholder="按用户名或 email 搜索"
                   showSearch
@@ -1756,6 +1760,12 @@ function ExistingOrchestrationView({
                     void loadResources("", "");
                   }}
                   onChange={(value) => setSelectedUserId(value ?? "")}
+                  onSelect={() => {
+                    setUserSearch("");
+                    window.setTimeout(() => {
+                      userSelectRef.current?.blur();
+                    }, 0);
+                  }}
                   options={userOptions}
                   notFoundContent={loading ? <Spin size="small" /> : "暂无用户"}
                 />
@@ -2608,6 +2618,7 @@ function DynamicOrchestrationView({
           ) : null}
           {status.message ? (
             <Alert
+              className="operator-status-alert"
               showIcon
               type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
               message={status.message}
