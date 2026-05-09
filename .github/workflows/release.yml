@@ -40,6 +40,7 @@ env:
   PUBLISH_LATEST_TAG: ${{ vars.PUBLISH_LATEST_TAG || secrets.PUBLISH_LATEST_TAG || 'true' }}
   VALIDATION_IMAGE: ${{ vars.VALIDATION_IMAGE || secrets.VALIDATION_IMAGE || 'cernss/git-action-python-cicd-validate' }}
   BUILD_IMAGE: ${{ vars.BUILD_IMAGE || secrets.BUILD_IMAGE || 'cernss/git-action-python-cicd-build' }}
+  FRONTEND_BUILD_IMAGE: ${{ vars.FRONTEND_BUILD_IMAGE || secrets.FRONTEND_BUILD_IMAGE || 'node:22-bookworm-slim' }}
   PACKAGE_RUNTIME_IMAGE: ${{ vars.PACKAGE_RUNTIME_IMAGE || secrets.PACKAGE_RUNTIME_IMAGE }}
   NEXUS_URL: ${{ vars.NEXUS_URL || secrets.NEXUS_URL }}
   NEXUS_REPOSITORY: ${{ vars.NEXUS_REPOSITORY || secrets.NEXUS_REPOSITORY }}
@@ -401,13 +402,37 @@ jobs:
       - name: Build Python release bundle in CI image
         env:
           BUILD_IMAGE_NAME: ${{ env.BUILD_IMAGE }}
+          FRONTEND_BUILD_IMAGE_NAME: ${{ env.FRONTEND_BUILD_IMAGE }}
           IMAGE_NAME: ${{ needs.init.outputs.image_name }}
           RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
           PLATFORMS: ${{ needs.init.outputs.platforms }}
         run: |
           set -euo pipefail
+
+          cleanup_frontend_build() {
+            rm -rf frontend/node_modules frontend/tsconfig.tsbuildinfo
+          }
+
+          trap cleanup_frontend_build EXIT
+
+          rm -rf app/static/ui frontend/node_modules frontend/tsconfig.tsbuildinfo
           mkdir -p .release-build/payload
+          docker pull "${FRONTEND_BUILD_IMAGE_NAME}"
           docker pull "${BUILD_IMAGE_NAME}"
+
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -e HOME=/tmp/npm-home \
+            -v "${PWD}:/work" \
+            -w /work/frontend \
+            "${FRONTEND_BUILD_IMAGE_NAME}" \
+            bash -lc '
+              set -euo pipefail
+              npm ci
+              npm run build
+            '
+
+          test -f app/static/ui/index.html
 
           docker run --rm \
             -u "$(id -u):$(id -g)" \
@@ -482,13 +507,37 @@ jobs:
       - name: Build Python release bundle in CI image
         env:
           BUILD_IMAGE_NAME: ${{ env.BUILD_IMAGE }}
+          FRONTEND_BUILD_IMAGE_NAME: ${{ env.FRONTEND_BUILD_IMAGE }}
           IMAGE_NAME: ${{ needs.init.outputs.image_name }}
           RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
           PLATFORMS: ${{ needs.init.outputs.platforms }}
         run: |
           set -euo pipefail
+
+          cleanup_frontend_build() {
+            rm -rf frontend/node_modules frontend/tsconfig.tsbuildinfo
+          }
+
+          trap cleanup_frontend_build EXIT
+
+          rm -rf app/static/ui frontend/node_modules frontend/tsconfig.tsbuildinfo
           mkdir -p .release-build/payload
+          docker pull "${FRONTEND_BUILD_IMAGE_NAME}"
           docker pull "${BUILD_IMAGE_NAME}"
+
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -e HOME=/tmp/npm-home \
+            -v "${PWD}:/work" \
+            -w /work/frontend \
+            "${FRONTEND_BUILD_IMAGE_NAME}" \
+            bash -lc '
+              set -euo pipefail
+              npm ci
+              npm run build
+            '
+
+          test -f app/static/ui/index.html
 
           docker run --rm \
             -u "$(id -u):$(id -g)" \
