@@ -103,9 +103,9 @@
 
 1. 打开 `GET /login`
 2. 用户名固定为 `app.auth_username`，默认 `admin`
-3. 密码默认在每次服务启动时自动生成，并打印在启动日志里
+3. 密码优先使用 `.env` 里的 `APP_AUTH_PASSWORD`
 4. 登录成功后浏览器会拿到 `HttpOnly` cookie；API 调用方也可以复用登录返回的 `access_key`
-5. 服务重启后旧密码和旧 access key 会失效，需要重新登录
+5. 如果没有配置 `APP_AUTH_PASSWORD`，服务会在每次启动时生成临时密码并打印在启动日志里；服务重启后旧临时密码和旧 access key 会失效，需要重新登录
 
 ## 轮换池与自动轮换
 
@@ -242,13 +242,13 @@ cp .env.example .env
 
 ```env
 SUB2API_ADMIN_API_KEY=replace-me
-# APP_AUTH_PASSWORD=optional-test-override
+APP_AUTH_PASSWORD=change-me
 ```
 
 说明：
 
 - `SUB2API_ADMIN_API_KEY` 是调用 Sub2API admin API 的密钥。
-- `APP_AUTH_PASSWORD` 默认不需要填写；不填时服务会在每次启动时生成一个新密码并打印到日志中。这个变量主要用于测试或调试。
+- `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
 
@@ -311,7 +311,7 @@ cd frontend
 npm run dev
 ```
 
-启动后请先查看日志，复制启动时打印的管理员密码。日志里会出现类似：
+如果 `.env` 没有配置 `APP_AUTH_PASSWORD`，启动后请查看日志，复制启动时打印的临时管理员密码。日志里会出现类似：
 
 ```text
 Ephemeral admin credentials ready | username=admin | password=... | note=Copy this password from startup logs. It changes on every restart.
@@ -432,7 +432,7 @@ pytest
 ```bash
 curl -X POST 'http://127.0.0.1:8000/auth/login' \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"<从服务日志复制的密码>"}'
+  -d '{"username":"admin","password":"<APP_AUTH_PASSWORD 或启动日志里的临时密码>"}'
 ```
 
 然后带着 `access_key` 调用：
