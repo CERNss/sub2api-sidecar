@@ -371,14 +371,15 @@ docker compose logs -f
 说明：
 
 - `docker-compose.yaml` 默认直接使用 `cernss/sub2api-sidecar:latest`，不会依赖本地 Dockerfile 构建
+- 发布流程默认推送 `linux/amd64,linux/arm64` 多架构镜像，Docker 会按宿主机架构自动选择
 - `docker-compose.yaml` 会读取项目根目录下的 `.env`，并把 `config.yaml` 挂载到容器内
 - `docker-compose.yaml` 会显式创建并使用 `sub2api-sidecar` bridge network，方便与其它 Compose 服务按固定网络名互通
 - `./data:/app/data` 会把 SQLite 数据库持久化到宿主机 `data/` 目录
 - 如果你的 `sub2api.base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
 
-## Linux x64 镜像构建
+## 镜像构建
 
-项目根目录提供了一个 `build.sh`，默认使用 Docker Buildx 构建 `linux/amd64` 镜像。
+项目根目录提供了一个 `build.sh`，使用 Docker Buildx 构建镜像。
 
 先确保本机有：
 
@@ -403,6 +404,8 @@ docker compose logs -f
 ./build.sh --push --name registry.example.com/sub2api-sidecar --tag v1.0.0
 ```
 
+`--push` 默认构建并推送 `linux/amd64,linux/arm64` 多架构镜像。
+
 也可以通过环境变量覆盖：
 
 ```bash
@@ -411,7 +414,7 @@ IMAGE_NAME=myrepo/sub2api-sidecar IMAGE_TAG=v1.0.0 ./build.sh
 
 脚本默认行为：
 
-- 目标平台：`linux/amd64`
+- 目标平台：`--load` 为 `linux/amd64`，`--push` 为 `linux/amd64,linux/arm64`
 - 输出方式：`--load`
 - Dockerfile：项目根目录 `Dockerfile`
 - build context：项目根目录

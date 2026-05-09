@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-sub2api-sidecar}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-PLATFORM="${PLATFORM:-linux/amd64}"
+PLATFORM="${PLATFORM:-}"
 BUILDER_NAME="${BUILDER_NAME:-sub2api-sidecar-builder}"
 DOCKERFILE_PATH="${DOCKERFILE_PATH:-$SCRIPT_DIR/Dockerfile}"
 BUILD_CONTEXT="${BUILD_CONTEXT:-$SCRIPT_DIR}"
@@ -16,12 +16,12 @@ usage() {
 Usage: ./build.sh [options]
 
 Build the container image with Docker Buildx.
-Defaults to a linux/amd64 image so you can build a Linux x64 image from macOS.
+Defaults to linux/amd64 for --load and linux/amd64,linux/arm64 for --push.
 
 Options:
   --name <image>        Override image name (default: sub2api-sidecar)
   --tag <tag>           Override image tag (default: latest)
-  --platform <value>    Override target platform (default: linux/amd64)
+  --platform <value>    Override target platform
   --builder <name>      Override buildx builder name
   --file <path>         Override Dockerfile path
   --context <path>      Override build context path
@@ -113,6 +113,19 @@ fi
 
 if [[ "$OUTPUT_MODE" != "load" && "$OUTPUT_MODE" != "push" ]]; then
   echo "OUTPUT_MODE must be either 'load' or 'push'." >&2
+  exit 1
+fi
+
+if [[ -z "$PLATFORM" ]]; then
+  if [[ "$OUTPUT_MODE" == "push" ]]; then
+    PLATFORM="linux/amd64,linux/arm64"
+  else
+    PLATFORM="linux/amd64"
+  fi
+fi
+
+if [[ "$OUTPUT_MODE" == "load" && "$PLATFORM" == *,* ]]; then
+  echo "Docker --load supports one platform at a time. Use --push for multi-platform builds." >&2
   exit 1
 fi
 

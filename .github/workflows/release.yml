@@ -30,7 +30,7 @@ on:
           - linux
         default: ''
       platforms:
-        description: 'Docker platforms (blank = use DOCKER_PLATFORMS var; default linux/amd64)'
+        description: 'Docker platforms (blank = use DOCKER_PLATFORMS var; default linux/amd64,linux/arm64)'
         required: false
         type: string
         default: ''
@@ -190,7 +190,6 @@ jobs:
         env:
           INPUT_PLATFORMS: ${{ inputs.platforms }}
           VAR_PLATFORMS: ${{ vars.DOCKER_PLATFORMS || secrets.DOCKER_PLATFORMS }}
-          SELECTED_RUNNER: ${{ steps.runner.outputs.runner }}
         run: |
           set -euo pipefail
 
@@ -199,11 +198,7 @@ jobs:
             PLATFORMS="${VAR_PLATFORMS:-}"
           fi
           if [ -z "${PLATFORMS}" ]; then
-            if [ "${SELECTED_RUNNER}" = "macos" ]; then
-              PLATFORMS="linux/arm64"
-            else
-              PLATFORMS="linux/amd64"
-            fi
+            PLATFORMS="linux/amd64,linux/arm64"
           fi
 
           echo "platforms=${PLATFORMS}" >> "$GITHUB_OUTPUT"
@@ -428,16 +423,11 @@ jobs:
               rm -rf .release-build/work .release-build/payload
               mkdir -p \
                 .release-build/work/release \
-                .release-build/work/release/wheelhouse \
                 .release-build/payload
 
               cp -R app .release-build/work/release/app
               cp requirements.txt config.example.yaml README.md .release-build/work/release/
               printf "%s\n" "${RELEASE_VERSION}" > .release-build/work/release/VERSION
-
-              python -m pip download \
-                --dest .release-build/work/release/wheelhouse \
-                -r requirements.txt
 
               tar -czf .release-build/payload/release-bundle.tar.gz -C .release-build/work/release .
 
@@ -514,16 +504,11 @@ jobs:
               rm -rf .release-build/work .release-build/payload
               mkdir -p \
                 .release-build/work/release \
-                .release-build/work/release/wheelhouse \
                 .release-build/payload
 
               cp -R app .release-build/work/release/app
               cp requirements.txt config.example.yaml README.md .release-build/work/release/
               printf "%s\n" "${RELEASE_VERSION}" > .release-build/work/release/VERSION
-
-              python -m pip download \
-                --dest .release-build/work/release/wheelhouse \
-                -r requirements.txt
 
               tar -czf .release-build/payload/release-bundle.tar.gz -C .release-build/work/release .
 
@@ -598,18 +583,6 @@ jobs:
       - name: Extract build output
         run: tar -xzf .release-package/build-output.tar.gz -C .release-package/build
 
-      - name: Verify Docker for packaging
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! docker info >/dev/null 2>&1; then
-            echo "Docker is required for package stage on this runner."
-            exit 1
-          fi
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Package runtime image
         shell: bash
         env:
@@ -632,14 +605,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "${PLATFORMS}" == *,* ]]; then
-            echo "Package stage currently expects a single Docker platform archive, got: ${PLATFORMS}"
-            echo "Run one release per platform, or extend publish with an OCI registry copy tool for multi-platform archives."
-            exit 1
-          fi
-
           RUNTIME_IMAGE="${RUNTIME_IMAGE:-python:${PYTHON_VERSION}-slim-bookworm}"
-          ARCHIVE_IMAGE_TAG="local/${IMAGE_NAME}:${RELEASE_VERSION}"
 
           rm -rf .release-package/release .release-package/package-context .release-package/package-output
           mkdir -p \
@@ -660,9 +626,8 @@ jobs:
           WORKDIR /app
 
           COPY release/requirements.txt ./
-          COPY release/wheelhouse ./wheelhouse
-          RUN python -m pip install --no-cache-dir --find-links=/app/wheelhouse -r requirements.txt \
-              && rm -rf /app/wheelhouse
+          RUN python -m pip install --no-cache-dir --upgrade pip \
+              && python -m pip install --no-cache-dir -r requirements.txt
 
           COPY release/app ./app
           COPY release/config.example.yaml ./config.example.yaml
@@ -675,24 +640,11 @@ jobs:
           CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
           DOCKERFILE
 
-          SOURCE_SHA="$(git rev-parse HEAD)"
-          docker buildx build \
-            --platform "${PLATFORMS}" \
-            --file .release-package/package-context/Dockerfile \
-            --build-arg "RUNTIME_IMAGE=${RUNTIME_IMAGE}" \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
-            --label "org.opencontainers.image.version=${RELEASE_VERSION}" \
-            --tag "${ARCHIVE_IMAGE_TAG}" \
-            --load \
-            .release-package/package-context
-
-          docker save "${ARCHIVE_IMAGE_TAG}" | gzip > .release-package/package-output/image-archive.tar.gz
+          tar -czf .release-package/package-output/docker-context.tar.gz -C .release-package/package-context .
 
           {
-            echo "artifact_mode=image-archive"
-            echo "archive_image_tag=${ARCHIVE_IMAGE_TAG}"
-            echo "image_archive=image-archive.tar.gz"
+            echo "artifact_mode=docker-context"
+            echo "docker_context=docker-context.tar.gz"
             echo "release_bundle=${release_bundle}"
             echo "runtime_image=${RUNTIME_IMAGE}"
             echo "platforms=${PLATFORMS}"
@@ -873,6 +825,13 @@ jobs:
             exit 1
           fi
 
+      - name: Set up QEMU
+        if: ${{ runner.os == 'Linux' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to DockerHub
         if: ${{ needs.init.outputs.dockerhub_repository != 'skip' }}
         uses: docker/login-action@v3
@@ -888,11 +847,12 @@ jobs:
           username: ${{ needs.init.outputs.ghcr_username }}
           password: ${{ secrets.GHCR_TOKEN || vars.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Load and push packaged image
+      - name: Build and push packaged image
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+          PLATFORMS: ${{ needs.init.outputs.platforms }}
           GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
           DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
         run: |
@@ -900,45 +860,56 @@ jobs:
 
           . .release-artifacts/build/build-output.env
 
-          push_loaded_image() {
-            local src_tag="$1"
-            local dst_tag="$2"
-            docker tag "${src_tag}" "${dst_tag}"
-            docker push "${dst_tag}"
-          }
-
-          if [ "${artifact_mode:-}" != "image-archive" ]; then
-            echo "Publish stage requires package artifact_mode=image-archive, got: ${artifact_mode:-unset}"
+          if [ "${artifact_mode:-}" != "docker-context" ]; then
+            echo "Publish stage requires package artifact_mode=docker-context, got: ${artifact_mode:-unset}"
             exit 1
           fi
 
-          IMAGE_ARCHIVE="${image_archive:-image-archive.tar.gz}"
-          if [ ! -f ".release-artifacts/build/${IMAGE_ARCHIVE}" ]; then
-            echo "Packaged image archive is missing: .release-artifacts/build/${IMAGE_ARCHIVE}"
+          DOCKER_CONTEXT="${docker_context:-docker-context.tar.gz}"
+          if [ ! -f ".release-artifacts/build/${DOCKER_CONTEXT}" ]; then
+            echo "Packaged Docker context is missing: .release-artifacts/build/${DOCKER_CONTEXT}"
             exit 1
           fi
 
-          gunzip -c ".release-artifacts/build/${IMAGE_ARCHIVE}" | docker load
-
-          if ! docker image inspect "${archive_image_tag}" >/dev/null 2>&1; then
-            echo "Loaded image tag is missing: ${archive_image_tag}"
-            docker images
+          BUILD_PLATFORMS="${platforms:-${PLATFORMS:-}}"
+          if [ -z "${BUILD_PLATFORMS}" ]; then
+            echo "Docker platforms are required for publish."
             exit 1
           fi
 
-          push_loaded_image "${archive_image_tag}" "${GHCR_REPOSITORY}:${RELEASE_TAG}"
-          push_loaded_image "${archive_image_tag}" "${GHCR_REPOSITORY}:${RELEASE_VERSION}"
+          rm -rf .release-artifacts/docker-context
+          mkdir -p .release-artifacts/docker-context
+          tar -xzf ".release-artifacts/build/${DOCKER_CONTEXT}" -C .release-artifacts/docker-context
+
+          TAG_ARGS=(
+            --tag "${GHCR_REPOSITORY}:${RELEASE_TAG}"
+            --tag "${GHCR_REPOSITORY}:${RELEASE_VERSION}"
+          )
           if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-            push_loaded_image "${archive_image_tag}" "${GHCR_REPOSITORY}:latest"
+            TAG_ARGS+=(--tag "${GHCR_REPOSITORY}:latest")
           fi
 
           if [ "${DOCKERHUB_REPOSITORY}" != "skip" ]; then
-            push_loaded_image "${archive_image_tag}" "${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
-            push_loaded_image "${archive_image_tag}" "${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
+            TAG_ARGS+=(
+              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
+              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
+            )
             if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-              push_loaded_image "${archive_image_tag}" "${DOCKERHUB_REPOSITORY}:latest"
+              TAG_ARGS+=(--tag "${DOCKERHUB_REPOSITORY}:latest")
             fi
           fi
+
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          docker buildx build \
+            --platform "${BUILD_PLATFORMS}" \
+            --file .release-artifacts/docker-context/Dockerfile \
+            --build-arg "RUNTIME_IMAGE=${runtime_image}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+            --label "org.opencontainers.image.version=${RELEASE_VERSION}" \
+            "${TAG_ARGS[@]}" \
+            --push \
+            .release-artifacts/docker-context
 
   publish_macos:
     if: ${{ always() && needs.init.outputs.runner == 'macos' && needs.package.result == 'success' }}
@@ -1003,6 +974,13 @@ jobs:
             exit 1
           fi
 
+      - name: Set up QEMU
+        if: ${{ runner.os == 'Linux' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to DockerHub
         if: ${{ needs.init.outputs.dockerhub_repository != 'skip' }}
         uses: docker/login-action@v3
@@ -1018,11 +996,12 @@ jobs:
           username: ${{ needs.init.outputs.ghcr_username }}
           password: ${{ secrets.GHCR_TOKEN || vars.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Load and push packaged image
+      - name: Build and push packaged image
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+          PLATFORMS: ${{ needs.init.outputs.platforms }}
           GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
           DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
         run: |
@@ -1030,42 +1009,53 @@ jobs:
 
           . .release-artifacts/build/build-output.env
 
-          push_loaded_image() {
-            local src_tag="$1"
-            local dst_tag="$2"
-            docker tag "${src_tag}" "${dst_tag}"
-            docker push "${dst_tag}"
-          }
-
-          if [ "${artifact_mode:-}" != "image-archive" ]; then
-            echo "Publish stage requires package artifact_mode=image-archive, got: ${artifact_mode:-unset}"
+          if [ "${artifact_mode:-}" != "docker-context" ]; then
+            echo "Publish stage requires package artifact_mode=docker-context, got: ${artifact_mode:-unset}"
             exit 1
           fi
 
-          IMAGE_ARCHIVE="${image_archive:-image-archive.tar.gz}"
-          if [ ! -f ".release-artifacts/build/${IMAGE_ARCHIVE}" ]; then
-            echo "Packaged image archive is missing: .release-artifacts/build/${IMAGE_ARCHIVE}"
+          DOCKER_CONTEXT="${docker_context:-docker-context.tar.gz}"
+          if [ ! -f ".release-artifacts/build/${DOCKER_CONTEXT}" ]; then
+            echo "Packaged Docker context is missing: .release-artifacts/build/${DOCKER_CONTEXT}"
             exit 1
           fi
 
-          gunzip -c ".release-artifacts/build/${IMAGE_ARCHIVE}" | docker load
-
-          if ! docker image inspect "${archive_image_tag}" >/dev/null 2>&1; then
-            echo "Loaded image tag is missing: ${archive_image_tag}"
-            docker images
+          BUILD_PLATFORMS="${platforms:-${PLATFORMS:-}}"
+          if [ -z "${BUILD_PLATFORMS}" ]; then
+            echo "Docker platforms are required for publish."
             exit 1
           fi
 
-          push_loaded_image "${archive_image_tag}" "${GHCR_REPOSITORY}:${RELEASE_TAG}"
-          push_loaded_image "${archive_image_tag}" "${GHCR_REPOSITORY}:${RELEASE_VERSION}"
+          rm -rf .release-artifacts/docker-context
+          mkdir -p .release-artifacts/docker-context
+          tar -xzf ".release-artifacts/build/${DOCKER_CONTEXT}" -C .release-artifacts/docker-context
+
+          TAG_ARGS=(
+            --tag "${GHCR_REPOSITORY}:${RELEASE_TAG}"
+            --tag "${GHCR_REPOSITORY}:${RELEASE_VERSION}"
+          )
           if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-            push_loaded_image "${archive_image_tag}" "${GHCR_REPOSITORY}:latest"
+            TAG_ARGS+=(--tag "${GHCR_REPOSITORY}:latest")
           fi
 
           if [ "${DOCKERHUB_REPOSITORY}" != "skip" ]; then
-            push_loaded_image "${archive_image_tag}" "${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
-            push_loaded_image "${archive_image_tag}" "${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
+            TAG_ARGS+=(
+              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
+              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
+            )
             if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-              push_loaded_image "${archive_image_tag}" "${DOCKERHUB_REPOSITORY}:latest"
+              TAG_ARGS+=(--tag "${DOCKERHUB_REPOSITORY}:latest")
             fi
           fi
+
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          docker buildx build \
+            --platform "${BUILD_PLATFORMS}" \
+            --file .release-artifacts/docker-context/Dockerfile \
+            --build-arg "RUNTIME_IMAGE=${runtime_image}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+            --label "org.opencontainers.image.version=${RELEASE_VERSION}" \
+            "${TAG_ARGS[@]}" \
+            --push \
+            .release-artifacts/docker-context
