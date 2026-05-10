@@ -9,7 +9,11 @@ from typing import Any
 from pydantic import BaseModel
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
-from app.models.notification import NotificationDeliveryRecord, NotificationSettings
+from app.models.notification import (
+    NotificationDeliveryRecord,
+    NotificationRuleState,
+    NotificationSettings,
+)
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
     OrchestrationRunRecord,
@@ -538,6 +542,32 @@ class SQLiteFlowStore(FlowStore):
             NotificationDeliveryRecord,
         )
 
+    def get_notification_rule_state(self, rule_id: str) -> NotificationRuleState | None:
+        return self._load_single_model(
+            "SELECT payload FROM notification_rule_states WHERE rule_id = ?",
+            (rule_id,),
+            NotificationRuleState,
+        )
+
+    def upsert_notification_rule_state(
+        self, state: NotificationRuleState
+    ) -> NotificationRuleState:
+        payload = state.model_dump_json()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO notification_rule_states (rule_id, payload, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(rule_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (state.rule_id, payload, state.created_at.isoformat(), now),
+            )
+            connection.commit()
+        return state
+
     def _prepare_database_path(self) -> None:
         if self.database_path == ":memory:" or self._use_uri:
             return
@@ -723,6 +753,16 @@ class SQLiteFlowStore(FlowStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_list
                 ON notification_deliveries(created_at DESC, receiver_id, rule_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_rule_states (
+                    rule_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
                 """
             )
             connection.commit()

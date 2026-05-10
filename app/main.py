@@ -34,6 +34,9 @@ from app.models.schemas import (
     NotificationDeliveriesEnvelope,
     NotificationDeliveryOutcomeResponse,
     NotificationDeliveryRecordResponse,
+    NotificationEvaluateRequest,
+    NotificationEvaluateResponse,
+    NotificationRuleStateResponse,
     NotificationTestRequest,
     NotificationTestResponse,
     OrchestrationApiKeyAssignRequest,
@@ -61,6 +64,7 @@ from app.services.notification import (
     redact_settings,
 )
 from app.services.notification_delivery import NotificationDeliveryService
+from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
 from app.services.rotation import RotationExecutionResult, RotationService
 from app.services.rotation_scheduler import AutoRotationScheduler
@@ -77,22 +81,34 @@ APP_TITLE = "Sub2API OpenAI OAuth 编排服务"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    import os
+
     get_settings()
     get_flow_store()
     get_auth_manager()
     settings = get_settings()
-    scheduler: AutoRotationScheduler | None = None
+    rotation_scheduler: AutoRotationScheduler | None = None
+    notification_scheduler: NotificationScheduler | None = None
     if settings.auto_rotation.enabled and settings.auto_rotation.interval_seconds > 0:
-        scheduler = AutoRotationScheduler(
+        rotation_scheduler = AutoRotationScheduler(
             rotation_service=get_rotation_service(),
             interval_seconds=settings.auto_rotation.interval_seconds,
         )
-        scheduler.start()
+        rotation_scheduler.start()
+    notification_tick = int(os.environ.get("NOTIFICATION_SCHEDULER_TICK_SECONDS", "0") or "0")
+    if notification_tick > 0:
+        notification_scheduler = NotificationScheduler(
+            notification_service=get_notification_service(),
+            tick_seconds=notification_tick,
+        )
+        notification_scheduler.start()
     try:
         yield
     finally:
-        if scheduler is not None:
-            scheduler.stop()
+        if rotation_scheduler is not None:
+            rotation_scheduler.stop()
+        if notification_scheduler is not None:
+            notification_scheduler.stop()
 
 
 app = FastAPI(
@@ -874,6 +890,41 @@ def notifications_test(
                 error_message=outcome.error_message,
             )
             for outcome in outcomes
+        ],
+    )
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.post("/notifications/evaluate")
+def notifications_evaluate(
+    payload: NotificationEvaluateRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    outcome = get_notification_service().evaluate_once(payload.rule_id)
+    response = NotificationEvaluateResponse(
+        rule_id=outcome.rule.id,
+        rule_name=outcome.rule.name or outcome.rule.signal_key,
+        action=outcome.decision.action.value,
+        reason=outcome.decision.reason,
+        state=NotificationRuleStateResponse(
+            rule_id=outcome.decision.next_state.rule_id,
+            last_evaluated_at=outcome.decision.next_state.last_evaluated_at,
+            last_value=outcome.decision.next_state.last_value,
+            breach_started_at=outcome.decision.next_state.breach_started_at,
+            last_alert_at=outcome.decision.next_state.last_alert_at,
+            is_firing=outcome.decision.next_state.is_firing,
+            last_error=outcome.decision.next_state.last_error,
+        ),
+        deliveries=[
+            NotificationDeliveryOutcomeResponse(
+                receiver_id=delivery.receiver_id,
+                provider=delivery.provider.value,
+                status=delivery.status.value,
+                attempt_count=delivery.attempt_count,
+                response_status=delivery.response_status,
+                error_message=delivery.error_message,
+            )
+            for delivery in outcome.deliveries
         ],
     )
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))

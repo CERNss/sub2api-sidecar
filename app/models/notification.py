@@ -139,3 +139,42 @@ class NotificationDeliveryRecord(BaseModel):
     payload_digest: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class NotificationRuleAction(str, Enum):
+    fire = "fire"
+    recover = "recover"
+    hold = "hold"
+    no_data = "no_data"
+    suppress = "suppress"
+
+
+class NotificationRuleState(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    rule_id: str
+    last_evaluated_at: datetime | None = None
+    last_value: float | None = None
+    breach_started_at: datetime | None = None
+    last_alert_at: datetime | None = None
+    is_firing: bool = False
+    last_error: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CollectorSample(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    value: float
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    snapshot: dict[str, Any] | None = None
+
+
+class RuleDecision(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    action: NotificationRuleAction
+    reason: str = ""
+    sample: CollectorSample | None = None
+    next_state: NotificationRuleState

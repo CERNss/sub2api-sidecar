@@ -294,6 +294,30 @@ class NotificationTestResponse(BaseModel):
     outcomes: list[NotificationDeliveryOutcomeResponse]
 
 
+class NotificationEvaluateRequest(BaseModel):
+    rule_id: str = Field(..., min_length=1)
+
+
+class NotificationRuleStateResponse(BaseModel):
+    rule_id: str
+    last_evaluated_at: datetime | None = None
+    last_value: float | None = None
+    breach_started_at: datetime | None = None
+    last_alert_at: datetime | None = None
+    is_firing: bool = False
+    last_error: str | None = None
+
+
+class NotificationEvaluateResponse(BaseModel):
+    success: bool = True
+    rule_id: str
+    rule_name: str
+    action: str
+    reason: str
+    state: NotificationRuleStateResponse
+    deliveries: list[NotificationDeliveryOutcomeResponse]
+
+
 class NotificationDeliveryRecordResponse(BaseModel):
     delivery_id: str
     receiver_id: str
