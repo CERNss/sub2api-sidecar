@@ -20,13 +20,15 @@
 
 - [x] 3.1 Run frontend TypeScript/Vite build
 - [x] 3.2 Remove stale receiver-level signal-selection UI and CSS after moving to rule-based configuration
-- [ ] 3.3 Validate OpenSpec change with `openspec validate add-webhook-alert-center --json`
+- [x] 3.3 Validate OpenSpec change with `openspec validate add-webhook-alert-center --json`
 
 ## 4. Future backend implementation
 
-- [ ] 4.1 Add authenticated notification configuration APIs backed by SQLite
-- [ ] 4.2 Add alert signal collectors keyed by the UI `signalKey` values
-- [ ] 4.3 Add scheduler/evaluator for read interval, evaluation window, aggregation, thresholds, recovery, and sustained duration
-- [ ] 4.4 Add webhook delivery worker with signing, retry, grouping, quiet-hours, repeat interval, and delivery audit history
-- [ ] 4.4.1 Add per-provider sender adapters (generic JSON, feishu/lark, dingtalk, wecom, slack, discord) covering payload schema, signing scheme, and mention semantics
-- [ ] 4.5 Add backend/API tests for configuration validation, rule evaluation, delivery routing, and failure handling
+> Carried into the follow-up change `implement-webhook-alert-backend` (archived 2026-05-10), which delivers persistence, provider adapters (1-4.4.1), test endpoint, audit, and tests. Scheduler + collectors + evaluator (4.2 + 4.3) remain deferred pending Sub2API admin endpoint verification.
+
+- [x] 4.1 Add authenticated notification configuration APIs backed by SQLite
+- [ ] 4.2 Add alert signal collectors keyed by the UI `signalKey` values — deferred (next change)
+- [ ] 4.3 Add scheduler/evaluator for read interval, evaluation window, aggregation, thresholds, recovery, and sustained duration — deferred (next change)
+- [x] 4.4 Add webhook delivery worker with signing, retry, grouping, quiet-hours, repeat interval, and delivery audit history (signing/retry/audit done; grouping/quiet-hours/repeat-interval deferred to next change with scheduler)
+- [x] 4.4.1 Add per-provider sender adapters (generic JSON, feishu/lark, dingtalk, wecom, slack, discord) covering payload schema, signing scheme, and mention semantics
+- [x] 4.5 Add backend/API tests for configuration validation, rule evaluation, delivery routing, and failure handling (config/delivery/test/audit covered; rule evaluation deferred with scheduler)

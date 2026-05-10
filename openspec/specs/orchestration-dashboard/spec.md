@@ -114,13 +114,14 @@ The system SHALL redact secrets and provider tokens from orchestration dashboard
 - **THEN** the response payload and rendered UI do not expose the Sub2API admin API key, default user password, or browser session access key
 
 ### Requirement: React dashboard renders orchestration state
-The React UI SHALL provide an authenticated orchestration workspace for moving existing users or keys between groups and browsing provisioning flows.
+The React UI SHALL provide an authenticated orchestration workspace for moving existing users or keys between groups, browsing provisioning flows, and configuring webhook alert routing for operational signals.
 
 #### Scenario: Authenticated operator opens the dashboard
 - **GIVEN** the operator has a valid admin session
 - **WHEN** the operator opens the React UI
 - **THEN** the default view is existing user/group orchestration
 - **THEN** the UI provides access to the existing OAuth account provisioning form and a flow dashboard view
+- **THEN** the UI provides a top-level notification settings view beside orchestration and OAuth provisioning
 - **THEN** the orchestration view displays a draggable relationship graph ordered left-to-right as all API keys, all users, and all groups
 - **THEN** selecting a user or key in the graph updates the operator selection controls
 - **THEN** the dashboard displays flow summary rows with status, external OAuth account email, group id, account id, and update time
@@ -152,3 +153,155 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **GIVEN** the operator is using the dashboard view
 - **WHEN** the operator inspects historical or active flows
 - **THEN** the dashboard does not mutate flow records, retry failed flows, or complete OAuth unless the operator uses the existing paste-back completion form
+## Requirements (continued)
+
+### Requirement: Persist webhook alert configuration server-side
+The system SHALL expose authenticated APIs that read and write the full webhook alert center configuration document to durable local storage.
+
+#### Scenario: Operator reads notification configuration
+- **GIVEN** the operator has a valid admin session
+- **WHEN** the operator requests `GET /notifications/config`
+- **THEN** the system returns the saved `webhooks`, `rules`, and `policy` document
+- **THEN** the response redacts every receiver `secret` value
+- **THEN** if no configuration has been saved yet, the system returns a sensible default with at least one disabled placeholder receiver
+
+#### Scenario: Operator saves notification configuration
+- **GIVEN** the operator has a valid admin session
+- **WHEN** the operator submits a configuration document to `PUT /notifications/config`
+- **THEN** the system validates that every rule `targetWebhookIds` value references an existing receiver id
+- **THEN** the system validates severity, operator, aggregation, and provider enum values
+- **THEN** the system rejects the request with a client error response when validation fails
+- **THEN** the system persists the validated document so subsequent `GET /notifications/config` returns the same shape
+
+#### Scenario: Legacy receiver-only configuration is tolerated
+- **GIVEN** an existing saved document contains receivers but no rules or routing policy
+- **WHEN** the system loads the document
+- **THEN** the system synthesizes default rules routed to the first receiver
+- **THEN** the system synthesizes a default routing policy
+- **THEN** the synthesized configuration is returned to the caller without losing receivers
+
+#### Scenario: Unauthenticated callers cannot read or write configuration
+- **GIVEN** a caller has no valid admin session, access-key header, or bearer token
+- **WHEN** the caller calls `GET /notifications/config` or `PUT /notifications/config`
+- **THEN** the system returns an authentication error
+- **THEN** the system does not return or modify configuration
+
+### Requirement: Deliver outbound webhook payloads through provider adapters
+The system SHALL deliver webhook payloads to operator-configured receivers using provider-specific payload formatting and signing.
+
+#### Scenario: Generic provider posts a JSON payload with optional HMAC signature
+- **GIVEN** a receiver has provider `generic`
+- **WHEN** the delivery worker sends a message to that receiver
+- **THEN** the request is `POST` with JSON content type and the message rendered as a JSON object
+- **THEN** when the receiver has a non-empty secret, the request includes an HMAC-SHA256 signature header derived from the body and the secret
+
+#### Scenario: Feishu and dingtalk receivers use their documented signing schemes
+- **GIVEN** a feishu receiver with a non-empty secret
+- **WHEN** the delivery worker sends a message
+- **THEN** the request body includes a `timestamp` and `sign` field computed from `timestamp + "\n" + secret` using HMAC-SHA256 base64 per Feishu's custom bot documentation
+- **GIVEN** a dingtalk receiver with a non-empty secret
+- **WHEN** the delivery worker sends a message
+- **THEN** the request URL includes `timestamp` and `sign` query parameters computed from `timestamp + "\n" + secret` using HMAC-SHA256 base64 per DingTalk's custom bot documentation
+
+#### Scenario: Slack, discord, and wecom receivers use their native payload shapes
+- **GIVEN** a slack receiver
+- **WHEN** the delivery worker sends a message
+- **THEN** the request body uses Slack's `{"text": ...}` shape
+- **GIVEN** a discord receiver
+- **WHEN** the delivery worker sends a message
+- **THEN** the request body uses Discord's `{"content": ...}` shape
+- **GIVEN** a wecom receiver
+- **WHEN** the delivery worker sends a message
+- **THEN** the request body uses WeCom's `{"msgtype": "text", "text": {"content": ...}}` shape
+
+#### Scenario: Disabled receivers and empty URLs never receive deliveries
+- **GIVEN** a receiver is disabled or has an empty URL
+- **WHEN** the delivery worker is asked to send a message to that receiver
+- **THEN** the system records a skipped delivery audit row
+- **THEN** the system does not perform any outbound HTTP request
+
+#### Scenario: Transient delivery failures are retried with backoff
+- **GIVEN** the receiver returns a transient HTTP failure
+- **WHEN** the delivery worker handles the response
+- **THEN** the system retries the request a bounded number of times with exponential backoff
+- **THEN** the audit log records each attempt with its `attempt_index`, status, and error
+- **THEN** the final outcome is reported as the delivery result
+
+### Requirement: Inspect delivery audit trail and exercise test deliveries
+The system SHALL let operators trigger a real test delivery for a saved rule and inspect recent delivery attempts.
+
+#### Scenario: Operator runs a real test delivery for a saved rule
+- **GIVEN** an authenticated operator
+- **AND** a saved rule whose `targetWebhookIds` reference at least one enabled receiver with a non-empty URL
+- **WHEN** the operator calls `POST /notifications/test` with that rule id
+- **THEN** the system loads the saved configuration
+- **THEN** the system builds a test message labelled with the rule name, severity, and signal key
+- **THEN** the system delivers the test message through every targeted enabled receiver using the provider adapter
+- **THEN** the response includes the per-receiver outcome with status, attempt count, and error message when applicable
+
+#### Scenario: Test request is rejected when no receiver can be delivered to
+- **GIVEN** the requested rule has no enabled receivers, all referenced receivers have empty URLs, or the rule id does not exist
+- **WHEN** the operator calls `POST /notifications/test`
+- **THEN** the system returns a client error response with a human-readable reason
+- **THEN** the system does not perform any outbound HTTP request
+
+#### Scenario: Operator inspects recent deliveries
+- **GIVEN** at least one delivery attempt has been audited
+- **WHEN** the operator calls `GET /notifications/deliveries`
+- **THEN** the system returns recent delivery audit rows ordered by creation time descending
+- **THEN** each row includes provider, receiver id, rule id, severity, status, error, attempt index, trigger type, and timestamp
+- **THEN** the response respects an optional `limit` query parameter
+### Requirement: Configure webhook alert receivers and routing
+The React UI SHALL let an authenticated operator define webhook receivers and route operational alert rules to one or more receivers.
+
+#### Scenario: Operator manages webhook receivers
+- **GIVEN** the operator opens the notification settings view
+- **WHEN** the operator adds or edits a webhook receiver
+- **THEN** the UI captures receiver name, provider type (generic, feishu, dingtalk, wecom, slack, or discord), URL, optional secret, enabled state, and failure mention behavior
+- **THEN** the operator can select which receiver is active for editing
+- **THEN** the operator can delete a receiver only when at least one receiver remains
+
+#### Scenario: Operator routes a rule to multiple receivers
+- **GIVEN** at least one webhook receiver exists
+- **AND** an alert rule is selected
+- **WHEN** the operator selects target webhooks for the rule
+- **THEN** the rule stores the selected receiver ids
+- **THEN** the UI summary shows how many rules target each receiver
+
+#### Scenario: Invalid test delivery is rejected in the UI
+- **GIVEN** the operator is editing an alert rule
+- **WHEN** the operator requests a test notification
+- **THEN** the UI requires at least one target receiver
+- **THEN** every selected receiver must be enabled and have a non-empty URL
+- **THEN** the UI reports a human-readable error instead of pretending delivery succeeded
+
+### Requirement: Configure alert signal thresholds and evaluation cadence
+The React UI SHALL let operators configure which operational signals are evaluated, how often they are read, how values are evaluated, and when notifications repeat or recover.
+
+#### Scenario: Operator creates an alert rule from supported information classes
+- **GIVEN** the operator opens the notification settings view
+- **WHEN** the operator creates or edits an alert rule
+- **THEN** the UI offers signal choices for platform API key health/quota/expiry/subscription/usage, user balance/API key/subscription usage, admin dashboard/usage/payment/channel/ops anomalies, and AI upstream account health/rate-limit/quota/auth/capacity
+- **THEN** each signal choice carries a default source, unit, threshold, operator, aggregation, severity, read interval, and evaluation window
+
+#### Scenario: Operator configures threshold evaluation
+- **GIVEN** an alert rule is selected
+- **WHEN** the operator edits threshold settings
+- **THEN** the UI captures rule name, enabled state, severity, aggregation, comparison operator, trigger threshold, optional recovery threshold, read interval minutes, evaluation window minutes, sustained-for minutes, and repeat/cooldown minutes
+- **THEN** the UI allows the rule to send recovery notifications
+- **THEN** the UI allows the rule to include a data snapshot in the outbound payload
+
+#### Scenario: Operator configures routing noise controls
+- **GIVEN** the operator opens the notification settings view
+- **WHEN** the operator edits routing controls
+- **THEN** the UI captures grouping by severity, signal, or source
+- **THEN** the UI captures group-wait minutes and default repeat interval minutes
+- **THEN** the UI captures quiet-hours enablement and start/end times
+
+#### Scenario: Notification configuration persists locally
+- **GIVEN** the operator edits webhook receivers, rules, or routing policy
+- **WHEN** the operator saves the settings
+- **THEN** the current configuration is persisted in browser local storage
+- **THEN** re-opening the dashboard restores the saved configuration when it is valid
+- **THEN** older locally saved receiver-only configuration is tolerated by generating default rules routed to the first receiver
+

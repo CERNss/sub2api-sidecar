@@ -18,6 +18,7 @@ from app.config import Settings, get_settings
 from app.errors import FlowNotFoundError, ProvisioningError
 from app.logging_config import setup_logging
 from app.models.flow import AssignmentMode, FlowStatus
+from app.models.notification import NotificationSettings
 from app.models.rotation import AutoRotationUsageWindow, RotationPoolGroup, RotationPoolKind
 from app.models.schemas import (
     AutoRotationConfigEnvelope,
@@ -30,6 +31,11 @@ from app.models.schemas import (
     LoginRequest,
     LoginResponse,
     ManualRotationRequest,
+    NotificationDeliveriesEnvelope,
+    NotificationDeliveryOutcomeResponse,
+    NotificationDeliveryRecordResponse,
+    NotificationTestRequest,
+    NotificationTestResponse,
     OrchestrationApiKeyAssignRequest,
     OrchestrationApiKeyResponse,
     OrchestrationApiKeysEnvelope,
@@ -48,6 +54,13 @@ from app.models.schemas import (
     RotationPoolGroupRequest,
 )
 from app.services.dashboard import flow_detail_response, flow_summary_response
+from app.services.notification import (
+    NotificationConfigError,
+    NotificationService,
+    NotificationTestError,
+    redact_settings,
+)
+from app.services.notification_delivery import NotificationDeliveryService
 from app.services.provisioning import ProvisioningService
 from app.services.rotation import RotationExecutionResult, RotationService
 from app.services.rotation_scheduler import AutoRotationScheduler
@@ -141,6 +154,14 @@ def get_provisioning_service() -> ProvisioningService:
     )
 
 
+@lru_cache(maxsize=1)
+def get_notification_service() -> NotificationService:
+    return NotificationService(
+        store=get_flow_store(),
+        delivery=NotificationDeliveryService(store=get_flow_store()),
+    )
+
+
 @app.exception_handler(RequestValidationError)
 def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
@@ -169,7 +190,12 @@ def handle_sub2api_error(_: Request, exc: Sub2APIError) -> JSONResponse:
 
 @app.exception_handler(ProvisioningError)
 def handle_provisioning_error(_: Request, exc: ProvisioningError) -> JSONResponse:
-    status_code = 404 if isinstance(exc, FlowNotFoundError) else 400
+    if isinstance(exc, FlowNotFoundError):
+        status_code = 404
+    elif isinstance(exc, NotificationConfigError):
+        status_code = 422
+    else:
+        status_code = 400
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(detail=str(exc)).model_dump(),
@@ -812,3 +838,70 @@ def rotation_auto_run_rollback(
         status_code=200,
         content=auto_rotation_run_response(record).model_dump(mode="json"),
     )
+
+
+@app.get("/notifications/config")
+def notifications_config_get(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
+    settings = get_notification_service().load_config()
+    return JSONResponse(status_code=200, content=redact_settings(settings))
+
+
+@app.put("/notifications/config")
+def notifications_config_put(
+    payload: NotificationSettings,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    settings = get_notification_service().save_config(payload)
+    return JSONResponse(status_code=200, content=redact_settings(settings))
+
+
+@app.post("/notifications/test")
+def notifications_test(
+    payload: NotificationTestRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    rule, outcomes = get_notification_service().run_test(payload.rule_id)
+    response = NotificationTestResponse(
+        rule_id=rule.id,
+        rule_name=rule.name or rule.signal_key,
+        outcomes=[
+            NotificationDeliveryOutcomeResponse(
+                receiver_id=outcome.receiver_id,
+                provider=outcome.provider.value,
+                status=outcome.status.value,
+                attempt_count=outcome.attempt_count,
+                response_status=outcome.response_status,
+                error_message=outcome.error_message,
+            )
+            for outcome in outcomes
+        ],
+    )
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/notifications/deliveries")
+def notifications_deliveries(
+    limit: int = Query(default=50, ge=1, le=500),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    records = get_flow_store().list_notification_deliveries(limit=limit)
+    items = [
+        NotificationDeliveryRecordResponse(
+            delivery_id=record.delivery_id,
+            receiver_id=record.receiver_id,
+            rule_id=record.rule_id,
+            provider=record.provider.value,
+            severity=record.severity.value,
+            trigger=record.trigger.value,
+            status=record.status.value,
+            attempt_index=record.attempt_index,
+            response_status=record.response_status,
+            error_message=record.error_message,
+            payload_digest=record.payload_digest,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+        for record in records
+    ]
+    payload = NotificationDeliveriesEnvelope(items=items, total=len(items))
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))

@@ -21,6 +21,7 @@ def clear_app_caches() -> None:
     main.get_sub2api_client.cache_clear()
     main.get_rotation_service.cache_clear()
     main.get_provisioning_service.cache_clear()
+    main.get_notification_service.cache_clear()
 
 
 @pytest.fixture

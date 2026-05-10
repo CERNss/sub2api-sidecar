@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
+from app.models.notification import NotificationDeliveryRecord, NotificationSettings
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
     OrchestrationRunRecord,
@@ -468,6 +472,72 @@ class SQLiteFlowStore(FlowStore):
             OrchestrationRunRecord,
         )
 
+    def get_notification_settings(self) -> NotificationSettings | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM notification_config WHERE config_key = 'default'"
+            ).fetchone()
+        if not row:
+            return None
+        return NotificationSettings.model_validate_json(row["payload"])
+
+    def save_notification_settings(self, settings: NotificationSettings) -> NotificationSettings:
+        now = datetime.now(timezone.utc).isoformat()
+        payload = settings.model_dump_json(by_alias=True)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO notification_config (config_key, payload, created_at, updated_at)
+                VALUES ('default', ?, ?, ?)
+                ON CONFLICT(config_key) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (payload, now, now),
+            )
+            connection.commit()
+        return settings
+
+    def save_notification_delivery(
+        self, record: NotificationDeliveryRecord
+    ) -> NotificationDeliveryRecord:
+        payload = record.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries (
+                    delivery_id, receiver_id, rule_id, provider, severity,
+                    trigger, status, attempt_index, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.delivery_id,
+                    record.receiver_id,
+                    record.rule_id,
+                    record.provider.value,
+                    record.severity.value,
+                    record.trigger.value,
+                    record.status.value,
+                    record.attempt_index,
+                    payload,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return record
+
+    def list_notification_deliveries(self, limit: int = 50) -> list[NotificationDeliveryRecord]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM notification_deliveries
+            ORDER BY created_at DESC, delivery_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+            NotificationDeliveryRecord,
+        )
+
     def _prepare_database_path(self) -> None:
         if self.database_path == ":memory:" or self._use_uri:
             return
@@ -622,6 +692,39 @@ class SQLiteFlowStore(FlowStore):
                 ON orchestration_runs(created_at DESC, run_kind, tag)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_config (
+                    config_key TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                    delivery_id TEXT PRIMARY KEY,
+                    receiver_id TEXT NOT NULL,
+                    rule_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_index INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_deliveries_list
+                ON notification_deliveries(created_at DESC, receiver_id, rule_id)
+                """
+            )
             connection.commit()
 
     def _ensure_column(
@@ -704,7 +807,7 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent] | type[OrchestrationRunRecord],
+        model_class: type[BaseModel],
     ) -> Any:
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
@@ -716,7 +819,7 @@ class SQLiteFlowStore(FlowStore):
         self,
         query: str,
         params: tuple[Any, ...],
-        model_class: type[ProvisionFlow] | type[ProvisionEvent] | type[RotationPoolGroup] | type[UserGroupAssignment] | type[AutoRotationRuntimeConfig] | type[RotationEvent] | type[OrchestrationRunRecord],
+        model_class: type[BaseModel],
     ) -> list[Any]:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()

@@ -274,6 +274,48 @@ class AutoRotationRunsEnvelope(BaseModel):
     total: int
 
 
+class NotificationTestRequest(BaseModel):
+    rule_id: str = Field(..., min_length=1)
+
+
+class NotificationDeliveryOutcomeResponse(BaseModel):
+    receiver_id: str
+    provider: str
+    status: str
+    attempt_count: int
+    response_status: int | None = None
+    error_message: str | None = None
+
+
+class NotificationTestResponse(BaseModel):
+    success: bool = True
+    rule_id: str
+    rule_name: str
+    outcomes: list[NotificationDeliveryOutcomeResponse]
+
+
+class NotificationDeliveryRecordResponse(BaseModel):
+    delivery_id: str
+    receiver_id: str
+    rule_id: str
+    provider: str
+    severity: str
+    trigger: str
+    status: str
+    attempt_index: int
+    response_status: int | None = None
+    error_message: str | None = None
+    payload_digest: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationDeliveriesEnvelope(BaseModel):
+    success: bool = True
+    items: list[NotificationDeliveryRecordResponse]
+    total: int
+
+
 class ErrorResponse(BaseModel):
     success: bool = False
     detail: str = Field(..., description="Human readable error message")
