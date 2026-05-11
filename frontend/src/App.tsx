@@ -134,6 +134,11 @@ type ProvisionFlowsPayload = ApiPayload & {
 
 type OrchestrationMode = "replace_group" | "api_key";
 
+type GroupCapacityFallback = {
+  currentConcurrency: number | null;
+  concurrency: number | null;
+};
+
 type OrchestrationUser = {
   user_id: unknown;
   email: string;
@@ -163,6 +168,13 @@ type OrchestrationGroup = {
   is_subscription: boolean;
   rotation_supported: boolean;
   unsupported_reason: string | null;
+  account_count: number | null;
+  active_account_count: number | null;
+  rpm_limit: number | null;
+  rate_multiplier: number | null;
+  daily_limit_usd: number | null;
+  weekly_limit_usd: number | null;
+  monthly_limit_usd: number | null;
 };
 
 type GroupSelectOption = {
@@ -184,6 +196,38 @@ type OrchestrationGroupsPayload = ApiPayload & {
   items: OrchestrationGroup[];
   total: number;
 };
+
+type OrchestrationAccount = {
+  account_id: unknown;
+  name: string;
+  email: string | null;
+  provider: string | null;
+  platform: string | null;
+  account_type: string | null;
+  status: string | null;
+  availability_status: string;
+  availability_reason: string | null;
+  is_available: boolean | null;
+  temporary_unschedulable: boolean;
+  rate_limited: boolean;
+  quota_remaining: number | null;
+  last_error: string | null;
+  availability_updated_at: string | null;
+  concurrency: number | null;
+  current_concurrency: number | null;
+  usage_5h_percent: number | null;
+  usage_7d_percent: number | null;
+  usage_updated_at: string | null;
+  group_ids: unknown[];
+  group_names: string[];
+};
+
+type OrchestrationAccountsPayload = ApiPayload & {
+  items: OrchestrationAccount[];
+  total: number;
+};
+
+type GraphNodeTagColor = "default" | "blue" | "green" | "gold" | "red" | "purple" | "magenta" | "processing";
 
 type OrchestrationApiKey = {
   key_id: unknown;
@@ -491,8 +535,8 @@ type AutoRotationConfigPayload = ApiPayload & {
 
 const emptyStatus: StatusState = { message: "", tone: "idle" };
 const graphTopY = 42;
-const graphRowGap = 126;
-const graphNodeMinGap = 116;
+const graphRowGap = 214;
+const graphNodeMinGap = 208;
 const usageWindowOptions = [
   { label: "最近 5 小时", value: "5h" },
   { label: "最近 1 天", value: "1d" },
@@ -696,6 +740,207 @@ function renderGroupOption(option: { label?: ReactNode; data: GroupSelectOption 
 
 function apiKeyGroupIdText(key: OrchestrationApiKey): string {
   return idValue(key.group_id) || "-";
+}
+
+function accountDisplayName(account: OrchestrationAccount): string {
+  return account.name?.trim() || account.email?.trim() || unknownToText(account.account_id);
+}
+
+function accountGroupCountText(account: OrchestrationAccount): string {
+  const count = account.group_ids.filter((groupId) => idValue(groupId)).length;
+  return count > 0 ? `${count} 分组` : "未绑定分组";
+}
+
+function accountAvailabilityLabel(account: OrchestrationAccount): string {
+  const status = (account.availability_status || account.status || "unknown").trim().toLowerCase();
+  if (account.is_available === true || ["available", "active", "ok", "healthy", "ready"].includes(status)) {
+    return "可用";
+  }
+  const labels: Record<string, string> = {
+    available: "可用",
+    active: "可用",
+    ok: "可用",
+    healthy: "可用",
+    ready: "可用",
+    rate_limited: "限流",
+    ratelimited: "限流",
+    overloaded: "过载",
+    overload: "过载",
+    temporary_unschedulable: "临时不可调度",
+    unschedulable: "不可调度",
+    needs_reauth: "需重授",
+    needs_verify: "需验证",
+    banned: "疑似封禁",
+    disabled: "停用",
+    unavailable: "不可用",
+    inactive: "不可用",
+    invalid: "失效",
+    error: "异常",
+    unknown: "未知"
+  };
+  return labels[status] ?? status;
+}
+
+function accountUnavailableText(account: OrchestrationAccount): string {
+  return accountAvailabilityColor(account) === "green" ? "可用" : accountAvailabilityLabel(account);
+}
+
+function accountAvailabilityColor(account: OrchestrationAccount): GraphNodeTagColor {
+  const status = (account.availability_status || account.status || "unknown").trim().toLowerCase();
+  if (account.is_available === true || ["available", "active", "ok", "healthy", "ready"].includes(status)) {
+    return "green";
+  }
+  if (account.rate_limited || ["rate_limited", "ratelimited", "overloaded", "overload", "temporary_unschedulable", "unschedulable"].includes(status)) {
+    return "gold";
+  }
+  if (["needs_reauth", "needs_verify", "banned", "disabled", "unavailable", "inactive", "invalid", "error"].includes(status)) {
+    return "red";
+  }
+  return "default";
+}
+
+function accountAvailabilityDetail(account: OrchestrationAccount): string {
+  return `Account ${unknownToText(account.account_id)} · ${accountGroupCountText(account)}`;
+}
+
+function trimFixed(value: number, digits: number): string {
+  return value.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
+function clampUsagePercent(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) {
+    return null;
+  }
+  return Math.min(Math.max(value, 0), 100);
+}
+
+function formatUsagePercent(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "-";
+  }
+  return `${trimFixed(value, value % 1 === 0 ? 0 : 1)}%`;
+}
+
+function formatCapacityNumber(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "-";
+  }
+  return trimFixed(value, value % 1 === 0 ? 0 : 1);
+}
+
+function formatLimitUsd(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "-";
+  }
+  if (value <= 0) {
+    return "不限";
+  }
+  return `$${trimFixed(value, value % 1 === 0 ? 0 : 2)}`;
+}
+
+type CapacityTone = "normal" | "warning" | "full" | "unknown";
+
+function capacityTone(current: number | null, total: number | null): CapacityTone {
+  if (current === null || total === null || !Number.isFinite(current) || !Number.isFinite(total) || total <= 0) {
+    return "unknown";
+  }
+  const ratio = current / total;
+  if (ratio >= 1) {
+    return "full";
+  }
+  if (ratio >= 0.8) {
+    return "warning";
+  }
+  return "normal";
+}
+
+function CapacityValue({
+  current,
+  total
+}: {
+  current: number | null;
+  total: number | null;
+}) {
+  return (
+    <strong className={`capacity-value capacity-value-${capacityTone(current, total)}`}>
+      {formatCapacityNumber(current)} / {formatCapacityNumber(total)}
+    </strong>
+  );
+}
+
+function GroupCapacityRows({
+  group,
+  fallback
+}: {
+  group: OrchestrationGroup;
+  fallback?: GroupCapacityFallback;
+}) {
+  const concurrency = fallback?.concurrency ?? null;
+  const currentConcurrency = fallback?.currentConcurrency ?? null;
+  const accountCapacity =
+    concurrency === null && currentConcurrency === null
+      ? "-"
+      : `${formatCapacityNumber(currentConcurrency)} / ${formatCapacityNumber(concurrency)}`;
+  const rpm = group.rpm_limit === null || group.rpm_limit <= 0 ? "不限" : formatCapacityNumber(group.rpm_limit);
+  const multiplier =
+    group.rate_multiplier === null || group.rate_multiplier === 1
+      ? null
+      : `x${formatCapacityNumber(group.rate_multiplier)}`;
+  const limits = [
+    `日 ${formatLimitUsd(group.daily_limit_usd)}`,
+    `周 ${formatLimitUsd(group.weekly_limit_usd)}`,
+    `月 ${formatLimitUsd(group.monthly_limit_usd)}`
+  ];
+  return (
+    <div className="group-capacity-grid" aria-label="分组容量">
+      <div className="group-capacity-row">
+        <span>容量</span>
+        {accountCapacity === "-" ? <strong>{accountCapacity}</strong> : <CapacityValue current={currentConcurrency} total={concurrency} />}
+      </div>
+      <div className="group-capacity-row">
+        <span>RPM</span>
+        <strong>{[rpm, multiplier].filter(Boolean).join(" · ")}</strong>
+      </div>
+      <div className="group-capacity-row group-capacity-limits">
+        <span>限额</span>
+        <strong>{limits.join(" / ")}</strong>
+      </div>
+    </div>
+  );
+}
+
+function AccountUsageRows({ account }: { account: OrchestrationAccount }) {
+  return (
+    <div className="account-usage-grid" aria-label="账号用量">
+      <div className="account-capacity-row">
+        <span>容量</span>
+        <CapacityValue current={account.current_concurrency} total={account.concurrency} />
+      </div>
+      <AccountUsageRow label="5h" percent={account.usage_5h_percent} tone="recent" />
+      <AccountUsageRow label="7d" percent={account.usage_7d_percent} tone="weekly" />
+    </div>
+  );
+}
+
+function AccountUsageRow({
+  label,
+  percent,
+  tone
+}: {
+  label: "5h" | "7d";
+  percent: number | null;
+  tone: "recent" | "weekly";
+}) {
+  const barWidth = clampUsagePercent(percent);
+  return (
+    <div className={`account-usage-row account-usage-row-${tone}`}>
+      <span className="account-usage-window">{label}</span>
+      <span className="account-usage-meter" aria-hidden="true">
+        <span style={{ width: barWidth === null ? 0 : `${barWidth}%` }} />
+      </span>
+      <span className="account-usage-value">{formatUsagePercent(percent)}</span>
+    </div>
+  );
 }
 
 function resolveKnownId(value: string, knownValues: unknown[]): unknown {
@@ -1042,6 +1287,7 @@ function ExistingOrchestrationView({
   const [mode, setMode] = useState<OrchestrationMode>("replace_group");
   const [users, setUsers] = useState<OrchestrationUser[]>([]);
   const [groups, setGroups] = useState<OrchestrationGroup[]>([]);
+  const [accounts, setAccounts] = useState<OrchestrationAccount[]>([]);
   const [apiKeys, setApiKeys] = useState<OrchestrationApiKey[]>([]);
   const [apiKeysByUserId, setApiKeysByUserId] = useState<Record<string, OrchestrationApiKey[]>>({});
   const [userSearch, setUserSearch] = useState("");
@@ -1058,6 +1304,10 @@ function ExistingOrchestrationView({
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
   const userSelectRef = useRef<RefSelectProps | null>(null);
   const userSearchTimerRef = useRef<number | null>(null);
+  const unavailableAccountCount = useMemo(
+    () => accounts.filter((account) => accountAvailabilityColor(account) !== "green").length,
+    [accounts]
+  );
 
   useEffect(() => {
     return () => {
@@ -1088,7 +1338,14 @@ function ExistingOrchestrationView({
       is_exclusive: true,
       is_subscription: false,
       rotation_supported: true,
-      unsupported_reason: null
+      unsupported_reason: null,
+      account_count: null,
+      active_account_count: null,
+      rpm_limit: null,
+      rate_multiplier: null,
+      daily_limit_usd: null,
+      weekly_limit_usd: null,
+      monthly_limit_usd: null
     };
   }, [groups, selectedUser]);
   const sourceGroups = useMemo(
@@ -1118,6 +1375,9 @@ function ExistingOrchestrationView({
   const graph = useMemo(() => {
     const groupUserCounts = new Map<string, number>();
     const groupKeyCounts = new Map<string, number>();
+    const groupAccountCounts = new Map<string, number>();
+    const groupConcurrency = new Map<string, number>();
+    const groupCurrentConcurrency = new Map<string, number>();
     const graphGroups = new Map<string, OrchestrationGroup>();
     const userKeyRows = users.flatMap((user) => {
       const userId = idValue(user.user_id);
@@ -1151,7 +1411,14 @@ function ExistingOrchestrationView({
           is_exclusive: true,
           is_subscription: false,
           rotation_supported: true,
-          unsupported_reason: null
+          unsupported_reason: null,
+          account_count: null,
+          active_account_count: null,
+          rpm_limit: null,
+          rate_multiplier: null,
+          daily_limit_usd: null,
+          weekly_limit_usd: null,
+          monthly_limit_usd: null
         });
       }
     });
@@ -1171,9 +1438,54 @@ function ExistingOrchestrationView({
           is_exclusive: true,
           is_subscription: false,
           rotation_supported: true,
-          unsupported_reason: null
+          unsupported_reason: null,
+          account_count: null,
+          active_account_count: null,
+          rpm_limit: null,
+          rate_multiplier: null,
+          daily_limit_usd: null,
+          weekly_limit_usd: null,
+          monthly_limit_usd: null
         });
       }
+    });
+    accounts.forEach((account) => {
+      account.group_ids.forEach((groupId, index) => {
+        const groupValue = idValue(groupId);
+        if (!groupValue) {
+          return;
+        }
+        groupAccountCounts.set(groupValue, (groupAccountCounts.get(groupValue) ?? 0) + 1);
+        if (account.concurrency !== null && Number.isFinite(account.concurrency)) {
+          groupConcurrency.set(groupValue, (groupConcurrency.get(groupValue) ?? 0) + account.concurrency);
+        }
+        if (account.current_concurrency !== null && Number.isFinite(account.current_concurrency)) {
+          groupCurrentConcurrency.set(
+            groupValue,
+            (groupCurrentConcurrency.get(groupValue) ?? 0) + account.current_concurrency
+          );
+        }
+        if (!graphGroups.has(groupValue)) {
+          graphGroups.set(groupValue, {
+            group_id: groupId,
+            name: account.group_names[index] || groupValue,
+            group_kind: null,
+            platform: account.platform,
+            status: null,
+            is_exclusive: true,
+            is_subscription: false,
+            rotation_supported: true,
+            unsupported_reason: null,
+            account_count: null,
+            active_account_count: null,
+            rpm_limit: null,
+            rate_multiplier: null,
+            daily_limit_usd: null,
+            weekly_limit_usd: null,
+            monthly_limit_usd: null
+          });
+        }
+      });
     });
 
     const groupOrder = Array.from(graphGroups.values())
@@ -1187,10 +1499,14 @@ function ExistingOrchestrationView({
           .map((row, index) => ({ index, groupValue: idValue(row.key.group_id) }))
           .filter((item) => item.groupValue === groupValue)
           .map((item) => item.index);
+        const accountIndexes = accounts
+          .map((account, index) => ({ index, groupValues: account.group_ids.map(idValue) }))
+          .filter((item) => item.groupValues.includes(groupValue))
+          .map((item) => item.index);
         return {
           group,
           groupValue,
-          score: average([...userIndexes, ...keyIndexes], users.length + fallbackIndex)
+          score: average([...userIndexes, ...keyIndexes, ...accountIndexes], users.length + fallbackIndex)
         };
       })
       .sort((first, second) => first.score - second.score || first.groupValue.localeCompare(second.groupValue));
@@ -1242,11 +1558,36 @@ function ExistingOrchestrationView({
         desiredY: userYById.get(userId) ?? graphTopY
       }))
     );
+    const accountRows = accounts
+      .map((account, fallbackIndex) => {
+        const accountId = idValue(account.account_id);
+        const relatedGroupY = account.group_ids
+          .map((groupId) => groupYById.get(idValue(groupId)))
+          .filter((value): value is number => typeof value === "number");
+        return {
+          account,
+          accountId,
+          fallbackIndex,
+          groupScore: average(relatedGroupY, graphTopY + fallbackIndex * graphRowGap)
+        };
+      })
+      .sort((first, second) => first.groupScore - second.groupScore || first.accountId.localeCompare(second.accountId));
+    const accountYById = spreadVerticalPositions(
+      accountRows.map(({ accountId, groupScore }, index) => ({
+        id: accountId,
+        desiredY: Number.isFinite(groupScore) ? groupScore : graphTopY + index * graphRowGap
+      }))
+    );
 
     const groupNodes: Node[] = groupOrder.map(({ group, groupValue }) => {
+      const fallbackCapacity = {
+        currentConcurrency: groupCurrentConcurrency.get(groupValue) ?? null,
+        concurrency: groupConcurrency.get(groupValue) ?? null
+      };
       const tags = [
         `${groupUserCounts.get(groupValue) ?? 0} 用户`,
-        `${groupKeyCounts.get(groupValue) ?? 0} Key`
+        `${groupKeyCounts.get(groupValue) ?? 0} Key`,
+        `${groupAccountCounts.get(groupValue) ?? 0} 账号`
       ];
       if (groupValue === sourceGroupId) {
         tags.push("当前");
@@ -1256,8 +1597,8 @@ function ExistingOrchestrationView({
       }
       return {
         id: `group-${groupValue}`,
-        type: "output",
         position: { x: 692, y: groupYById.get(groupValue) ?? graphTopY },
+        sourcePosition: Position.Right,
         targetPosition: Position.Left,
         data: {
           groupId: groupValue,
@@ -1268,6 +1609,7 @@ function ExistingOrchestrationView({
               subtitle={`Group ${unknownToText(group.group_id)}`}
               tone={groupValue === sourceGroupId ? "source" : groupValue === targetGroupId ? "target" : "neutral"}
               tag={tags.join(" / ")}
+              footer={<GroupCapacityRows group={group} fallback={fallbackCapacity} />}
             />
           )
         }
@@ -1316,8 +1658,42 @@ function ExistingOrchestrationView({
         )
       }
     }));
-    const nodes: Node[] = [...groupNodes, ...userNodes, ...keyNodes];
+
+    const accountNodes: Node[] = accountRows.map(({ account, accountId }) => ({
+      id: `account-${accountId}`,
+      type: "output",
+      position: { x: 1024, y: accountYById.get(accountId) ?? graphTopY },
+      targetPosition: Position.Left,
+      data: {
+        accountId,
+        label: (
+          <GraphNode
+            icon={<ApiOutlined />}
+            title={accountDisplayName(account)}
+            subtitle={accountAvailabilityDetail(account)}
+            tone="account"
+            tag={accountUnavailableText(account)}
+            tagColor={accountAvailabilityColor(account)}
+            footer={<AccountUsageRows account={account} />}
+          />
+        )
+      }
+    }));
+    const nodes: Node[] = [...accountNodes, ...groupNodes, ...userNodes, ...keyNodes];
     const edges: Edge[] = [
+      ...accounts.flatMap((account) => {
+        const accountId = idValue(account.account_id);
+        return account.group_ids
+          .map(idValue)
+          .filter(Boolean)
+          .map((groupId) => ({
+            id: `group-account-${groupId}-${accountId}`,
+            source: `group-${groupId}`,
+            target: `account-${accountId}`,
+            markerEnd: { type: MarkerType.ArrowClosed },
+            label: "分组上游账号"
+          }));
+      }),
       ...users
         .filter((user) => idValue(user.current_group_id))
         .map((user) => {
@@ -1362,6 +1738,7 @@ function ExistingOrchestrationView({
   }, [
     apiKeys,
     apiKeysByUserId,
+    accounts,
     groups,
     selectedKeySet,
     selectedUserId,
@@ -1396,6 +1773,20 @@ function ExistingOrchestrationView({
 
       setUsers(usersPayload.items);
       setGroups(groupsPayload.items);
+      try {
+        const accountsPayload = await requestJson<OrchestrationAccountsPayload>(
+          "/orchestration/accounts",
+          { method: "GET" },
+          "加载上游账号失败"
+        );
+        setAccounts(accountsPayload.items);
+      } catch (accountError: unknown) {
+        if (onAuthExpired(accountError, setStatus)) {
+          return;
+        }
+        setAccounts([]);
+        setStatus({ message: getErrorMessage(accountError, "上游账号暂不可用，已先显示用户/分组/Key"), tone: "info" });
+      }
       const candidateUserId =
         nextSelectedUserId === ""
           ? ""
@@ -1408,6 +1799,7 @@ function ExistingOrchestrationView({
       if (!onAuthExpired(error, setStatus)) {
         setUsers([]);
         setGroups([]);
+        setAccounts([]);
         setApiKeys([]);
         setApiKeysByUserId({});
         setStatus({ message: getErrorMessage(error, "加载用户和分组失败"), tone: "error" });
@@ -1906,8 +2298,10 @@ function ExistingOrchestrationView({
           <div className="canvas-meta-row">
             <Typography.Text type="secondary">Graph Canvas</Typography.Text>
             <div className="canvas-subtitle-tags">
-              <Tag color="processing">左到右：Key / 用户 / 分组</Tag>
+              <Tag color="processing">左到右：Key / 用户 / 分组 / 上游账号</Tag>
               <Tag color="default">全局关系</Tag>
+              <Tag color="purple">{accounts.length} 账号</Tag>
+              {unavailableAccountCount > 0 ? <Tag color="gold">{unavailableAccountCount} 个需关注</Tag> : null}
             </div>
           </div>
           <Space wrap>
@@ -1951,24 +2345,29 @@ function GraphNode({
   title,
   subtitle,
   tone,
-  tag
+  tag,
+  tagColor,
+  footer
 }: {
   icon: ReactNode;
   title: string;
   subtitle: string;
-  tone: "user" | "active" | "source" | "target" | "neutral";
+  tone: "user" | "active" | "source" | "target" | "account" | "neutral";
   tag?: string;
+  tagColor?: GraphNodeTagColor;
+  footer?: ReactNode;
 }) {
-  const tagColor =
-    tone === "target" ? "green" : tone === "source" ? "gold" : tone === "active" ? "blue" : "default";
+  const defaultTagColor =
+    tone === "target" ? "green" : tone === "source" ? "gold" : tone === "active" ? "blue" : tone === "account" ? "purple" : "default";
   return (
     <div className={`graph-node graph-node-${tone}`}>
       <span className="graph-node-icon">{icon}</span>
       <div className="graph-node-copy">
-        <strong>{title}</strong>
-        <small>{subtitle}</small>
+        <strong title={title}>{title}</strong>
+        <small title={subtitle}>{subtitle}</small>
       </div>
-      {tag ? <Tag color={tagColor}>{tag}</Tag> : null}
+      {tag ? <Tag color={tagColor ?? defaultTagColor}>{tag}</Tag> : null}
+      {footer ? <div className="graph-node-footer">{footer}</div> : null}
     </div>
   );
 }
@@ -2232,7 +2631,14 @@ function DynamicOrchestrationView({
       is_exclusive: group.is_exclusive,
       is_subscription: group.is_subscription,
       rotation_supported: group.rotation_supported,
-      unsupported_reason: group.unsupported_reason
+      unsupported_reason: group.unsupported_reason,
+      account_count: null,
+      active_account_count: null,
+      rpm_limit: null,
+      rate_multiplier: null,
+      daily_limit_usd: null,
+      weekly_limit_usd: null,
+      monthly_limit_usd: null
     })
   );
   async function loadDynamicConfig() {

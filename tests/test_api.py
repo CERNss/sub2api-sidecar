@@ -81,6 +81,13 @@ class FakeRotationSub2API:
                 "platform": "openai",
                 "status": "active",
                 "is_exclusive": True,
+                "account_count": 2,
+                "active_account_count": 1,
+                "rpm_limit": 120,
+                "rate_multiplier": 1.5,
+                "daily_limit_usd": 10,
+                "weekly_limit_usd": 50,
+                "monthly_limit_usd": 200,
             },
             {
                 "id": 22,
@@ -89,6 +96,13 @@ class FakeRotationSub2API:
                 "platform": "openai",
                 "status": "active",
                 "is_exclusive": True,
+                "account_count": 1,
+                "active_account_count": 1,
+                "rpm_limit": 0,
+                "rate_multiplier": 1,
+                "daily_limit_usd": 0,
+                "weekly_limit_usd": 0,
+                "monthly_limit_usd": 0,
             },
             {
                 "id": 33,
@@ -108,6 +122,46 @@ class FakeRotationSub2API:
                 "subscription_id": "sub-1",
             },
         ]
+        self.accounts = [
+            {
+                "id": "acct-1",
+                "name": "openai-account-low",
+                "email": "oa-low@example.com",
+                "provider": "openai",
+                "platform": "openai",
+                "type": "oauth",
+                "status": "active",
+                "available": True,
+                "concurrency": 3,
+                "current_concurrency": 1,
+                "quota_remaining": 85.5,
+                "last_checked_at": "2026-05-11T08:00:00Z",
+                "extra": {
+                    "codex_5h_used_percent": 39,
+                    "codex_7d_used_percent": 85,
+                    "codex_usage_updated_at": "2026-05-11T13:59:49+08:00",
+                },
+                "group_ids": [11],
+            },
+            {
+                "id": "acct-2",
+                "name": "openai-account-high",
+                "provider": "openai",
+                "platform": "openai",
+                "type": "oauth",
+                "status": "rate_limited",
+                "rate_limited": True,
+                "concurrency": 7,
+                "current_concurrency": 2,
+                "extra": {
+                    "codex_5h_used_percent": "0%",
+                    "codex_7d_used_percent": 25,
+                },
+                "error_message": "429 too many requests",
+                "reset_at": "2026-05-11T09:00:00Z",
+                "groups": [{"id": 22, "name": "rotation-high"}],
+            },
+        ]
         self.user_api_keys: dict[int, list[dict[str, object]]] = {}
         self.replace_calls: list[dict[str, object]] = []
         self.set_user_group_calls: list[dict[str, object]] = []
@@ -120,6 +174,8 @@ class FakeRotationSub2API:
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.groups})
         if method == "GET" and path in {"/api/v1/admin/users/all", "/api/v1/admin/users"}:
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
+        if method == "GET" and path == "/api/v1/admin/accounts":
+            return FakeResponse(200, {"code": 0, "message": "success", "data": self.accounts})
         if method == "POST" and path in {"/api/v1/admin/groups", "/api/admin/groups"}:
             self.create_group_calls += 1
             return FakeResponse(
@@ -718,6 +774,7 @@ def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
     with patch.object(requests.Session, "request", new=backend.request):
         users_response = client.get("/orchestration/users?email=rotate")
         groups_response = client.get("/orchestration/groups")
+        accounts_response = client.get("/orchestration/accounts")
         keys_response = client.get("/orchestration/users/101/api-keys")
 
     assert users_response.status_code == 200
@@ -729,7 +786,34 @@ def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
     assert groups_response.status_code == 200
     groups = {item["group_id"]: item for item in groups_response.json()["items"]}
     assert groups[11]["rotation_supported"] is True
+    assert groups[11]["account_count"] == 2
+    assert groups[11]["active_account_count"] == 1
+    assert groups[11]["rpm_limit"] == 120
+    assert groups[11]["rate_multiplier"] == 1.5
+    assert groups[11]["daily_limit_usd"] == 10.0
+    assert groups[11]["weekly_limit_usd"] == 50.0
+    assert groups[11]["monthly_limit_usd"] == 200.0
     assert groups[44]["rotation_supported"] is False
+    assert accounts_response.status_code == 200
+    accounts = {item["account_id"]: item for item in accounts_response.json()["items"]}
+    assert accounts["acct-1"]["group_ids"] == [11]
+    assert accounts["acct-1"]["availability_status"] == "available"
+    assert accounts["acct-1"]["is_available"] is True
+    assert accounts["acct-1"]["concurrency"] == 3.0
+    assert accounts["acct-1"]["current_concurrency"] == 1.0
+    assert accounts["acct-1"]["quota_remaining"] == 85.5
+    assert accounts["acct-1"]["usage_5h_percent"] == 39.0
+    assert accounts["acct-1"]["usage_7d_percent"] == 85.0
+    assert accounts["acct-1"]["usage_updated_at"] == "2026-05-11T13:59:49+08:00"
+    assert accounts["acct-2"]["group_ids"] == [22]
+    assert accounts["acct-2"]["availability_status"] == "rate_limited"
+    assert accounts["acct-2"]["is_available"] is False
+    assert accounts["acct-2"]["rate_limited"] is True
+    assert accounts["acct-2"]["concurrency"] == 7.0
+    assert accounts["acct-2"]["current_concurrency"] == 2.0
+    assert accounts["acct-2"]["last_error"] == "429 too many requests"
+    assert accounts["acct-2"]["usage_5h_percent"] == 0.0
+    assert accounts["acct-2"]["usage_7d_percent"] == 25.0
     assert keys_response.status_code == 200
     assert keys_response.json()["items"][0]["key_id"] == "key-101"
 

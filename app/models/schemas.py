@@ -118,11 +118,49 @@ class OrchestrationGroupResponse(BaseModel):
     is_subscription: bool = False
     rotation_supported: bool = True
     unsupported_reason: str | None = None
+    account_count: int | None = None
+    active_account_count: int | None = None
+    rpm_limit: int | None = None
+    rate_multiplier: float | None = None
+    daily_limit_usd: float | None = None
+    weekly_limit_usd: float | None = None
+    monthly_limit_usd: float | None = None
 
 
 class OrchestrationGroupsEnvelope(BaseModel):
     success: bool = True
     items: list[OrchestrationGroupResponse]
+    total: int
+
+
+class OrchestrationAccountResponse(BaseModel):
+    account_id: Any
+    name: str
+    email: str | None = None
+    provider: str | None = None
+    platform: str | None = None
+    account_type: str | None = None
+    status: str | None = None
+    availability_status: str = "unknown"
+    availability_reason: str | None = None
+    is_available: bool | None = None
+    temporary_unschedulable: bool = False
+    rate_limited: bool = False
+    quota_remaining: float | None = None
+    last_error: str | None = None
+    availability_updated_at: str | None = None
+    concurrency: float | None = None
+    current_concurrency: float | None = None
+    usage_5h_percent: float | None = None
+    usage_7d_percent: float | None = None
+    usage_updated_at: str | None = None
+    group_ids: list[Any] = Field(default_factory=list)
+    group_names: list[str] = Field(default_factory=list)
+
+
+class OrchestrationAccountsEnvelope(BaseModel):
+    success: bool = True
+    items: list[OrchestrationAccountResponse]
     total: int
 
 
