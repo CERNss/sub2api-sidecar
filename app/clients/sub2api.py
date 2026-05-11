@@ -52,6 +52,16 @@ class Sub2APIClient:
         "/admin/users",
         "/admin/users/all",
     )
+    LIST_OPENAI_ACCOUNTS_PATHS = (
+        "/api/v1/admin/accounts",
+        "/api/v1/admin/accounts/all",
+        "/api/admin/accounts",
+        "/admin/accounts",
+        "/api/v1/admin/openai/accounts",
+        "/api/v1/admin/openai/accounts/all",
+        "/api/admin/openai/accounts",
+        "/admin/openai/accounts",
+    )
     USER_API_KEYS_PATHS = ("/api/v1/admin/users/{user_id}/api-keys",)
     USAGE_STATS_PATHS = ("/api/v1/admin/usage/stats",)
     GENERATE_OPENAI_AUTH_URL_PATHS = (
@@ -204,6 +214,28 @@ class Sub2APIClient:
             total = int(envelope.get("total", len(items)) or len(items))
         return {"items": items, "total": total, "raw": data}
 
+    def list_openai_accounts(self) -> list[dict[str, Any]]:
+        last_error: Sub2APIError | None = None
+        for path in self.LIST_OPENAI_ACCOUNTS_PATHS:
+            try:
+                data = self._request("GET", path)
+                return self._parse_account_list(data)
+            except Sub2APIError as exc:
+                last_error = exc
+                if exc.status_code in {404, 405}:
+                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
+                    continue
+                logger.warning("Sub2API account list path failed, trying next candidate: %s", path)
+                continue
+            except ValueError as exc:
+                last_error = Sub2APIError(str(exc))
+                logger.warning("Sub2API account list response could not be parsed: %s", path)
+                continue
+        logger.warning("No Sub2API account list path succeeded; returning empty account list")
+        if last_error:
+            logger.debug("Last account list error: %s", last_error)
+        return []
+
     def get_usage_stats(
         self,
         *,
@@ -222,6 +254,30 @@ class Sub2APIClient:
         body = self._unwrap_data(data)
         if not isinstance(body, dict):
             raise Sub2APIError("Sub2API usage stats response is not an object")
+        return body
+
+    def get_account_usage_stats(
+        self,
+        *,
+        account_id: Any,
+        window: str | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        timezone_name: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"account_id": account_id}
+        if window:
+            params["window"] = window
+        if start_date is not None:
+            params["start_date"] = start_date.isoformat()
+        if end_date is not None:
+            params["end_date"] = end_date.isoformat()
+        if timezone_name is not None:
+            params["timezone"] = timezone_name
+        data = self._request_candidates("GET", self.USAGE_STATS_PATHS, params=params)
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API account usage stats response is not an object")
         return body
 
     def generate_openai_auth_url(self, email: str, state: str, redirect_uri: str) -> dict[str, Any]:
@@ -367,6 +423,41 @@ class Sub2APIClient:
                     "is_exclusive": is_exclusive,
                     "is_subscription": is_subscription,
                     "rotation_supported": is_exclusive and not is_subscription,
+                    "account_count": self._optional_int_value(
+                        item,
+                        "account_count",
+                        "accounts_count",
+                        "capacity.account_count",
+                    ),
+                    "active_account_count": self._optional_int_value(
+                        item,
+                        "active_account_count",
+                        "available_account_count",
+                        "healthy_account_count",
+                        "schedulable_account_count",
+                        "capacity.active_account_count",
+                    ),
+                    "rpm_limit": self._optional_int_value(item, "rpm_limit", "rate.rpm_limit"),
+                    "rate_multiplier": self._optional_float_value(
+                        item,
+                        "rate_multiplier",
+                        "capacity.rate_multiplier",
+                    ),
+                    "daily_limit_usd": self._optional_float_value(
+                        item,
+                        "daily_limit_usd",
+                        "limits.daily_limit_usd",
+                    ),
+                    "weekly_limit_usd": self._optional_float_value(
+                        item,
+                        "weekly_limit_usd",
+                        "limits.weekly_limit_usd",
+                    ),
+                    "monthly_limit_usd": self._optional_float_value(
+                        item,
+                        "monthly_limit_usd",
+                        "limits.monthly_limit_usd",
+                    ),
                     "raw": item,
                 }
             )
@@ -416,6 +507,91 @@ class Sub2APIClient:
             )
         return users
 
+    def _parse_account_list(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        body = self._unwrap_data(payload)
+        if isinstance(body, list):
+            raw_accounts = body
+        elif isinstance(body, dict) and isinstance(body.get("items"), list):
+            raw_accounts = body["items"]
+        elif isinstance(body, dict) and isinstance(body.get("accounts"), list):
+            raw_accounts = body["accounts"]
+        elif isinstance(body, dict) and isinstance(body.get("data"), list):
+            raw_accounts = body["data"]
+        else:
+            raise Sub2APIError("Unable to parse account list from Sub2API response")
+
+        accounts: list[dict[str, Any]] = []
+        for item in raw_accounts:
+            if not isinstance(item, dict):
+                continue
+            group_ids, group_names = self._extract_account_groups(item)
+            availability = self._extract_account_availability(item)
+            account_id = self._extract_id(item, "id", "account_id", "openai_account_id")
+            email = item.get("email") or item.get("account_email") or item.get("login_email")
+            accounts.append(
+                {
+                    "id": account_id,
+                    "name": str(item.get("name") or item.get("account_name") or email or account_id),
+                    "email": str(email) if email not in (None, "") else None,
+                    "provider": item.get("provider"),
+                    "platform": item.get("platform"),
+                    "account_type": item.get("type") or item.get("account_type"),
+                    "status": item.get("status"),
+                    "concurrency": self._optional_float_value(
+                        item,
+                        "concurrency",
+                        "capacity",
+                        "account_capacity",
+                        "limits.concurrency",
+                    ),
+                    "current_concurrency": self._optional_float_value(
+                        item,
+                        "current_concurrency",
+                        "active_concurrency",
+                        "used_concurrency",
+                        "usage.current_concurrency",
+                    ),
+                    "group_ids": group_ids,
+                    "group_names": group_names,
+                    **self._extract_account_usage_percentages(item),
+                    **availability,
+                    "raw": item,
+                }
+            )
+        return accounts
+
+    def _extract_account_usage_percentages(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "usage_5h_percent": self._optional_float_value(
+                item,
+                "usage_5h_percent",
+                "usage_5h",
+                "usage.5h_percent",
+                "usage.usage_5h_percent",
+                "usage.codex_5h_used_percent",
+                "codex_5h_used_percent",
+                "extra.codex_5h_used_percent",
+            ),
+            "usage_7d_percent": self._optional_float_value(
+                item,
+                "usage_7d_percent",
+                "usage_7d",
+                "usage.7d_percent",
+                "usage.usage_7d_percent",
+                "usage.codex_7d_used_percent",
+                "codex_7d_used_percent",
+                "extra.codex_7d_used_percent",
+            ),
+            "usage_updated_at": self._first_text_value(
+                item,
+                "usage_updated_at",
+                "usage.updated_at",
+                "usage.codex_usage_updated_at",
+                "codex_usage_updated_at",
+                "extra.codex_usage_updated_at",
+            ),
+        }
+
     def _extract_user_current_group(self, item: dict[str, Any]) -> tuple[Any | None, str | None]:
         for field_name in ("group_id", "current_group_id", "default_group_id"):
             value = item.get(field_name)
@@ -449,6 +625,271 @@ class Sub2APIClient:
             if value not in (None, ""):
                 return str(value)
         return None
+
+    def _extract_account_groups(self, item: dict[str, Any]) -> tuple[list[Any], list[str]]:
+        group_ids: list[Any] = []
+        group_names: list[str] = []
+
+        def add_group(group_id: Any, group_name: Any = None) -> None:
+            if group_id in (None, ""):
+                return
+            if not any(str(existing) == str(group_id) for existing in group_ids):
+                group_ids.append(group_id)
+                group_names.append(str(group_name) if group_name not in (None, "") else "")
+
+        for field_name in ("group_id", "current_group_id", "default_group_id"):
+            add_group(item.get(field_name), item.get("group_name") or item.get("current_group_name"))
+
+        group = item.get("group") or item.get("current_group")
+        if isinstance(group, dict):
+            add_group(
+                group.get("id") or group.get("group_id"),
+                group.get("name") or group.get("group_name"),
+            )
+
+        for field_name in ("groups", "group_ids", "allowed_groups", "bound_groups"):
+            raw_groups = item.get(field_name)
+            if not isinstance(raw_groups, list):
+                continue
+            for raw_group in raw_groups:
+                if isinstance(raw_group, dict):
+                    add_group(
+                        raw_group.get("id") or raw_group.get("group_id"),
+                        raw_group.get("name") or raw_group.get("group_name"),
+                    )
+                else:
+                    add_group(raw_group)
+
+        return group_ids, group_names
+
+    def _extract_account_availability(self, item: dict[str, Any]) -> dict[str, Any]:
+        explicit_status = self._first_text_value(
+            item,
+            "availability_status",
+            "availability.status",
+            "availability.state",
+            "availability",
+            "health_status",
+            "account_status",
+            "state",
+            "status",
+        )
+        explicit_status_key = self._normalize_status_key(explicit_status)
+        explicit_available = self._optional_bool_value(
+            item,
+            "is_available",
+            "available",
+            "availability.is_available",
+            "availability.available",
+            "availability",
+            "enabled",
+            "is_enabled",
+        )
+        enabled = self._optional_bool_value(item, "enabled", "is_enabled")
+        disabled = self._optional_bool_value(item, "disabled", "is_disabled")
+        schedulable = self._optional_bool_value(
+            item,
+            "schedulable",
+            "is_schedulable",
+            "availability.schedulable",
+        )
+        temporary_unschedulable_until = self._first_text_value(
+            item,
+            "temp_unschedulable_until",
+            "temporary_unschedulable_until",
+            "temporarily_unschedulable_until",
+            "availability.temp_unschedulable_until",
+        )
+        temporary_unschedulable = bool(
+            self._optional_bool_value(
+                item,
+                "temporary_unschedulable",
+                "temporarily_unschedulable",
+                "is_temporary_unschedulable",
+                "unschedulable",
+                "availability.temporary_unschedulable",
+            )
+        ) or bool(temporary_unschedulable_until)
+        overload_until = self._first_text_value(
+            item,
+            "overload_until",
+            "rate_limit_reset_at",
+            "rate_limited_until",
+            "reset_at",
+            "retry_after",
+            "available_after",
+            "availability.overload_until",
+            "availability.rate_limit_reset_at",
+            "availability.rate_limited_until",
+            "availability.reset_at",
+        )
+        rate_limited = bool(
+            self._optional_bool_value(
+                item,
+                "rate_limited",
+                "is_rate_limited",
+                "limited",
+                "availability.rate_limited",
+            )
+        ) or bool(overload_until) or explicit_status_key in {
+            "rate_limited",
+            "ratelimited",
+            "overloaded",
+            "overload",
+        }
+        needs_reauth = bool(
+            self._optional_bool_value(item, "needs_reauth", "requires_reauth", "reauth_required")
+        )
+        needs_verify = bool(
+            self._optional_bool_value(item, "needs_verify", "requires_verify", "verify_required")
+        )
+        is_banned = bool(self._optional_bool_value(item, "is_banned", "banned"))
+        quota_remaining = self._optional_float_value(
+            item,
+            "quota_remaining",
+            "remaining_quota",
+            "quota.remaining",
+            "quota_remaining_percent",
+            "remaining_percent",
+            "credits",
+            "balance",
+            "remaining",
+            "availability.quota_remaining",
+        )
+        last_error = self._first_text_value(
+            item,
+            "last_error",
+            "last_error_message",
+            "error_message",
+            "temp_unschedulable_reason",
+            "error",
+            "error_code",
+            "last_error_code",
+            "availability.reason",
+            "availability.error_message",
+        )
+        availability_updated_at = self._first_text_value(
+            item,
+            "availability_updated_at",
+            "checked_at",
+            "last_checked_at",
+            "updated_at",
+            "availability.updated_at",
+            "availability.checked_at",
+        )
+
+        if is_banned:
+            availability_status = "banned"
+        elif needs_reauth:
+            availability_status = "needs_reauth"
+        elif needs_verify:
+            availability_status = "needs_verify"
+        elif temporary_unschedulable:
+            availability_status = "temporary_unschedulable"
+        elif rate_limited:
+            availability_status = "rate_limited"
+        elif schedulable is False:
+            availability_status = "unavailable"
+        elif disabled is True or enabled is False:
+            availability_status = "disabled"
+        elif explicit_available is False:
+            availability_status = "unavailable"
+        elif explicit_available is True or explicit_status_key in {
+            "available",
+            "active",
+            "ok",
+            "healthy",
+            "enabled",
+            "ready",
+            "normal",
+        }:
+            availability_status = "available"
+        elif explicit_status_key:
+            availability_status = explicit_status_key
+        else:
+            availability_status = "unknown"
+
+        if explicit_available is not None:
+            is_available: bool | None = explicit_available
+        elif availability_status == "available":
+            is_available = True
+        elif availability_status == "unknown":
+            is_available = None
+        else:
+            is_available = False
+
+        availability_reason = last_error
+        if not availability_reason and rate_limited and overload_until:
+            availability_reason = f"reset_at={overload_until}"
+        if not availability_reason and explicit_status_key not in {"", availability_status}:
+            availability_reason = explicit_status
+
+        return {
+            "availability_status": availability_status,
+            "availability_reason": availability_reason,
+            "is_available": is_available,
+            "temporary_unschedulable": temporary_unschedulable,
+            "rate_limited": rate_limited,
+            "quota_remaining": quota_remaining,
+            "last_error": last_error,
+            "availability_updated_at": availability_updated_at,
+        }
+
+    def _normalize_status_key(self, value: str | None) -> str:
+        if not value:
+            return ""
+        return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+    def _first_text_value(self, payload: Any, *paths: str) -> str | None:
+        for path in paths:
+            value = self._extract_value(payload, path)
+            if value is None or isinstance(value, (list, dict)):
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    def _optional_bool_value(self, payload: Any, *paths: str) -> bool | None:
+        for path in paths:
+            value = self._extract_value(payload, path)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in {"1", "true", "yes", "y", "on", "available", "active", "enabled"}:
+                    return True
+                if text in {"0", "false", "no", "n", "off", "unavailable", "inactive", "disabled"}:
+                    return False
+                continue
+            if isinstance(value, (int, float)):
+                return value != 0
+        return None
+
+    def _optional_float_value(self, payload: Any, *paths: str) -> float | None:
+        for path in paths:
+            value = self._extract_value(payload, path)
+            if value is None or isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                text = value.strip().rstrip("%")
+                if not text:
+                    continue
+                try:
+                    return float(text)
+                except ValueError:
+                    continue
+        return None
+
+    def _optional_int_value(self, payload: Any, *paths: str) -> int | None:
+        value = self._optional_float_value(payload, *paths)
+        if value is None:
+            return None
+        return int(value)
 
     def _extract_group_kind(self, item: dict[str, Any]) -> str | None:
         for field_name in ("group_kind", "group_type", "type", "kind", "mode"):

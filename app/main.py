@@ -39,6 +39,8 @@ from app.models.schemas import (
     NotificationRuleStateResponse,
     NotificationTestRequest,
     NotificationTestResponse,
+    OrchestrationAccountResponse,
+    OrchestrationAccountsEnvelope,
     OrchestrationApiKeyAssignRequest,
     OrchestrationApiKeyResponse,
     OrchestrationApiKeysEnvelope,
@@ -78,7 +80,6 @@ APP_DIR = Path(__file__).resolve().parent
 UI_DIST_DIR = APP_DIR / "static" / "ui"
 UI_INDEX_FILE = UI_DIST_DIR / "index.html"
 APP_TITLE = "Sub2API OpenAI OAuth 编排服务"
-
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -462,6 +463,13 @@ def group_response(candidate: dict[str, object]) -> OrchestrationGroupResponse:
         is_subscription=bool(candidate.get("is_subscription")),
         rotation_supported=bool(candidate.get("rotation_supported")),
         unsupported_reason=str(unsupported_reason) if unsupported_reason else None,
+        account_count=candidate.get("account_count"),
+        active_account_count=candidate.get("active_account_count"),
+        rpm_limit=candidate.get("rpm_limit"),
+        rate_multiplier=candidate.get("rate_multiplier"),
+        daily_limit_usd=candidate.get("daily_limit_usd"),
+        weekly_limit_usd=candidate.get("weekly_limit_usd"),
+        monthly_limit_usd=candidate.get("monthly_limit_usd"),
     )
 
 
@@ -506,6 +514,41 @@ def orchestration_groups(_: AuthSession = Depends(require_api_auth)) -> JSONResp
     )
     items = [group_response(group) for group in groups]
     payload = OrchestrationGroupsEnvelope(items=items, total=len(items))
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/orchestration/accounts")
+def orchestration_accounts(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
+    client = get_sub2api_client()
+    accounts = client.list_openai_accounts()
+    items = [
+        OrchestrationAccountResponse(
+            account_id=account["id"],
+            name=str(account.get("name") or ""),
+            email=account.get("email"),
+            provider=account.get("provider"),
+            platform=account.get("platform"),
+            account_type=account.get("account_type"),
+            status=account.get("status"),
+            availability_status=account.get("availability_status") or "unknown",
+            availability_reason=account.get("availability_reason"),
+            is_available=account.get("is_available"),
+            temporary_unschedulable=bool(account.get("temporary_unschedulable")),
+            rate_limited=bool(account.get("rate_limited")),
+            quota_remaining=account.get("quota_remaining"),
+            last_error=account.get("last_error"),
+            availability_updated_at=account.get("availability_updated_at"),
+            concurrency=account.get("concurrency"),
+            current_concurrency=account.get("current_concurrency"),
+            usage_5h_percent=account.get("usage_5h_percent"),
+            usage_7d_percent=account.get("usage_7d_percent"),
+            usage_updated_at=account.get("usage_updated_at"),
+            group_ids=list(account.get("group_ids") or []),
+            group_names=[str(name) for name in account.get("group_names") or []],
+        )
+        for account in accounts
+    ]
+    payload = OrchestrationAccountsEnvelope(items=items, total=len(items))
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 

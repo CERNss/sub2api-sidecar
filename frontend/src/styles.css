@@ -1874,7 +1874,7 @@ pre {
 }
 
 .graph-node {
-  width: 244px;
+  width: 272px;
   min-height: 82px;
   padding: 12px;
   border: 1px solid #d9e1ec;
@@ -1885,6 +1885,13 @@ pre {
   align-items: center;
   background: #ffffff;
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+}
+
+.graph-node:has(.account-usage-grid),
+.graph-node:has(.group-capacity-grid) {
+  width: 272px;
+  height: 184px;
+  align-content: start;
 }
 
 .graph-node-target {
@@ -1905,6 +1912,11 @@ pre {
 .graph-node-user {
   border-color: #475569;
   background: #f8fafc;
+}
+
+.graph-node-account {
+  border-color: #7c3aed;
+  background: #f5f3ff;
 }
 
 .graph-node-icon {
@@ -1945,6 +1957,156 @@ pre {
   grid-column: 1 / -1;
   width: fit-content;
   margin: 0;
+}
+
+.graph-node-footer {
+  grid-column: 1 / -1;
+  min-width: 0;
+  align-self: end;
+  padding-top: 2px;
+}
+
+.account-usage-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.account-capacity-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  color: #475569;
+  font-size: 11px;
+}
+
+.account-capacity-row span {
+  color: #64748b;
+  font-weight: 700;
+}
+
+.account-capacity-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capacity-value {
+  display: inline-flex;
+  width: fit-content;
+  min-width: 0;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-variant-numeric: tabular-nums;
+}
+
+.capacity-value-normal {
+  color: #047857;
+  background: #d1fae5;
+}
+
+.capacity-value-warning {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.capacity-value-full {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+
+.capacity-value-unknown {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.group-capacity-grid {
+  display: grid;
+  gap: 6px;
+  color: #475569;
+  font-size: 11px;
+}
+
+.account-capacity-row,
+.group-capacity-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 22px;
+}
+
+.group-capacity-row span {
+  color: #64748b;
+  font-weight: 700;
+}
+
+.group-capacity-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-usage-row {
+  display: grid;
+  grid-template-columns: 30px minmax(82px, 1fr) 42px;
+  gap: 8px;
+  align-items: center;
+  color: #475569;
+  font-size: 11px;
+}
+
+.account-usage-window {
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.account-usage-row-recent .account-usage-window {
+  background: #4338ca;
+}
+
+.account-usage-row-weekly .account-usage-window {
+  background: #059669;
+}
+
+.account-usage-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: #111827;
+  font-weight: 700;
+}
+
+.account-usage-meter {
+  height: 7px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.account-usage-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #4338ca;
+}
+
+.account-usage-row-weekly .account-usage-meter span {
+  background: #059669;
 }
 
 .dashboard-grid {
