@@ -23,14 +23,6 @@ class NotificationOperator(str, Enum):
     neq = "neq"
 
 
-class NotificationAggregation(str, Enum):
-    latest = "latest"
-    avg = "avg"
-    max = "max"
-    min = "min"
-    sum = "sum"
-
-
 class WebhookProvider(str, Enum):
     generic = "generic"
     feishu = "feishu"
@@ -38,12 +30,6 @@ class WebhookProvider(str, Enum):
     wecom = "wecom"
     slack = "slack"
     discord = "discord"
-
-
-class RoutingGroupBy(str, Enum):
-    signal = "signal"
-    source = "source"
-    severity = "severity"
 
 
 class NotificationWebhook(BaseModel):
@@ -55,7 +41,6 @@ class NotificationWebhook(BaseModel):
     provider: WebhookProvider = WebhookProvider.generic
     url: str = ""
     secret: str = ""
-    mention_on_failure: bool = Field(default=False, alias="mentionOnFailure")
 
 
 class NotificationRule(BaseModel):
@@ -68,12 +53,8 @@ class NotificationRule(BaseModel):
     severity: NotificationSeverity = NotificationSeverity.warning
     operator: NotificationOperator = NotificationOperator.gte
     threshold: str = ""
-    warning_threshold: str = Field(default="", alias="warningThreshold")
-    recovery_threshold: str = Field(default="", alias="recoveryThreshold")
     threshold_unit: str = Field(default="", alias="thresholdUnit")
-    aggregation: NotificationAggregation = NotificationAggregation.latest
     read_interval_minutes: int = Field(default=10, alias="readIntervalMinutes", ge=1)
-    evaluation_window_minutes: int = Field(default=30, alias="evaluationWindowMinutes", ge=1)
     for_minutes: int = Field(default=5, alias="forMinutes", ge=0)
     cooldown_minutes: int = Field(default=60, alias="cooldownMinutes", ge=0)
     target_webhook_ids: list[str] = Field(default_factory=list, alias="targetWebhookIds")
@@ -81,23 +62,13 @@ class NotificationRule(BaseModel):
     include_snapshot: bool = Field(default=True, alias="includeSnapshot")
 
 
-class NotificationRoutingPolicy(BaseModel):
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    group_by: RoutingGroupBy = Field(default=RoutingGroupBy.severity, alias="groupBy")
-    group_wait_minutes: int = Field(default=2, alias="groupWaitMinutes", ge=0)
-    repeat_interval_minutes: int = Field(default=120, alias="repeatIntervalMinutes", ge=0)
-    quiet_hours_enabled: bool = Field(default=False, alias="quietHoursEnabled")
-    quiet_hours_start: str = Field(default="22:00", alias="quietHoursStart")
-    quiet_hours_end: str = Field(default="08:00", alias="quietHoursEnd")
-
-
 class NotificationSettings(BaseModel):
+    """Persisted shape. `extra='ignore'` tolerates legacy keys when hydrating from storage."""
+
     model_config = ConfigDict(extra="ignore")
 
     webhooks: list[NotificationWebhook] = Field(default_factory=list)
     rules: list[NotificationRule] = Field(default_factory=list)
-    policy: NotificationRoutingPolicy = Field(default_factory=NotificationRoutingPolicy)
 
 
 class NotificationDeliveryStatus(str, Enum):
@@ -146,7 +117,6 @@ class NotificationRuleAction(str, Enum):
     recover = "recover"
     hold = "hold"
     no_data = "no_data"
-    suppress = "suppress"
 
 
 class NotificationRuleState(BaseModel):
@@ -178,3 +148,21 @@ class RuleDecision(BaseModel):
     reason: str = ""
     sample: CollectorSample | None = None
     next_state: NotificationRuleState
+
+
+# Keys that were part of the alert-center model before the `simplify-alert-center`
+# change. They are accepted (silently dropped) when loading legacy persisted state but
+# rejected on inbound API requests so stale clients fail loudly.
+REMOVED_ROOT_KEYS: frozenset[str] = frozenset({"policy"})
+REMOVED_WEBHOOK_KEYS: frozenset[str] = frozenset({"mentionOnFailure", "mention_on_failure"})
+REMOVED_RULE_KEYS: frozenset[str] = frozenset(
+    {
+        "recoveryThreshold",
+        "recovery_threshold",
+        "warningThreshold",
+        "warning_threshold",
+        "aggregation",
+        "evaluationWindowMinutes",
+        "evaluation_window_minutes",
+    }
+)

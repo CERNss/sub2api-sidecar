@@ -8,7 +8,6 @@ from typing import Any
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-import pytest
 import requests
 
 import app.main as main
@@ -46,6 +45,40 @@ def _message(severity: NotificationSeverity = NotificationSeverity.warning) -> N
     )
 
 
+def _webhook_body(**overrides: Any) -> dict[str, Any]:
+    body = {
+        "id": "ops",
+        "name": "Ops",
+        "enabled": True,
+        "provider": "generic",
+        "url": "https://hooks.example.com/incoming",
+        "secret": "",
+    }
+    body.update(overrides)
+    return body
+
+
+def _rule_body(**overrides: Any) -> dict[str, Any]:
+    body = {
+        "id": "rule-account-invalid",
+        "name": "Account invalid",
+        "enabled": True,
+        "signalKey": "account_invalid",
+        "severity": "critical",
+        "operator": "gte",
+        "threshold": "1",
+        "thresholdUnit": "accounts",
+        "readIntervalMinutes": 5,
+        "forMinutes": 5,
+        "cooldownMinutes": 30,
+        "targetWebhookIds": ["ops"],
+        "includeResolved": True,
+        "includeSnapshot": True,
+    }
+    body.update(overrides)
+    return body
+
+
 def test_notification_config_requires_auth(client) -> None:
     assert client.get("/notifications/config").status_code == 401
     assert client.put("/notifications/config", json={}).status_code == 401
@@ -59,55 +92,16 @@ def test_notification_config_returns_default_when_unset(client) -> None:
     payload = response.json()
     assert len(payload["webhooks"]) == 1
     assert payload["webhooks"][0]["enabled"] is False
-    assert len(payload["rules"]) >= 4
-    rule_signals = {rule["signalKey"] for rule in payload["rules"]}
-    assert "account_invalid" in rule_signals
+    assert payload["rules"] == []
+    assert "policy" not in payload
+    assert "mentionOnFailure" not in payload["webhooks"][0]
 
 
 def test_notification_config_round_trip_redacts_secret(client) -> None:
     login(client)
     body = {
-        "webhooks": [
-            {
-                "id": "ops",
-                "name": "Ops",
-                "enabled": True,
-                "provider": "generic",
-                "url": "https://hooks.example.com/incoming",
-                "secret": "shh",
-                "mentionOnFailure": False,
-            }
-        ],
-        "rules": [
-            {
-                "id": "rule-account-invalid",
-                "name": "Account invalid",
-                "enabled": True,
-                "signalKey": "account_invalid",
-                "severity": "critical",
-                "operator": "gte",
-                "threshold": "1",
-                "warningThreshold": "1",
-                "recoveryThreshold": "",
-                "thresholdUnit": "accounts",
-                "aggregation": "sum",
-                "readIntervalMinutes": 5,
-                "evaluationWindowMinutes": 10,
-                "forMinutes": 5,
-                "cooldownMinutes": 30,
-                "targetWebhookIds": ["ops"],
-                "includeResolved": True,
-                "includeSnapshot": True,
-            }
-        ],
-        "policy": {
-            "groupBy": "severity",
-            "groupWaitMinutes": 1,
-            "repeatIntervalMinutes": 60,
-            "quietHoursEnabled": False,
-            "quietHoursStart": "22:00",
-            "quietHoursEnd": "08:00",
-        },
+        "webhooks": [_webhook_body(secret="shh")],
+        "rules": [_rule_body()],
     }
     put_response = client.put("/notifications/config", json=body)
     assert put_response.status_code == 200
@@ -119,51 +113,90 @@ def test_notification_config_round_trip_redacts_secret(client) -> None:
     assert payload["webhooks"][0]["url"] == "https://hooks.example.com/incoming"
     assert payload["webhooks"][0]["secret"] == "[redacted]"
     assert payload["rules"][0]["targetWebhookIds"] == ["ops"]
+    assert "recoveryThreshold" not in payload["rules"][0]
+    assert "evaluationWindowMinutes" not in payload["rules"][0]
+    assert "aggregation" not in payload["rules"][0]
+    assert "policy" not in payload
 
 
 def test_notification_config_rejects_unknown_target_id(client) -> None:
     login(client)
     body = {
-        "webhooks": [
-            {"id": "ops", "name": "Ops", "enabled": True, "provider": "generic", "url": "https://x", "secret": "", "mentionOnFailure": False}
-        ],
-        "rules": [
-            {
-                "id": "r1",
-                "name": "r1",
-                "enabled": True,
-                "signalKey": "account_invalid",
-                "severity": "warning",
-                "operator": "gte",
-                "threshold": "1",
-                "warningThreshold": "1",
-                "recoveryThreshold": "",
-                "thresholdUnit": "",
-                "aggregation": "latest",
-                "readIntervalMinutes": 5,
-                "evaluationWindowMinutes": 10,
-                "forMinutes": 0,
-                "cooldownMinutes": 0,
-                "targetWebhookIds": ["does-not-exist"],
-                "includeResolved": True,
-                "includeSnapshot": False,
-            }
-        ],
-        "policy": {
-            "groupBy": "severity",
-            "groupWaitMinutes": 1,
-            "repeatIntervalMinutes": 60,
-            "quietHoursEnabled": False,
-            "quietHoursStart": "22:00",
-            "quietHoursEnd": "08:00",
-        },
+        "webhooks": [_webhook_body()],
+        "rules": [_rule_body(targetWebhookIds=["does-not-exist"])],
     }
     response = client.put("/notifications/config", json=body)
     assert response.status_code == 422
     assert "unknown receiver ids" in response.json()["detail"]
 
 
-def test_notification_legacy_receiver_only_synthesizes_rules(client) -> None:
+def test_notification_config_rejects_legacy_policy_block(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body()],
+        "rules": [_rule_body()],
+        "policy": {"groupBy": "severity"},
+    }
+    response = client.put("/notifications/config", json=body)
+    assert response.status_code == 422
+    assert "policy" in response.json()["detail"]
+
+
+def test_notification_config_rejects_legacy_rule_fields(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body()],
+        "rules": [_rule_body(recoveryThreshold="0")],
+    }
+    response = client.put("/notifications/config", json=body)
+    assert response.status_code == 422
+    assert "recoveryThreshold" in response.json()["detail"]
+
+
+def test_notification_config_rejects_legacy_webhook_fields(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body(mentionOnFailure=True)],
+        "rules": [_rule_body()],
+    }
+    response = client.put("/notifications/config", json=body)
+    assert response.status_code == 422
+    assert "mentionOnFailure" in response.json()["detail"]
+
+
+def test_notification_config_tolerates_legacy_persisted_keys_on_read(client) -> None:
+    """A document saved before the simplify-alert-center change still loads;
+    removed keys are dropped silently."""
+    login(client)
+    legacy_raw = {
+        "webhooks": [_webhook_body(secret="kept", mentionOnFailure=True)],
+        "rules": [
+            _rule_body(
+                recoveryThreshold="0",
+                warningThreshold="1",
+                aggregation="sum",
+                evaluationWindowMinutes=10,
+            )
+        ],
+        "policy": {"groupBy": "severity", "quietHoursEnabled": True},
+    }
+    # Use model_validate (which respects extra="ignore") to simulate hydrating from store.
+    settings = NotificationSettings.model_validate(legacy_raw)
+    main.get_flow_store().save_notification_settings(settings)
+
+    response = client.get("/notifications/config")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "policy" not in payload
+    assert "mentionOnFailure" not in payload["webhooks"][0]
+    assert "recoveryThreshold" not in payload["rules"][0]
+    assert "aggregation" not in payload["rules"][0]
+    assert payload["webhooks"][0]["secret"] == "[redacted]"
+
+
+def test_notification_legacy_receiver_only_returns_empty_rules(client) -> None:
+    """Previously the system synthesised default rules for legacy receiver-only docs.
+    After simplify-alert-center we return the saved shape without injecting rules."""
     login(client)
     legacy = NotificationSettings(
         webhooks=[
@@ -183,9 +216,7 @@ def test_notification_legacy_receiver_only_synthesizes_rules(client) -> None:
     payload = response.json()
     assert len(payload["webhooks"]) == 1
     assert payload["webhooks"][0]["id"] == "legacy"
-    assert len(payload["rules"]) >= 4
-    for rule in payload["rules"]:
-        assert rule["targetWebhookIds"] == ["legacy"]
+    assert payload["rules"] == []
 
 
 def test_notification_test_endpoint_rejects_unknown_rule(client) -> None:
@@ -199,31 +230,8 @@ def test_notification_test_endpoint_rejects_no_sendable_receiver(client) -> None
     login(client)
     settings = NotificationSettings.model_validate(
         {
-            "webhooks": [
-                {"id": "off", "name": "Off", "enabled": False, "provider": "generic", "url": "https://x", "secret": "", "mentionOnFailure": False}
-            ],
-            "rules": [
-                {
-                    "id": "r1",
-                    "name": "r1",
-                    "enabled": True,
-                    "signalKey": "account_invalid",
-                    "severity": "warning",
-                    "operator": "gte",
-                    "threshold": "1",
-                    "warningThreshold": "1",
-                    "recoveryThreshold": "",
-                    "thresholdUnit": "",
-                    "aggregation": "latest",
-                    "readIntervalMinutes": 5,
-                    "evaluationWindowMinutes": 10,
-                    "forMinutes": 0,
-                    "cooldownMinutes": 0,
-                    "targetWebhookIds": ["off"],
-                    "includeResolved": True,
-                    "includeSnapshot": False,
-                }
-            ],
+            "webhooks": [_webhook_body(id="off", enabled=False)],
+            "rules": [_rule_body(id="r1", name="r1", targetWebhookIds=["off"])],
         }
     )
     main.get_flow_store().save_notification_settings(settings)
@@ -237,31 +245,8 @@ def test_notification_test_endpoint_delivers_and_audits(client) -> None:
     login(client)
     settings = NotificationSettings.model_validate(
         {
-            "webhooks": [
-                {"id": "ops", "name": "Ops", "enabled": True, "provider": "generic", "url": "https://hooks.example.com/incoming", "secret": "shh", "mentionOnFailure": False}
-            ],
-            "rules": [
-                {
-                    "id": "r1",
-                    "name": "Account invalid",
-                    "enabled": True,
-                    "signalKey": "account_invalid",
-                    "severity": "critical",
-                    "operator": "gte",
-                    "threshold": "1",
-                    "warningThreshold": "1",
-                    "recoveryThreshold": "",
-                    "thresholdUnit": "",
-                    "aggregation": "sum",
-                    "readIntervalMinutes": 5,
-                    "evaluationWindowMinutes": 10,
-                    "forMinutes": 0,
-                    "cooldownMinutes": 0,
-                    "targetWebhookIds": ["ops"],
-                    "includeResolved": True,
-                    "includeSnapshot": True,
-                }
-            ],
+            "webhooks": [_webhook_body(secret="shh")],
+            "rules": [_rule_body(id="r1", name="Account invalid")],
         }
     )
     main.get_flow_store().save_notification_settings(settings)

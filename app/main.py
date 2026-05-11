@@ -62,6 +62,7 @@ from app.services.notification import (
     NotificationService,
     NotificationTestError,
     redact_settings,
+    reject_removed_keys,
 )
 from app.services.notification_delivery import NotificationDeliveryService
 from app.services.notification_scheduler import NotificationScheduler
@@ -863,10 +864,13 @@ def notifications_config_get(_: AuthSession = Depends(require_api_auth)) -> JSON
 
 
 @app.put("/notifications/config")
-def notifications_config_put(
-    payload: NotificationSettings,
+async def notifications_config_put(
+    request: Request,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
+    raw = await request.json()
+    reject_removed_keys(raw)
+    payload = NotificationSettings.model_validate(raw)
     settings = get_notification_service().save_config(payload)
     return JSONResponse(status_code=200, content=redact_settings(settings))
 

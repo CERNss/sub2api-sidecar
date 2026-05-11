@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
-from typing import Iterable
+from datetime import datetime, timedelta
 
 from app.models.notification import (
     CollectorSample,
     NotificationOperator,
-    NotificationRoutingPolicy,
     NotificationRule,
     NotificationRuleAction,
     NotificationRuleState,
@@ -37,36 +35,12 @@ def _parse_threshold(raw: str) -> float | None:
         return None
 
 
-def parse_clock(text: str, fallback: time) -> time:
-    parts = (text or "").split(":")
-    try:
-        hour = int(parts[0])
-        minute = int(parts[1]) if len(parts) > 1 else 0
-        return time(hour=max(0, min(23, hour)), minute=max(0, min(59, minute)))
-    except (TypeError, ValueError, IndexError):
-        return fallback
-
-
-def is_quiet_hours(policy: NotificationRoutingPolicy, now: datetime) -> bool:
-    if not policy.quiet_hours_enabled:
-        return False
-    start = parse_clock(policy.quiet_hours_start, time(22, 0))
-    end = parse_clock(policy.quiet_hours_end, time(8, 0))
-    current = now.time().replace(second=0, microsecond=0)
-    if start == end:
-        return False
-    if start < end:
-        return start <= current < end
-    return current >= start or current < end
-
-
 def evaluate_rule(
     rule: NotificationRule,
     sample: CollectorSample | None,
     prior_state: NotificationRuleState | None,
     now: datetime,
     *,
-    in_quiet_hours: bool = False,
     no_data_reason: str | None = None,
 ) -> RuleDecision:
     state = _clone_state(prior_state, rule.id)
@@ -85,15 +59,10 @@ def evaluate_rule(
     state.last_error = None
     state.last_value = sample.value
     threshold = _parse_threshold(rule.threshold)
-    recovery_threshold = _parse_threshold(rule.recovery_threshold)
-
     breaching = threshold is not None and _compare(rule.operator, sample.value, threshold)
 
     if state.is_firing:
-        recovered = recovery_threshold is not None and _compare(
-            _inverse_operator(rule.operator), sample.value, recovery_threshold
-        )
-        if recovered:
+        if not breaching:
             state.is_firing = False
             state.breach_started_at = None
             action = (
@@ -103,14 +72,7 @@ def evaluate_rule(
             )
             return RuleDecision(
                 action=action,
-                reason=f"value={sample.value} crossed recovery threshold={recovery_threshold}",
-                sample=sample,
-                next_state=state,
-            )
-        if not breaching:
-            return RuleDecision(
-                action=NotificationRuleAction.hold,
-                reason=f"value={sample.value} not breaching but no recovery threshold met",
+                reason=f"value={sample.value} no longer breaching threshold={threshold}",
                 sample=sample,
                 next_state=state,
             )
@@ -123,14 +85,6 @@ def evaluate_rule(
                     sample=sample,
                     next_state=state,
                 )
-        if in_quiet_hours:
-            state.last_alert_at = now
-            return RuleDecision(
-                action=NotificationRuleAction.suppress,
-                reason="quiet hours suppress firing alert",
-                sample=sample,
-                next_state=state,
-            )
         state.last_alert_at = now
         return RuleDecision(
             action=NotificationRuleAction.fire,
@@ -161,14 +115,6 @@ def evaluate_rule(
         )
 
     state.is_firing = True
-    if in_quiet_hours:
-        state.last_alert_at = now
-        return RuleDecision(
-            action=NotificationRuleAction.suppress,
-            reason="quiet hours suppress initial fire",
-            sample=sample,
-            next_state=state,
-        )
     state.last_alert_at = now
     return RuleDecision(
         action=NotificationRuleAction.fire,
@@ -176,18 +122,6 @@ def evaluate_rule(
         sample=sample,
         next_state=state,
     )
-
-
-def _inverse_operator(operator: NotificationOperator) -> NotificationOperator:
-    inverse = {
-        NotificationOperator.gt: NotificationOperator.lte,
-        NotificationOperator.gte: NotificationOperator.lt,
-        NotificationOperator.lt: NotificationOperator.gte,
-        NotificationOperator.lte: NotificationOperator.gt,
-        NotificationOperator.eq: NotificationOperator.neq,
-        NotificationOperator.neq: NotificationOperator.eq,
-    }
-    return inverse[operator]
 
 
 def _clone_state(state: NotificationRuleState | None, rule_id: str) -> NotificationRuleState:
@@ -211,5 +145,4 @@ def select_sendable_receivers(
     return sendable
 
 
-# Late import for typing — keeps a one-way dependency from collectors/evaluator into models
 from app.models.notification import NotificationWebhook  # noqa: E402

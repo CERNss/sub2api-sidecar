@@ -153,32 +153,41 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **GIVEN** the operator is using the dashboard view
 - **WHEN** the operator inspects historical or active flows
 - **THEN** the dashboard does not mutate flow records, retry failed flows, or complete OAuth unless the operator uses the existing paste-back completion form
-## Requirements (continued)
 
 ### Requirement: Persist webhook alert configuration server-side
-The system SHALL expose authenticated APIs that read and write the full webhook alert center configuration document to durable local storage.
+The system SHALL expose authenticated APIs that read and write the webhook alert center configuration document to durable local storage. The configuration document contains only `webhooks` and `rules`; legacy `policy` blocks and per-field properties removed by this change are tolerated on read and rejected on write.
 
 #### Scenario: Operator reads notification configuration
 - **GIVEN** the operator has a valid admin session
 - **WHEN** the operator requests `GET /notifications/config`
-- **THEN** the system returns the saved `webhooks`, `rules`, and `policy` document
+- **THEN** the system returns the saved `webhooks` and `rules`
 - **THEN** the response redacts every receiver `secret` value
-- **THEN** if no configuration has been saved yet, the system returns a sensible default with at least one disabled placeholder receiver
+- **THEN** if no configuration has been saved yet, the system returns a configuration containing one disabled placeholder receiver and an empty `rules` array
+- **THEN** the response does not include a `policy` block
+- **THEN** each rule omits `recoveryThreshold`, `warningThreshold`, `aggregation`, and `evaluationWindowMinutes`
+- **THEN** each webhook omits `mentionOnFailure`
 
 #### Scenario: Operator saves notification configuration
 - **GIVEN** the operator has a valid admin session
 - **WHEN** the operator submits a configuration document to `PUT /notifications/config`
 - **THEN** the system validates that every rule `targetWebhookIds` value references an existing receiver id
-- **THEN** the system validates severity, operator, aggregation, and provider enum values
+- **THEN** the system validates severity, operator, and provider enum values
 - **THEN** the system rejects the request with a client error response when validation fails
 - **THEN** the system persists the validated document so subsequent `GET /notifications/config` returns the same shape
 
-#### Scenario: Legacy receiver-only configuration is tolerated
-- **GIVEN** an existing saved document contains receivers but no rules or routing policy
+#### Scenario: Request body containing removed fields is rejected
+- **GIVEN** the operator has a valid admin session
+- **WHEN** the operator submits a configuration document containing any of `policy`, `rule.recoveryThreshold`, `rule.warningThreshold`, `rule.aggregation`, `rule.evaluationWindowMinutes`, or `webhook.mentionOnFailure`
+- **THEN** the system rejects the request with a `422` client error response
+- **THEN** the error message names the unsupported field
+- **THEN** the system does not persist the document
+
+#### Scenario: Legacy persisted document is tolerated on read
+- **GIVEN** an existing saved document contains the now-removed `policy` block or any removed rule/webhook fields
 - **WHEN** the system loads the document
-- **THEN** the system synthesizes default rules routed to the first receiver
-- **THEN** the system synthesizes a default routing policy
-- **THEN** the synthesized configuration is returned to the caller without losing receivers
+- **THEN** the system drops the removed keys silently
+- **THEN** the system returns the surviving `webhooks` and `rules`
+- **THEN** the system synthesizes default rules only when no rules were saved
 
 #### Scenario: Unauthenticated callers cannot read or write configuration
 - **GIVEN** a caller has no valid admin session, access-key header, or bearer token
@@ -251,13 +260,14 @@ The system SHALL let operators trigger a real test delivery for a saved rule and
 - **THEN** the system returns recent delivery audit rows ordered by creation time descending
 - **THEN** each row includes provider, receiver id, rule id, severity, status, error, attempt index, trigger type, and timestamp
 - **THEN** the response respects an optional `limit` query parameter
+
 ### Requirement: Configure webhook alert receivers and routing
 The React UI SHALL let an authenticated operator define webhook receivers and route operational alert rules to one or more receivers.
 
 #### Scenario: Operator manages webhook receivers
 - **GIVEN** the operator opens the notification settings view
 - **WHEN** the operator adds or edits a webhook receiver
-- **THEN** the UI captures receiver name, provider type (generic, feishu, dingtalk, wecom, slack, or discord), URL, optional secret, enabled state, and failure mention behavior
+- **THEN** the UI captures receiver name, provider type (generic, feishu, dingtalk, wecom, slack, or discord), URL, optional secret, and enabled state
 - **THEN** the operator can select which receiver is active for editing
 - **THEN** the operator can delete a receiver only when at least one receiver remains
 
@@ -265,6 +275,7 @@ The React UI SHALL let an authenticated operator define webhook receivers and ro
 - **GIVEN** at least one webhook receiver exists
 - **AND** an alert rule is selected
 - **WHEN** the operator selects target webhooks for the rule
+- **THEN** the UI renders the available receivers as a vertical checkbox list
 - **THEN** the rule stores the selected receiver ids
 - **THEN** the UI summary shows how many rules target each receiver
 
@@ -276,45 +287,46 @@ The React UI SHALL let an authenticated operator define webhook receivers and ro
 - **THEN** the UI reports a human-readable error instead of pretending delivery succeeded
 
 ### Requirement: Configure alert signal thresholds and evaluation cadence
-The React UI SHALL let operators configure which operational signals are evaluated, how often they are read, how values are evaluated, and when notifications repeat or recover.
+The React UI SHALL let operators configure which operational signals are evaluated, how often they are read, and when notifications repeat or recover. The rule editor uses a minimum set of fields appropriate for discrete operational signals.
 
 #### Scenario: Operator creates an alert rule from supported information classes
 - **GIVEN** the operator opens the notification settings view
 - **WHEN** the operator creates or edits an alert rule
 - **THEN** the UI offers signal choices for platform API key health/quota/expiry/subscription/usage, user balance/API key/subscription usage, admin dashboard/usage/payment/channel/ops anomalies, and AI upstream account health/rate-limit/quota/auth/capacity
-- **THEN** each signal choice carries a default source, unit, threshold, operator, aggregation, severity, read interval, and evaluation window
+- **THEN** each signal choice carries a default source, unit, threshold, operator, severity, and read interval
 
 #### Scenario: Operator configures threshold evaluation
 - **GIVEN** an alert rule is selected
 - **WHEN** the operator edits threshold settings
-- **THEN** the UI captures rule name, enabled state, severity, aggregation, comparison operator, trigger threshold, optional recovery threshold, read interval minutes, evaluation window minutes, sustained-for minutes, and repeat/cooldown minutes
+- **THEN** the UI captures rule name, enabled state, severity, comparison operator, trigger threshold, read interval minutes, sustained-for minutes, and cooldown minutes
+- **THEN** the UI does not expose recovery threshold, warning threshold, aggregation, or evaluation window inputs
 - **THEN** the UI allows the rule to send recovery notifications
 - **THEN** the UI allows the rule to include a data snapshot in the outbound payload
 
-#### Scenario: Operator configures routing noise controls
-- **GIVEN** the operator opens the notification settings view
-- **WHEN** the operator edits routing controls
-- **THEN** the UI captures grouping by severity, signal, or source
-- **THEN** the UI captures group-wait minutes and default repeat interval minutes
-- **THEN** the UI captures quiet-hours enablement and start/end times
-
 #### Scenario: Notification configuration persists locally
-- **GIVEN** the operator edits webhook receivers, rules, or routing policy
+- **GIVEN** the operator edits webhook receivers or rules
 - **WHEN** the operator saves the settings
 - **THEN** the current configuration is persisted in browser local storage
 - **THEN** re-opening the dashboard restores the saved configuration when it is valid
-- **THEN** older locally saved receiver-only configuration is tolerated by generating default rules routed to the first receiver
+- **THEN** older locally saved configurations containing removed fields are tolerated by silently dropping those fields
 
+#### Scenario: Empty rule list shows onboarding state
+- **GIVEN** the operator opens the notification settings view
+- **AND** no rules have been saved
+- **WHEN** the UI renders the rule editor area
+- **THEN** the UI shows an empty-state card prompting the operator to add their first rule
+- **THEN** the UI does not pre-populate any rules
+- **THEN** the UI still renders the placeholder webhook so the rule editor has a deliverable target
 
 ### Requirement: Periodic rule evaluation
-The system SHALL periodically evaluate enabled notification rules at the configured `readIntervalMinutes` cadence.
+The system SHALL periodically evaluate enabled notification rules at the configured `readIntervalMinutes` cadence. Each tick reads the latest sample from the collector and evaluates the trigger condition against the most recent value; there is no separate evaluation window.
 
 #### Scenario: Scheduler evaluates each enabled rule on its configured cadence
 - **GIVEN** the service is running with notifications configured
 - **AND** a rule is enabled with `readIntervalMinutes=5`
 - **WHEN** five minutes elapse since the rule's last evaluation
 - **THEN** the system runs the collector for that rule's `signalKey`
-- **THEN** the system runs the evaluator with the collector sample, the rule, and the prior rule state
+- **THEN** the system runs the evaluator with the collector's latest sample, the rule, and the prior rule state
 - **THEN** the system persists the updated rule state regardless of decision
 
 #### Scenario: Disabled rules are skipped
@@ -332,7 +344,7 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **THEN** the system does not update `breach_started_at` or `last_alert_at`
 
 ### Requirement: Sustained breach, recovery, and cooldown semantics
-The system SHALL enforce sustained-for, recovery, and cooldown rules so alerts do not fire on transient blips, do not flap, and do not spam.
+The system SHALL enforce sustained-for and cooldown rules so alerts do not fire on transient blips and do not spam. Recovery is detected by the inverse of the trigger comparison applied to the latest sample; there is no separate recovery threshold.
 
 #### Scenario: Single-evaluation breach does not fire when sustained-for is configured
 - **GIVEN** a rule with `forMinutes=5`
@@ -359,9 +371,9 @@ The system SHALL enforce sustained-for, recovery, and cooldown rules so alerts d
 - **THEN** the rule state remains firing
 
 #### Scenario: Recovery transition fires a recovery delivery
-- **GIVEN** a rule with `recoveryThreshold` set and `includeResolved=true`
+- **GIVEN** a rule with `includeResolved=true`
 - **AND** prior state shows `is_firing=true`
-- **WHEN** the evaluator sees a sample that crosses the recovery threshold
+- **WHEN** the evaluator sees a sample that no longer crosses the trigger threshold (the inverse comparison holds)
 - **THEN** the decision is `recover`
 - **THEN** the system updates `is_firing=false` and clears `breach_started_at`
 - **THEN** the system dispatches a recovery message via the same receivers
@@ -369,26 +381,9 @@ The system SHALL enforce sustained-for, recovery, and cooldown rules so alerts d
 #### Scenario: Recovery without includeResolved updates state without sending
 - **GIVEN** a rule with `includeResolved=false`
 - **AND** prior state shows `is_firing=true`
-- **WHEN** the evaluator sees a sample that crosses the recovery threshold
+- **WHEN** the evaluator sees a sample that no longer crosses the trigger threshold
 - **THEN** the system updates `is_firing=false`
 - **THEN** the system does not dispatch any delivery
-
-### Requirement: Quiet hours suppress outbound but not state
-The system SHALL skip delivery during the configured quiet-hours window while still updating rule state.
-
-#### Scenario: Firing rule during quiet hours is suppressed
-- **GIVEN** the routing policy has quiet hours enabled with `quietHoursStart=22:00` and `quietHoursEnd=08:00`
-- **AND** the current local time is `02:00`
-- **WHEN** a rule would otherwise fire
-- **THEN** the decision is `suppress`
-- **THEN** the system writes a `skipped` audit row tagged `trigger='rule'` for each target receiver
-- **THEN** the system does not perform any outbound HTTP request
-- **THEN** the rule state still records the breach and `last_alert_at` so resumption is correct after the window
-
-#### Scenario: Recovering rule outside quiet hours sends normally
-- **GIVEN** quiet hours are disabled
-- **WHEN** a rule recovers
-- **THEN** the system delivers the recovery message through the rule's enabled receivers
 
 ### Requirement: On-demand rule evaluation
 The system SHALL expose an authenticated API for evaluating a single rule once and reporting the decision and outbound deliveries.
@@ -408,3 +403,4 @@ The system SHALL expose an authenticated API for evaluating a single rule once a
 - **WHEN** the operator calls `POST /notifications/evaluate` with an id that does not match any saved rule
 - **THEN** the system returns a client error response
 - **THEN** the system does not perform any collector or delivery work
+

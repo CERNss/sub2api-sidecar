@@ -7,10 +7,12 @@ from typing import Any
 
 from app.errors import ProvisioningError
 from app.models.notification import (
+    REMOVED_ROOT_KEYS,
+    REMOVED_RULE_KEYS,
+    REMOVED_WEBHOOK_KEYS,
     CollectorSample,
     NotificationDeliveryTrigger,
     NotificationMessage,
-    NotificationRoutingPolicy,
     NotificationRule,
     NotificationRuleAction,
     NotificationRuleState,
@@ -27,7 +29,6 @@ from app.services.notification_delivery import (
 )
 from app.services.notification_evaluator import (
     evaluate_rule,
-    is_quiet_hours,
     select_sendable_receivers,
 )
 from app.stores.sqlite import SQLiteFlowStore
@@ -35,16 +36,6 @@ from app.stores.sqlite import SQLiteFlowStore
 logger = logging.getLogger(__name__)
 
 DEFAULT_RECEIVER_ID = "ops-default"
-DEFAULT_RULE_SIGNAL_KEYS: tuple[str, ...] = (
-    "platform_key_quota",
-    "platform_key_expiry",
-    "user_balance_low",
-    "admin_usage_anomaly",
-    "account_invalid",
-    "account_rate_limited",
-    "account_quota_low",
-    "account_reauth_needed",
-)
 
 
 class NotificationConfigError(ProvisioningError):
@@ -77,7 +68,7 @@ class NotificationService:
         stored = self.store.get_notification_settings()
         if stored is None:
             return _default_settings()
-        return _hydrate_legacy(stored)
+        return stored
 
     def save_config(self, settings: NotificationSettings) -> NotificationSettings:
         self._validate(settings)
@@ -139,13 +130,11 @@ class NotificationService:
         moment = now or datetime.now(timezone.utc)
         sample, reason = self.collectors.collect(rule)
         prior_state = self.store.get_notification_rule_state(rule.id)
-        in_quiet = is_quiet_hours(config.policy, moment)
         decision = evaluate_rule(
             rule,
             sample,
             prior_state,
             moment,
-            in_quiet_hours=in_quiet,
             no_data_reason=reason,
         )
         if persist:
@@ -164,36 +153,8 @@ class NotificationService:
                 rule, trigger, self._summary_for(decision, rule), sample=sample
             )
             deliveries = [self.delivery.deliver(receiver, message) for receiver in sendable]
-        elif decision.action == NotificationRuleAction.suppress:
-            self._record_suppressed(rule, decision, config)
 
         return RuleEvaluationOutcome(rule=rule, decision=decision, deliveries=deliveries)
-
-    def _record_suppressed(
-        self,
-        rule: NotificationRule,
-        decision: RuleDecision,
-        config: NotificationSettings,
-    ) -> None:
-        from app.models.notification import (
-            NotificationDeliveryRecord,
-            NotificationDeliveryStatus,
-        )
-
-        receivers_by_id = {receiver.id: receiver for receiver in config.webhooks}
-        targets = select_sendable_receivers(rule, receivers_by_id)
-        for receiver in targets:
-            record = NotificationDeliveryRecord(
-                receiver_id=receiver.id,
-                rule_id=rule.id,
-                provider=receiver.provider,
-                severity=rule.severity,
-                trigger=NotificationDeliveryTrigger.rule,
-                status=NotificationDeliveryStatus.skipped,
-                attempt_index=0,
-                error_message="quiet hours suppressed delivery",
-            )
-            self.store.save_notification_delivery(record)
 
     def _summary_for(self, decision: RuleDecision, rule: NotificationRule) -> str:
         if decision.action == NotificationRuleAction.recover:
@@ -240,8 +201,36 @@ class NotificationService:
                 )
 
 
-def _default_policy() -> NotificationRoutingPolicy:
-    return NotificationRoutingPolicy()
+def reject_removed_keys(payload: Any) -> None:
+    """Raise NotificationConfigError if the inbound payload contains any field that was
+    removed by the `simplify-alert-center` change. Persisted documents may still carry
+    those keys (we drop them on load); but inbound API writes must come from a
+    compatible client.
+    """
+    if not isinstance(payload, dict):
+        raise NotificationConfigError("Notification settings payload must be an object")
+    bad_root = [key for key in payload if key in REMOVED_ROOT_KEYS]
+    if bad_root:
+        raise NotificationConfigError(
+            f"Unsupported field(s): {', '.join(sorted(bad_root))}. "
+            "Upgrade the dashboard client; the alert center no longer accepts this field."
+        )
+    for webhook in payload.get("webhooks", []) or []:
+        if not isinstance(webhook, dict):
+            continue
+        bad = [key for key in webhook if key in REMOVED_WEBHOOK_KEYS]
+        if bad:
+            raise NotificationConfigError(
+                f"Unsupported webhook field(s): {', '.join(sorted(bad))}."
+            )
+    for rule in payload.get("rules", []) or []:
+        if not isinstance(rule, dict):
+            continue
+        bad = [key for key in rule if key in REMOVED_RULE_KEYS]
+        if bad:
+            raise NotificationConfigError(
+                f"Unsupported rule field(s): {', '.join(sorted(bad))}."
+            )
 
 
 def _default_receiver() -> NotificationWebhook:
@@ -252,41 +241,11 @@ def _default_receiver() -> NotificationWebhook:
         provider=WebhookProvider.generic,
         url="",
         secret="",
-        mention_on_failure=True,
-    )
-
-
-def _default_rule(signal_key: str, target_id: str) -> NotificationRule:
-    return NotificationRule(
-        id=f"rule-{signal_key}",
-        name=signal_key,
-        enabled=True,
-        signal_key=signal_key,
-        severity=NotificationSeverity.warning,
-        target_webhook_ids=[target_id],
     )
 
 
 def _default_settings() -> NotificationSettings:
-    receiver = _default_receiver()
-    return NotificationSettings(
-        webhooks=[receiver],
-        rules=[_default_rule(key, receiver.id) for key in DEFAULT_RULE_SIGNAL_KEYS],
-        policy=_default_policy(),
-    )
-
-
-def _hydrate_legacy(settings: NotificationSettings) -> NotificationSettings:
-    if settings.rules:
-        return settings
-    if not settings.webhooks:
-        return _default_settings()
-    fallback_target = settings.webhooks[0].id
-    return NotificationSettings(
-        webhooks=settings.webhooks,
-        rules=[_default_rule(key, fallback_target) for key in DEFAULT_RULE_SIGNAL_KEYS],
-        policy=settings.policy or _default_policy(),
-    )
+    return NotificationSettings(webhooks=[_default_receiver()], rules=[])
 
 
 def redact_settings(settings: NotificationSettings) -> dict[str, Any]:
@@ -295,3 +254,13 @@ def redact_settings(settings: NotificationSettings) -> dict[str, Any]:
         if receiver.get("secret"):
             receiver["secret"] = "[redacted]"
     return payload
+
+
+__all__ = [
+    "NotificationConfigError",
+    "NotificationService",
+    "NotificationTestError",
+    "RuleEvaluationOutcome",
+    "redact_settings",
+    "reject_removed_keys",
+]
