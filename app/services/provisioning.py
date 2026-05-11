@@ -72,7 +72,6 @@ class ProvisioningService:
             oauth = self.sub2api_client.generate_openai_auth_url(
                 email=email,
                 state=state,
-                redirect_uri=self.openai_oauth_redirect_uri,
             )
             self._record_event(
                 flow_id=flow_id,
@@ -156,7 +155,6 @@ class ProvisioningService:
             exchange = self.sub2api_client.exchange_openai_code(
                 code=code,
                 state=state,
-                redirect_uri=self.openai_oauth_redirect_uri,
             )
             self._record_event(
                 flow_id=flow.flow_id,

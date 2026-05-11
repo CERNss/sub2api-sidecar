@@ -280,13 +280,12 @@ class Sub2APIClient:
             raise Sub2APIError("Sub2API account usage stats response is not an object")
         return body
 
-    def generate_openai_auth_url(self, email: str, state: str, redirect_uri: str) -> dict[str, Any]:
+    def generate_openai_auth_url(self, email: str, state: str) -> dict[str, Any]:
         payload = {
             "provider": "openai",
             "name": email,
             "email": email,
             "state": state,
-            "redirect_uri": redirect_uri,
         }
         data = self._request_candidates(
             "POST", self.GENERATE_OPENAI_AUTH_URL_PATHS, json=payload
@@ -309,11 +308,10 @@ class Sub2APIClient:
             )
         return {"url": auth_url, "raw": data}
 
-    def exchange_openai_code(self, code: str, state: str, redirect_uri: str) -> dict[str, Any]:
+    def exchange_openai_code(self, code: str, state: str) -> dict[str, Any]:
         payload = {
             "code": code,
             "state": state,
-            "redirect_uri": redirect_uri,
             "provider": "openai",
         }
         data = self._request_candidates(

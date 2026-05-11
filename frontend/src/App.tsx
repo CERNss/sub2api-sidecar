@@ -2913,7 +2913,7 @@ function ProvisionForm({
     }
 
     setBusyAction("start");
-    setStatus({ message: "正在创建分组、用户并生成 OAuth 链接", tone: "info" });
+    setStatus({ message: "正在创建分组并生成 OAuth 链接", tone: "info" });
 
     try {
       const payload = await requestJson<ProvisionStartPayload>("/provision/start", {

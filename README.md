@@ -9,9 +9,8 @@
 - `POST /provision/start`
   - 校验 email
   - 创建专属分组
-  - 创建用户
-  - 将用户绑定到专属分组
   - 生成 OpenAI OAuth 登录链接
+  - 不向 Sub2API OAuth 接口传入回调地址；上游使用固定回调配置
   - 将 flow 上下文持久化到 SQLite
 - `POST /provision/oauth/complete`
   - 接收用户粘贴回来的 localhost callback URL
@@ -86,10 +85,10 @@
 ### OAuth 预配流程
 
 1. 用户输入 email，调用 `POST /provision/start`
-2. 服务创建分组、用户、用户绑组，并返回 OAuth 登录链接
+2. 服务创建分组，并返回 OAuth 登录链接
    - 分组创建默认携带 `platform=openai`
 3. 用户手动点击 OAuth 登录链接
-4. OAuth 提供方把浏览器跳到你配置的 `openai.oauth_redirect_uri`，通常是某个 localhost 地址
+4. OAuth 提供方把浏览器跳到上游固定回调地址，通常是某个 localhost 地址
 5. 用户把浏览器地址栏中的完整 callback URL 复制回来
 6. 前端或调用方将该 URL 提交给 `POST /provision/oauth/complete`
 7. 服务解析 `code/state`，继续完成 OAuth 账号创建和账号绑组
@@ -461,6 +460,8 @@ curl -X POST 'http://127.0.0.1:8000/provision/start' \
   "oauth_redirect_uri": "http://localhost:3000/callback"
 }
 ```
+
+其中 `oauth_redirect_uri` 只用于本地页面展示和人工核对；Sub2API 的 OAuth URL 生成与 code exchange 请求不再接收这个字段。
 
 ### 2. 粘贴 callback URL 完成 OAuth
 

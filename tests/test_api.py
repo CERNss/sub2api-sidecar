@@ -339,7 +339,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
     if method == "PUT" and path == "/api/admin/users/u-1/groups":
         return FakeResponse(200, {"success": True})
     if method == "POST" and path == "/api/admin/openai/oauth/url":
-        assert json["redirect_uri"] == EXPECTED_REDIRECT_URI
+        assert "redirect_uri" not in json
         return FakeResponse(
             200,
             {
@@ -350,7 +350,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
             },
         )
     if method == "POST" and path == "/api/admin/openai/oauth/exchange":
-        assert json["redirect_uri"] == EXPECTED_REDIRECT_URI
+        assert "redirect_uri" not in json
         return FakeResponse(
             200,
             {
@@ -406,6 +406,64 @@ def test_sub2api_client_updates_single_api_key_group_with_admin_endpoint() -> No
             "path": "/api/v1/admin/api-keys/key-1",
             "json": {"group_id": 123},
         }
+    ]
+
+
+def test_sub2api_openai_oauth_requests_use_upstream_fixed_callback() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        if urlparse(url).path == "/api/v1/admin/openai/oauth/url":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"oauth_url": "https://auth.example.com/authorize?state=state-1"},
+                },
+            )
+        if urlparse(url).path == "/api/v1/admin/openai/oauth/exchange":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"access_token": "token-123"},
+                },
+            )
+        return FakeResponse(404, {"detail": "not found"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.generate_openai_auth_url(email="user@example.com", state="state-1")
+        client.exchange_openai_code(code="code-1", state="state-1")
+
+    assert calls == [
+        {
+            "method": "POST",
+            "path": "/api/v1/admin/openai/oauth/url",
+            "json": {
+                "provider": "openai",
+                "name": "user@example.com",
+                "email": "user@example.com",
+                "state": "state-1",
+            },
+        },
+        {
+            "method": "POST",
+            "path": "/api/v1/admin/openai/oauth/exchange",
+            "json": {
+                "code": "code-1",
+                "state": "state-1",
+                "provider": "openai",
+            },
+        },
     ]
 
 

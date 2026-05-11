@@ -13,10 +13,10 @@ The system SHALL expose a `POST /provision/start` endpoint that accepts an exter
 - **THEN** the dedicated group creation request includes the configured OpenAI platform value
 - **THEN** the system does not create a Sub2API user for the submitted email
 - **THEN** the system does not bind a Sub2API user to the dedicated group
-- **THEN** the system generates an OpenAI OAuth login URL through the Sub2API admin API using the configured OAuth provider redirect URI
+- **THEN** the system generates an OpenAI OAuth login URL through the Sub2API admin API without sending a redirect URI because the upstream callback is fixed
 - **THEN** the system stores a flow record containing `flow_id`, `email`, `group_id`, `state`, and `status=pending_oauth`
 - **THEN** the flow record does not require `user_id`
-- **THEN** the response includes `success=true`, `flow_id`, `email`, `group_id`, `account_name`, `oauth_url`, and the configured OAuth provider redirect URI
+- **THEN** the response includes `success=true`, `flow_id`, `email`, `group_id`, `account_name`, `oauth_url`, and the configured local callback hint URI
 - **THEN** the response does not require `user_id`
 - **THEN** `account_name` equals the submitted email value
 
@@ -40,7 +40,7 @@ The system SHALL complete OpenAI OAuth from the stored flow context by accepting
 - **WHEN** `POST /provision/oauth/complete` is called with a pasted localhost callback URL containing a valid `code` and `state`
 - **THEN** the system parses `code` and `state` from the pasted callback URL
 - **THEN** the system loads the matching flow by `state`
-- **THEN** the system exchanges the OAuth code through the Sub2API admin API using the configured OAuth provider redirect URI
+- **THEN** the system exchanges the OAuth code through the Sub2API admin API without sending a redirect URI because the upstream callback is fixed
 - **THEN** the system creates an OpenAI OAuth account through the Sub2API admin API
 - **THEN** the account creation request uses `flow.email` as the account `name`
 - **THEN** the account creation request uses the configured OpenAI account provider, platform, and `oauth` type
@@ -131,7 +131,7 @@ The system SHALL centralize Sub2API admin API calls behind a client abstraction,
 - **THEN** the client reads the Sub2API base URL from config-backed settings and the admin API key from environment-backed settings
 - **THEN** the client reads the configured OpenAI group/account defaults and temporary-unschedulable rules from config-backed settings
 - **THEN** the client sends admin requests with `x-api-key`
-- **THEN** the OAuth login URL generation and OAuth code exchange both use the configured OAuth provider redirect URI
+- **THEN** the OAuth login URL generation and OAuth code exchange do not send a redirect URI to Sub2API
 - **THEN** the flow store reads the SQLite database path from configuration
 
 #### Scenario: SQLite persistence survives new store instances
