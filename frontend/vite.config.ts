@@ -25,8 +25,7 @@ export default defineConfig({
       "/auth": apiTarget,
       "/orchestration": apiTarget,
       "/provision": apiTarget,
-      "/rotation": apiTarget,
-      "/ui/config": apiTarget
+      "/rotation": apiTarget
     }
   }
 });

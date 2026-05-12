@@ -16,28 +16,33 @@ from app.config import Sub2APIProvisioningDefaults, get_settings
 from app.models.flow import AssignmentMode
 from app.models.rotation import RotationPoolGroup, RotationPoolKind, UserGroupAssignment
 
-EXPECTED_REDIRECT_URI = "http://localhost:1455/callback"
 AUTH_PAYLOAD = {"username": "admin", "password": "test-admin-pass"}
 EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES = [
     {
-        "error_code": "529",
+        "error_code": 529,
         "duration_minutes": 60,
         "keywords": ["overloaded", "too many"],
         "description": "服务过载 - 暂停 60 分钟",
     },
     {
-        "error_code": "429",
+        "error_code": 429,
         "duration_minutes": 10,
         "keywords": ["rate limit", "too many requests"],
         "description": "触发限流 - 暂停 10 分钟",
     },
     {
-        "error_code": "503",
+        "error_code": 503,
         "duration_minutes": 30,
         "keywords": ["unavailable", "maintenance"],
         "description": "服务不可用 - 暂停 30 分钟",
     },
 ]
+EXPECTED_MODEL_WHITELIST_MAPPING = {
+    "gpt-5.3-codex": "gpt-5.3-codex",
+    "gpt-5.4": "gpt-5.4",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+    "gpt-5.5": "gpt-5.5",
+}
 
 
 class FakeResponse:
@@ -196,7 +201,7 @@ class FakeRotationSub2API:
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
         if method == "GET" and path == "/api/v1/admin/accounts":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.accounts})
-        if method == "POST" and path in {"/api/v1/admin/groups", "/api/admin/groups"}:
+        if method == "POST" and path in {"/admin/groups", "/api/v1/admin/groups", "/api/admin/groups"}:
             self.create_group_calls += 1
             return FakeResponse(
                 200,
@@ -216,24 +221,32 @@ class FakeRotationSub2API:
                 }
             )
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
-        if method == "POST" and path in {"/api/v1/admin/openai/oauth/url", "/api/admin/openai/oauth/url"}:
+        if method == "POST" and path in {
+            "/api/v1/admin/openai/generate-auth-url",
+            "/api/v1/admin/openai/oauth/url",
+            "/api/admin/openai/oauth/url",
+        }:
+            upstream_state = f"upstream-{json['state']}"
             return FakeResponse(
                 200,
                 {
                     "code": 0,
                     "message": "success",
                     "data": {
-                        "oauth_url": (
+                        "auth_url": (
                             "https://auth.example.com/authorize"
-                            f"?client_id=sub2api-demo&state={json['state']}"
-                        )
+                            f"?client_id=sub2api-demo&state={upstream_state}"
+                        ),
+                        "session_id": f"session-{json['state']}",
                     },
                 },
             )
         if method == "POST" and path in {
+            "/api/v1/admin/openai/exchange-code",
             "/api/v1/admin/openai/oauth/exchange",
             "/api/admin/openai/oauth/exchange",
         }:
+            assert json["session_id"] == f"session-{json['state'].removeprefix('upstream-')}"
             return FakeResponse(
                 200,
                 {
@@ -246,13 +259,29 @@ class FakeRotationSub2API:
                     },
                 },
             )
-        if method == "POST" and path in {"/api/v1/admin/openai/accounts", "/api/admin/openai/accounts"}:
+        if method == "POST" and path in {
+            "/api/v1/admin/accounts",
+            "/api/v1/admin/openai/accounts",
+            "/api/admin/openai/accounts",
+        }:
+            assert json["platform"] == "openai"
+            assert json["type"] == "oauth"
+            assert json["credentials"]["access_token"] == "token-123"
+            assert json["credentials"]["refresh_token"] == "refresh-123"
+            assert json["credentials"]["temp_unschedulable_enabled"] is True
+            assert (
+                json["credentials"]["temp_unschedulable_rules"]
+                == EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+            )
+            assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
+            assert json["group_ids"]
+            assert json["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
             return FakeResponse(
                 200,
                 {
                     "code": 0,
                     "message": "success",
-                    "data": {"account_id": "oa-1", "name": json["name"], "email": json["email"]},
+                    "data": {"account_id": "oa-1", "name": json["name"]},
                 },
             )
         if method == "POST" and path in {
@@ -351,26 +380,47 @@ def clear_caches() -> None:
 
 def fake_sub2api_request(self, method: str, url: str, json=None, params=None, timeout=None):
     path = urlparse(url).path
-    if method == "POST" and path == "/api/admin/groups":
+    if method == "POST" and path == "/api/v1/admin/groups":
         assert json["platform"] == "openai"
+        assert json["is_exclusive"] is True
+        assert json["subscription_type"] == "standard"
+        assert json["rpm_limit"] == 0
+        assert json["daily_limit_usd"] is None
+        assert json["messages_dispatch_model_config"] == {
+            "opus_mapped_model": "gpt-5.4",
+            "sonnet_mapped_model": "gpt-5.3-codex",
+            "haiku_mapped_model": "gpt-5.4-mini",
+            "exact_model_mappings": {},
+        }
+        assert json["require_oauth_only"] is False
         return FakeResponse(200, {"id": "g-1", "name": json["name"]})
     if method == "POST" and path == "/api/admin/users":
         return FakeResponse(200, {"id": "u-1", "email": json["email"]})
     if method == "PUT" and path == "/api/admin/users/u-1/groups":
         return FakeResponse(200, {"success": True})
-    if method == "POST" and path == "/api/admin/openai/oauth/url":
+    if method == "POST" and path in {
+        "/api/v1/admin/openai/generate-auth-url",
+        "/api/admin/openai/oauth/url",
+    }:
         assert "redirect_uri" not in json
+        upstream_state = f"upstream-{json['state']}"
         return FakeResponse(
             200,
             {
-                "oauth_url": (
+                "auth_url": (
                     "https://auth.example.com/authorize"
-                    f"?client_id=sub2api-demo&state={json['state']}"
-                )
+                    "?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
+                    f"&client_id=sub2api-demo&state={upstream_state}"
+                ),
+                "session_id": f"session-{json['state']}",
             },
         )
-    if method == "POST" and path == "/api/admin/openai/oauth/exchange":
+    if method == "POST" and path in {
+        "/api/v1/admin/openai/exchange-code",
+        "/api/admin/openai/oauth/exchange",
+    }:
         assert "redirect_uri" not in json
+        assert json["session_id"] == f"session-{json['state'].removeprefix('upstream-')}"
         return FakeResponse(
             200,
             {
@@ -379,22 +429,27 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
                 "provider_user_id": "provider-1",
             },
         )
-    if method == "POST" and path == "/api/admin/openai/accounts":
-        assert json["provider"] == "openai"
+    if method == "POST" and path in {"/api/v1/admin/accounts", "/api/admin/openai/accounts"}:
         assert json["platform"] == "openai"
         assert json["type"] == "oauth"
-        assert json["email"] == json["name"]
-        assert json["group_id"] == "g-1"
+        assert "email" not in json
+        assert "group_id" not in json
         assert json["group_ids"] == ["g-1"]
-        assert json["wsmode"] == "context_pool"
-        assert json["temporary_unschedulable"] is True
-        assert json["temporary_unschedulable_rules"] == EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+        assert json["credentials"]["access_token"] == "token-123"
+        assert json["credentials"]["refresh_token"] == "refresh-123"
+        assert json["credentials"]["temp_unschedulable_enabled"] is True
+        assert (
+            json["credentials"]["temp_unschedulable_rules"]
+            == EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+        )
+        assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
+        assert json["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
+        assert json["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
         return FakeResponse(
             200,
             {
                 "account_id": "oa-1",
                 "name": json["name"],
-                "email": json["email"],
             },
         )
     if method == "POST" and path == "/api/admin/groups/g-1/accounts":
@@ -429,21 +484,84 @@ def test_sub2api_client_updates_single_api_key_group_with_admin_endpoint() -> No
     ]
 
 
-def test_sub2api_openai_oauth_requests_use_upstream_fixed_callback() -> None:
+def test_sub2api_client_create_group_uses_upstream_group_form_payload() -> None:
     calls: list[dict[str, object]] = []
 
     def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
         calls.append({"method": method, "path": urlparse(url).path, "json": json})
-        if urlparse(url).path == "/api/v1/admin/openai/oauth/url":
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": 123}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.create_group("provision-user-example-com")
+
+    payload = calls[0]["json"]
+    assert result["id"] == 123
+    assert calls[0]["path"] == "/api/v1/admin/groups"
+    assert payload["name"] == "provision-user-example-com"
+    assert payload["platform"] == "openai"
+    assert payload["is_exclusive"] is True
+    assert payload["subscription_type"] == "standard"
+    assert payload["daily_limit_usd"] is None
+    assert payload["weekly_limit_usd"] is None
+    assert payload["monthly_limit_usd"] is None
+    assert payload["require_oauth_only"] is False
+    assert payload["messages_dispatch_model_config"] == {
+        "opus_mapped_model": "gpt-5.4",
+        "sonnet_mapped_model": "gpt-5.3-codex",
+        "haiku_mapped_model": "gpt-5.4-mini",
+        "exact_model_mappings": {},
+    }
+
+
+def test_sub2api_client_create_group_falls_back_to_legacy_endpoint() -> None:
+    calls: list[str] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        calls.append(path)
+        if path == "/api/v1/admin/groups":
+            return FakeResponse(404, {"detail": "not found"})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": "g-1"}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.create_group("provision-user-example-com")
+
+    assert result["id"] == "g-1"
+    assert calls == ["/api/v1/admin/groups", "/api/admin/groups"]
+
+
+def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        if urlparse(url).path == "/api/v1/admin/openai/generate-auth-url":
             return FakeResponse(
                 200,
                 {
                     "code": 0,
                     "message": "success",
-                    "data": {"oauth_url": "https://auth.example.com/authorize?state=state-1"},
+                    "data": {
+                        "auth_url": "https://auth.example.com/authorize?state=upstream-state",
+                        "session_id": "session-1",
+                    },
                 },
             )
-        if urlparse(url).path == "/api/v1/admin/openai/oauth/exchange":
+        if urlparse(url).path == "/api/v1/admin/openai/exchange-code":
+            assert json["session_id"] == "session-1"
+            assert json["state"] == "upstream-state"
             return FakeResponse(
                 200,
                 {
@@ -461,27 +579,26 @@ def test_sub2api_openai_oauth_requests_use_upstream_fixed_callback() -> None:
     )
 
     with patch.object(requests.Session, "request", new=fake_request):
-        client.generate_openai_auth_url(email="user@example.com", state="state-1")
-        client.exchange_openai_code(code="code-1", state="state-1")
+        oauth = client.generate_openai_auth_url(email="user@example.com", state="state-1")
+        client.exchange_openai_code(
+            code="code-1",
+            state=oauth["state"],
+            session_id=oauth["session_id"],
+        )
 
     assert calls == [
         {
             "method": "POST",
-            "path": "/api/v1/admin/openai/oauth/url",
-            "json": {
-                "provider": "openai",
-                "name": "user@example.com",
-                "email": "user@example.com",
-                "state": "state-1",
-            },
+            "path": "/api/v1/admin/openai/generate-auth-url",
+            "json": {"state": "state-1"},
         },
         {
             "method": "POST",
-            "path": "/api/v1/admin/openai/oauth/exchange",
+            "path": "/api/v1/admin/openai/exchange-code",
             "json": {
                 "code": "code-1",
-                "state": "state-1",
-                "provider": "openai",
+                "state": "upstream-state",
+                "session_id": "session-1",
             },
         },
     ]
@@ -521,23 +638,6 @@ def test_probe_endpoints_return_ok_without_auth(client, path: str) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-
-
-def test_ui_config_exposes_login_context_and_current_user(client) -> None:
-    response = client.get("/ui/config")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["app_title"] == "Sub2API OpenAI OAuth 编排服务"
-    assert payload["auth_username"] == "admin"
-    assert payload["oauth_redirect_uri"] == EXPECTED_REDIRECT_URI
-    assert payload["current_user"] is None
-
-    login(client)
-    response = client.get("/ui/config")
-
-    assert response.status_code == 200
-    assert response.json()["current_user"] == "admin"
 
 
 def test_login_returns_access_key_and_sets_cookie(client) -> None:
@@ -584,7 +684,7 @@ def test_provision_start_persists_flow_in_sqlite_with_cookie_auth(client) -> Non
     assert payload["account_name"] == "user@example.com"
     assert payload.get("user_id") is None
     assert payload["group_id"] == "g-1"
-    assert payload["oauth_redirect_uri"] == EXPECTED_REDIRECT_URI
+    assert payload["oauth_redirect_uri"] == "http://localhost:1455/auth/callback"
 
     stored_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
     assert stored_flow is not None
@@ -601,6 +701,26 @@ def test_provision_start_uses_openai_group_defaults(client) -> None:
 
     assert response.status_code == 200
     assert response.json()["group_id"] == "g-1"
+
+
+def test_provision_start_uses_email_as_dedicated_group_name(client) -> None:
+    create_group_payloads: list[dict[str, object]] = []
+    email = "testqtest@outlook.my"
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        if method == "POST" and urlparse(url).path == "/api/v1/admin/groups":
+            create_group_payloads.append(json)
+        return fake_sub2api_request(self, method, url, json=json, params=params, timeout=timeout)
+
+    login(client)
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.post("/provision/start", json={"email": email})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account_name"] == email
+    assert create_group_payloads[0]["name"] == email
 
 
 @pytest.mark.parametrize(

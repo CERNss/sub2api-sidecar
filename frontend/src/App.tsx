@@ -66,13 +66,6 @@ import {
   type ReactFlowInstance
 } from "@xyflow/react";
 
-type UiConfig = {
-  app_title: string;
-  auth_username: string;
-  oauth_redirect_uri: string;
-  current_user: string | null;
-};
-
 type ApiPayload = Record<string, unknown>;
 
 type StatusTone = "idle" | "info" | "success" | "error";
@@ -235,6 +228,14 @@ type GraphNodeTone = "user" | "active" | "source" | "target" | "account" | "neut
 type GraphNodeKind = "key" | "user" | "group" | "account";
 type GraphNodeLane = "main" | "special";
 type GraphEdgeRelation = "key-user" | "user-group" | "group-account" | "key-route-group";
+type GraphEntitySelection = {
+  kind: GraphNodeKind;
+  userId?: unknown;
+  keyId?: unknown;
+  groupId?: unknown;
+  accountId?: unknown;
+  relatedGroupIds?: unknown[];
+};
 
 type OrchestrationGraphNodeData = Record<string, unknown> & {
   kind: GraphNodeKind;
@@ -384,6 +385,9 @@ type AutoRotationConfigPayload = ApiPayload & {
 };
 
 const emptyStatus: StatusState = { message: "", tone: "idle" };
+const APP_TITLE = "Sub2API OpenAI OAuth 编排服务";
+const DEFAULT_AUTH_USERNAME = "admin";
+const FIXED_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback";
 const graphCompactNodeSize = { width: 272, height: 82 };
 const graphTallNodeSize = { width: 272, height: 184 };
 const graphLayerOrder: Record<GraphNodeKind, number> = { key: 0, user: 1, group: 2, account: 3 };
@@ -567,13 +571,28 @@ function filterGraphByGroups(
       .map((node) => node.id)
   );
   const visibleNodeIds = new Set(seedVisibleNodeIds);
+  const mayIncludeNodeViaKeyUserEdge = (nodeId: string): boolean => {
+    const node = nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) {
+      return false;
+    }
+    const groupIds = groupIdsForGraphNode(node);
+    return (
+      groupIds.some((groupId) => selectedGroupIdSet.has(groupId)) ||
+      (includesUngrouped && groupIds.length === 0)
+    );
+  };
   edges.forEach((edge) => {
     if (edge.data?.relation !== "key-user") {
       return;
     }
     if (seedVisibleNodeIds.has(edge.source) || seedVisibleNodeIds.has(edge.target)) {
-      visibleNodeIds.add(edge.source);
-      visibleNodeIds.add(edge.target);
+      if (mayIncludeNodeViaKeyUserEdge(edge.source)) {
+        visibleNodeIds.add(edge.source);
+      }
+      if (mayIncludeNodeViaKeyUserEdge(edge.target)) {
+        visibleNodeIds.add(edge.target);
+      }
     }
   });
   const filteredNodes = nodes.filter((node) => visibleNodeIds.has(node.id));
@@ -1162,7 +1181,7 @@ function OrchestrationFlowCanvas({
 }: {
   data: OrchestrationGraphData;
   refreshSignal: number;
-  onSelect: (userId?: unknown, keyId?: unknown) => void;
+  onSelect: (selection: GraphEntitySelection) => void;
 }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<OrchestrationGraphNode>(data.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<OrchestrationGraphEdge>(data.edges);
@@ -1200,7 +1219,16 @@ function OrchestrationFlowCanvas({
       edges={edges}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
-      onNodeClick={(_, node) => onSelect(node.data.userId, node.data.keyId)}
+      onNodeClick={(_, node) =>
+        onSelect({
+          kind: node.data.kind,
+          userId: node.data.userId,
+          keyId: node.data.keyId,
+          groupId: node.data.groupId,
+          accountId: node.data.accountId,
+          relatedGroupIds: node.data.relatedGroupIds
+        })
+      }
       onInit={setFlowInstance}
       minZoom={0.28}
       maxZoom={1.25}
@@ -1215,65 +1243,18 @@ function OrchestrationFlowCanvas({
 }
 
 function App() {
-  const [config, setConfig] = useState<UiConfig | null>(null);
-  const [loadError, setLoadError] = useState("");
-
   useEffect(() => {
-    let active = true;
-
-    fetch("/ui/config", { credentials: "same-origin" })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("无法读取 UI 配置");
-        }
-        return response.json() as Promise<UiConfig>;
-      })
-      .then((payload) => {
-        if (active) {
-          setConfig(payload);
-          document.title = payload.app_title;
-        }
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setLoadError(getErrorMessage(error, "无法读取 UI 配置"));
-        }
-      });
-
-    return () => {
-      active = false;
-    };
+    document.title = APP_TITLE;
   }, []);
 
-  if (loadError) {
-    return (
-      <AppChrome title="Sub2API OpenAI OAuth 编排服务">
-        <div className="empty-state" role="alert">
-          {loadError}
-        </div>
-      </AppChrome>
-    );
-  }
-
-  if (!config) {
-    return (
-      <AppChrome title="Sub2API OpenAI OAuth 编排服务">
-        <div className="empty-state">
-          <LoaderCircle className="spin" size={20} aria-hidden="true" />
-          正在载入
-        </div>
-      </AppChrome>
-    );
+  if (window.location.pathname === "/login") {
+    return <LoginView />;
   }
 
   return (
-    config.current_user ? (
-      <AppChrome title={config.app_title}>
-        <OperatorWorkspace config={config} />
-      </AppChrome>
-    ) : (
-      <LoginView config={config} />
-    )
+    <AppChrome title={APP_TITLE}>
+      <OperatorWorkspace />
+    </AppChrome>
   );
 }
 
@@ -1293,8 +1274,8 @@ function AppChrome({ title, children }: { title: string; children: ReactNode }) 
   );
 }
 
-function LoginView({ config }: { config: UiConfig }) {
-  const [username, setUsername] = useState(config.auth_username);
+function LoginView() {
+  const [username, setUsername] = useState(DEFAULT_AUTH_USERNAME);
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -1392,7 +1373,7 @@ function LoginView({ config }: { config: UiConfig }) {
   );
 }
 
-function OperatorWorkspace({ config }: { config: UiConfig }) {
+function OperatorWorkspace() {
   const [activeView, setActiveView] = useState<OperatorView>(() => viewFromPath(window.location.pathname));
   const [activeOrchestrationTab, setActiveOrchestrationTab] = useState<OrchestrationTab>(() =>
     orchestrationTabFromPath(window.location.pathname)
@@ -1451,7 +1432,7 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
       <section className="panel operator-toolbar">
         <div>
           <p className="eyebrow">当前用户</p>
-          <h2>{config.current_user}</h2>
+          <h2>{DEFAULT_AUTH_USERNAME}</h2>
         </div>
         <div className="toolbar-actions">
           <div className="segmented" role="tablist" aria-label="编排视图">
@@ -1495,7 +1476,6 @@ function OperatorWorkspace({ config }: { config: UiConfig }) {
         <NotificationPanel />
       ) : activeView === "provision" ? (
         <ProvisionForm
-          config={config}
           onAuthExpired={handleAuthExpired}
           onFlowChanged={() => undefined}
         />
@@ -1558,6 +1538,12 @@ function ExistingOrchestrationView({
     () => (mode === "replace_group" ? groups.filter((group) => group.rotation_supported) : groups),
     [groups, mode]
   );
+  const selectedKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
+  const userOptions = useMemo(() => users.map(buildUserOption), [users]);
+  const selectedKeys = useMemo(
+    () => apiKeys.filter((key) => selectedKeySet.has(idValue(key.key_id))),
+    [apiKeys, selectedKeySet]
+  );
   const selectedUserDirectGroup = useMemo(() => {
     const currentGroupId = selectedUser?.current_group_id ?? null;
     const currentGroupName = selectedUser?.current_group_name ?? null;
@@ -1584,10 +1570,38 @@ function ExistingOrchestrationView({
       monthly_limit_usd: null
     };
   }, [groups, selectedUser]);
-  const sourceGroups = useMemo(
-    () => (selectedUserDirectGroup ? [selectedUserDirectGroup] : []),
-    [selectedUserDirectGroup]
-  );
+  const selectedKeyPrimaryGroup = useMemo(() => {
+    if (mode !== "api_key" || selectedKeys.length === 0) {
+      return null;
+    }
+    const key = selectedKeys[0];
+    const keyGroupValue = idValue(key.group_id);
+    if (!keyGroupValue) {
+      return null;
+    }
+    return groups.find((group) => idValue(group.group_id) === keyGroupValue) ?? {
+      group_id: key.group_id,
+      name: key.group_name?.trim() || keyGroupValue,
+      group_kind: null,
+      platform: null,
+      status: null,
+      is_exclusive: true,
+      is_subscription: false,
+      rotation_supported: true,
+      unsupported_reason: null,
+      account_count: null,
+      active_account_count: null,
+      rpm_limit: null,
+      rate_multiplier: null,
+      daily_limit_usd: null,
+      weekly_limit_usd: null,
+      monthly_limit_usd: null
+    };
+  }, [groups, mode, selectedKeys]);
+  const sourceGroups = useMemo(() => {
+    const primaryGroup = mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup;
+    return primaryGroup ? [primaryGroup] : [];
+  }, [mode, selectedKeyPrimaryGroup, selectedUserDirectGroup]);
   const sourceGroupOptions = useMemo(() => sourceGroups.map((group) => buildGroupOption(group)), [sourceGroups]);
   const targetGroupOptions = useMemo(
     () =>
@@ -1610,12 +1624,6 @@ function ExistingOrchestrationView({
     [groups]
   );
   const graphGroupFilterSet = useMemo(() => new Set(graphGroupFilterIds), [graphGroupFilterIds]);
-  const selectedKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
-  const userOptions = useMemo(() => users.map(buildUserOption), [users]);
-  const selectedKeys = useMemo(
-    () => apiKeys.filter((key) => selectedKeySet.has(idValue(key.key_id))),
-    [apiKeys, selectedKeySet]
-  );
   const toggleKeySelection = (keyId: string) => {
     if (!keyId) return;
     setSelectedKeyIds((current) =>
@@ -2128,6 +2136,13 @@ function ExistingOrchestrationView({
   }, [selectedUserId, selectedUserDirectGroup?.group_id]);
 
   useEffect(() => {
+    if (mode !== "api_key") {
+      return;
+    }
+    setSourceGroupId(idValue(selectedKeyPrimaryGroup?.group_id));
+  }, [mode, selectedKeyPrimaryGroup?.group_id]);
+
+  useEffect(() => {
     setTargetGroupId((current) =>
       current && targetGroups.some((group) => idValue(group.group_id) === current) ? current : ""
     );
@@ -2137,14 +2152,35 @@ function ExistingOrchestrationView({
     setGraphRefreshTick((value) => value + 1);
   }
 
-  function selectGraphEntity(userId?: unknown, keyId?: unknown) {
-    const nextUserId = idValue(userId);
+  function selectGraphEntity(selection: GraphEntitySelection) {
+    const nextUserId = idValue(selection.userId);
+    const nextKeyId = idValue(selection.keyId);
+    const nextGroupId = idValue(selection.groupId);
+
     if (nextUserId && nextUserId !== selectedUserId) {
       setSelectedUserId(nextUserId);
     }
-    const nextKeyId = idValue(keyId);
-    if (nextKeyId) {
+    if (selection.kind === "key" && nextKeyId) {
+      setMode("api_key");
       setSelectedKeyIds((current) => (current.includes(nextKeyId) ? current : [...current, nextKeyId]));
+      return;
+    }
+    if (selection.kind === "user") {
+      setMode("replace_group");
+      setSelectedKeyIds([]);
+      return;
+    }
+    if (selection.kind === "group" && nextGroupId) {
+      if (sourceGroupId !== nextGroupId) {
+        setTargetGroupId(nextGroupId);
+      }
+      return;
+    }
+    if (selection.kind === "account") {
+      const firstGroupId = (selection.relatedGroupIds ?? []).map(idValue).find(Boolean);
+      if (firstGroupId && sourceGroupId !== firstGroupId) {
+        setTargetGroupId(firstGroupId);
+      }
     }
   }
 
@@ -2165,6 +2201,18 @@ function ExistingOrchestrationView({
     }
     if (mode === "api_key" && selectedKeys.length === 0) {
       setStatus({ message: "请至少选择一个 API Key。", tone: "error" });
+      return;
+    }
+    if (mode === "replace_group" && sourceGroupId === targetGroupId) {
+      setStatus({ message: "目标分组不能和当前分组一致。", tone: "error" });
+      return;
+    }
+    if (
+      mode === "api_key" &&
+      selectedKeys.length > 0 &&
+      selectedKeys.every((key) => idValue(key.group_id) === targetGroupId)
+    ) {
+      setStatus({ message: "所选 Key 已经在目标分组。", tone: "error" });
       return;
     }
 
@@ -2351,7 +2399,14 @@ function ExistingOrchestrationView({
                 className="manual-mode-switch"
                 block
                 value={mode}
-                onChange={(value) => setMode(value as OrchestrationMode)}
+                onChange={(value) => {
+                  const nextMode = value as OrchestrationMode;
+                  setMode(nextMode);
+                  if (nextMode === "replace_group") {
+                    setSelectedKeyIds([]);
+                    setSourceGroupId(idValue(selectedUserDirectGroup?.group_id));
+                  }
+                }}
                 options={[
                   { label: "整体替换", value: "replace_group", icon: <BranchesOutlined /> },
                   { label: "单 Key", value: "api_key", icon: <KeyOutlined /> }
@@ -3326,11 +3381,9 @@ function summarizeReasons(items?: RotationExecutionPayload[]): RunReasonSummary[
 }
 
 function ProvisionForm({
-  config,
   onAuthExpired,
   onFlowChanged
 }: {
-  config: UiConfig;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onFlowChanged: () => void;
 }) {
@@ -3345,7 +3398,8 @@ function ProvisionForm({
   const redirectUri =
     typeof startPayload?.oauth_redirect_uri === "string"
       ? startPayload.oauth_redirect_uri
-      : config.oauth_redirect_uri;
+      : FIXED_OAUTH_REDIRECT_URI;
+  const callbackPlaceholder = `${redirectUri}${redirectUri.includes("?") ? "&" : "?"}code=...&state=...`;
   const visiblePayload = useMemo(() => completePayload ?? startPayload, [completePayload, startPayload]);
 
   async function startProvision(event: FormEvent<HTMLFormElement>) {
@@ -3409,7 +3463,7 @@ function ProvisionForm({
 
   return (
     <div className="workspace">
-      <section className="panel form-panel">
+      <section className="panel form-panel provision-form-panel">
         <form className="form-stack" onSubmit={startProvision}>
           <label className="field">
             <span>Email</span>
@@ -3443,17 +3497,12 @@ function ProvisionForm({
           </div>
         </form>
 
-        <div className="hint-box">
-          <span>Redirect URI</span>
-          <code>{redirectUri}</code>
-        </div>
-
-        <form className="form-stack" onSubmit={completeProvision}>
+        <form className="form-stack provision-callback-form" onSubmit={completeProvision}>
           <label className="field">
             <span>Paste Callback URL</span>
             <textarea
               value={callbackUrl}
-              placeholder="http://localhost:3000/callback?code=...&state=..."
+              placeholder={callbackPlaceholder}
               onChange={(event) => setCallbackUrl(event.target.value)}
             />
           </label>
@@ -3489,11 +3538,9 @@ function ProvisionForm({
 }
 
 function DashboardView({
-  config,
   refreshSignal,
   onAuthExpired
 }: {
-  config: UiConfig;
   refreshSignal: number;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
@@ -3685,7 +3732,7 @@ function DashboardView({
             正在加载详情
           </div>
         ) : detail ? (
-          <FlowDetail detail={detail} defaultRedirectUri={config.oauth_redirect_uri} />
+          <FlowDetail detail={detail} defaultRedirectUri={FIXED_OAUTH_REDIRECT_URI} />
         ) : (
           <div className="empty-state">选择一条编排记录查看详情</div>
         )}

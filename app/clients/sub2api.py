@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 from typing import Any, Iterable
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
@@ -65,16 +65,19 @@ class Sub2APIClient:
     USER_API_KEYS_PATHS = ("/api/v1/admin/users/{user_id}/api-keys",)
     USAGE_STATS_PATHS = ("/api/v1/admin/usage/stats",)
     GENERATE_OPENAI_AUTH_URL_PATHS = (
+        "/api/v1/admin/openai/generate-auth-url",
         "/api/v1/admin/openai/oauth/url",
         "/api/admin/openai/oauth/url",
         "/admin/openai/oauth/url",
     )
     EXCHANGE_OPENAI_CODE_PATHS = (
+        "/api/v1/admin/openai/exchange-code",
         "/api/v1/admin/openai/oauth/exchange",
         "/api/admin/openai/oauth/exchange",
         "/admin/openai/oauth/exchange",
     )
     CREATE_OPENAI_ACCOUNT_PATHS = (
+        "/api/v1/admin/accounts",
         "/api/v1/admin/openai/accounts",
         "/api/admin/openai/accounts",
         "/admin/openai/accounts",
@@ -106,7 +109,18 @@ class Sub2APIClient:
 
     def create_group(self, name: str) -> dict[str, Any]:
         payload = self._build_group_payload(name)
-        data = self._request_candidates("POST", self.CREATE_GROUP_PATHS, json=payload)
+        try:
+            data = self._request_candidates("POST", self.CREATE_GROUP_PATHS, json=payload)
+        except Sub2APIError as exc:
+            existing = self._find_group_by_name(name)
+            if existing is None or not self._may_reuse_existing_group(exc):
+                raise
+            logger.warning("Reusing existing Sub2API group after create failure: %s", name)
+            return {
+                "id": self._extract_id(existing, "id", "group_id"),
+                "name": str(existing.get("name") or existing.get("group_name") or name),
+                "raw": existing,
+            }
         body = self._unwrap_data(data)
         group_id = self._extract_id(
             body,
@@ -282,9 +296,6 @@ class Sub2APIClient:
 
     def generate_openai_auth_url(self, email: str, state: str) -> dict[str, Any]:
         payload = {
-            "provider": "openai",
-            "name": email,
-            "email": email,
             "state": state,
         }
         data = self._request_candidates(
@@ -296,24 +307,54 @@ class Sub2APIClient:
             "auth_url",
             "oauth_url",
             "url",
+            "authorize_url",
             "data.auth_url",
             "data.oauth_url",
             "data.url",
+            "data.authorize_url",
             "result.auth_url",
+            "result.oauth_url",
             "result.url",
+            "result.authorize_url",
         )
         if not auth_url:
             raise Sub2APIError(
                 "Sub2API did not return an OAuth URL. Adjust `generate_openai_auth_url()` parsing."
             )
-        return {"url": auth_url, "raw": data}
+        session_id = self._extract_value(
+            body,
+            "session_id",
+            "sessionId",
+            "data.session_id",
+            "data.sessionId",
+            "result.session_id",
+            "result.sessionId",
+        )
+        upstream_state = self._extract_value(
+            body,
+            "state",
+            "oauth_state",
+            "data.state",
+            "data.oauth_state",
+            "result.state",
+            "result.oauth_state",
+        )
+        if not upstream_state:
+            upstream_state = self._extract_state_from_url(str(auth_url))
+        return {"url": auth_url, "session_id": session_id, "state": upstream_state, "raw": data}
 
-    def exchange_openai_code(self, code: str, state: str) -> dict[str, Any]:
+    def exchange_openai_code(
+        self,
+        code: str,
+        state: str,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
         payload = {
             "code": code,
             "state": state,
-            "provider": "openai",
         }
+        if session_id:
+            payload["session_id"] = session_id
         data = self._request_candidates(
             "POST", self.EXCHANGE_OPENAI_CODE_PATHS, json=payload
         )
@@ -354,12 +395,67 @@ class Sub2APIClient:
         data = self._request_candidates("POST", path_candidates, json=payload)
         return {"account_id": account_id, "group_id": group_id, "raw": data}
 
+    def _find_group_by_name(self, name: str) -> dict[str, Any] | None:
+        try:
+            for group in self.list_groups(platform=self.provisioning_defaults.group_platform):
+                if str(group.get("name") or "").lower() == name.lower():
+                    return group
+        except Exception as exc:
+            logger.warning("Could not look up existing Sub2API group by name=%s: %s", name, exc)
+        return None
+
+    def _may_reuse_existing_group(self, exc: Sub2APIError) -> bool:
+        message = str(exc).lower()
+        return exc.status_code in {409, 422, 500} or any(
+            marker in message
+            for marker in (
+                "duplicate",
+                "already exists",
+                "exists",
+                "unique",
+                "internal error",
+            )
+        )
+
     def _build_group_payload(self, name: str) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "name": name,
+            "description": "",
             "platform": self.provisioning_defaults.group_platform,
+            "rate_multiplier": 1,
+            "rpm_limit": 0,
             "is_exclusive": True,
+            "subscription_type": "standard",
+            "daily_limit_usd": None,
+            "weekly_limit_usd": None,
+            "monthly_limit_usd": None,
+            "image_price_1k": None,
+            "image_price_2k": None,
+            "image_price_4k": None,
+            "claude_code_only": False,
+            "fallback_group_id": None,
+            "fallback_group_id_on_invalid_request": None,
+            "allow_messages_dispatch": False,
+            "opus_mapped_model": "gpt-5.4",
+            "sonnet_mapped_model": "gpt-5.3-codex",
+            "haiku_mapped_model": "gpt-5.4-mini",
+            "exact_model_mappings": [],
+            "require_oauth_only": False,
+            "require_privacy_set": False,
+            "model_routing": None,
+            "model_routing_enabled": False,
+            "supported_model_scopes": ["claude", "gemini_text", "gemini_image"],
+            "mcp_xml_inject": True,
+            "copy_accounts_from_group_ids": [],
         }
+        if self.provisioning_defaults.group_platform == "openai":
+            payload["messages_dispatch_model_config"] = {
+                "opus_mapped_model": "gpt-5.4",
+                "sonnet_mapped_model": "gpt-5.3-codex",
+                "haiku_mapped_model": "gpt-5.4-mini",
+                "exact_model_mappings": {},
+            }
+        return payload
 
     def _build_openai_oauth_account_payload(
         self,
@@ -368,28 +464,84 @@ class Sub2APIClient:
         oauth_payload: dict[str, Any],
         group_id: Any,
     ) -> dict[str, Any]:
-        return {
-            "provider": self.provisioning_defaults.account_provider,
+        credentials = self._build_openai_oauth_credentials(oauth_payload)
+        temporary_unschedulable_rules = [
+            self._serialize_rule(rule)
+            for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
+        ]
+        credentials["temp_unschedulable_enabled"] = (
+            self.provisioning_defaults.account_temporary_unschedulable
+        )
+        credentials["temp_unschedulable_rules"] = temporary_unschedulable_rules
+        credentials["model_mapping"] = {
+            model_name: model_name
+            for model_name in self.provisioning_defaults.account_model_whitelist
+        }
+        extra = self._build_openai_oauth_extra(oauth_payload)
+        payload: dict[str, Any] = {
+            "name": name,
+            "notes": "",
             "platform": self.provisioning_defaults.account_platform,
             "type": self.provisioning_defaults.account_type,
-            "name": name,
-            "email": name,
-            "oauth": oauth_payload,
-            "wsmode": self.provisioning_defaults.account_ws_mode,
-            "temporary_unschedulable": (
-                self.provisioning_defaults.account_temporary_unschedulable
-            ),
-            "temporary_unschedulable_rules": [
-                self._serialize_rule(rule)
-                for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
-            ],
-            "group_id": group_id,
+            "credentials": credentials,
+            "extra": extra,
+            "proxy_id": None,
+            "concurrency": 10,
+            "load_factor": None,
+            "priority": 1,
+            "rate_multiplier": 1,
             "group_ids": [group_id],
+            "expires_at": None,
+            "auto_pause_on_expired": True,
         }
+        if self.provisioning_defaults.account_ws_mode:
+            payload["extra"]["openai_oauth_responses_websockets_v2_mode"] = (
+                self.provisioning_defaults.account_ws_mode
+            )
+            payload["extra"]["openai_oauth_responses_websockets_v2_enabled"] = (
+                self.provisioning_defaults.account_ws_mode != "off"
+            )
+        return payload
+
+    def _build_openai_oauth_credentials(self, oauth_payload: dict[str, Any]) -> dict[str, Any]:
+        credentials: dict[str, Any] = {}
+        for field_name in (
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "expires_at",
+            "chatgpt_account_id",
+            "chatgpt_user_id",
+            "organization_id",
+            "plan_type",
+            "client_id",
+        ):
+            value = oauth_payload.get(field_name)
+            if value not in (None, ""):
+                credentials[field_name] = value
+        return credentials
+
+    def _build_openai_oauth_extra(self, oauth_payload: dict[str, Any]) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        for field_name in ("email", "name", "privacy_mode"):
+            value = oauth_payload.get(field_name)
+            if value not in (None, ""):
+                extra[field_name] = value
+        return extra
+
+    def _extract_state_from_url(self, auth_url: str) -> str | None:
+        parsed = urlparse(auth_url)
+        params = parse_qs(parsed.query or parsed.fragment)
+        values = params.get("state") or []
+        return values[0] if values else None
 
     def _serialize_rule(self, rule: TemporaryUnschedulableRule) -> dict[str, Any]:
+        try:
+            error_code: int | str = int(rule.error_code)
+        except ValueError:
+            error_code = rule.error_code
         return {
-            "error_code": rule.error_code,
+            "error_code": error_code,
             "duration_minutes": rule.duration_minutes,
             "keywords": list(rule.keywords),
             "description": rule.description,

@@ -417,6 +417,25 @@ pre {
   align-items: center;
 }
 
+.provision-form-panel {
+  display: grid;
+  align-content: start;
+  gap: 26px;
+}
+
+.provision-form-panel .action-row {
+  margin-top: 2px;
+}
+
+.provision-callback-form {
+  padding-top: 22px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.provision-callback-form textarea {
+  min-height: 112px;
+}
+
 .button {
   min-height: 42px;
   border: 1px solid transparent;

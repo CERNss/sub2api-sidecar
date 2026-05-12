@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -48,7 +47,7 @@ class ProvisioningService:
     def start_flow(self, email: str) -> ProvisionStartResponse:
         logger.info("Starting provisioning flow for email=%s", email)
         flow_id = str(uuid.uuid4())
-        state = secrets.token_urlsafe(24)
+        requested_state = secrets.token_urlsafe(24)
         self._record_event(
             flow_id=flow_id,
             event_type=ProvisionEventType.start_requested,
@@ -71,14 +70,18 @@ class ProvisioningService:
             )
             oauth = self.sub2api_client.generate_openai_auth_url(
                 email=email,
-                state=state,
+                state=requested_state,
             )
+            state = str(oauth.get("state") or requested_state)
             self._record_event(
                 flow_id=flow_id,
                 event_type=ProvisionEventType.oauth_url_generated,
                 status=ProvisionEventStatus.succeeded,
                 message="OpenAI OAuth handoff URL generated",
-                details={"redirect_uri": self.openai_oauth_redirect_uri},
+                details={
+                    "redirect_uri": self.openai_oauth_redirect_uri,
+                    "session_id": oauth.get("session_id"),
+                },
             )
         except Exception as exc:
             self._record_event(
@@ -100,6 +103,7 @@ class ProvisioningService:
             assignment_reason=assignment_reason,
             account_name=email,
             oauth_url=oauth["url"],
+            oauth_session_id=oauth.get("session_id"),
         )
         self.flow_store.save(flow)
         self._record_event(
@@ -121,7 +125,7 @@ class ProvisioningService:
             group_id=flow.group_id,
             account_name=flow.account_name,
             oauth_url=flow.oauth_url or "",
-            oauth_redirect_uri=self.openai_oauth_redirect_uri,
+            oauth_redirect_uri=self._oauth_redirect_uri_from_url(flow.oauth_url),
         )
 
     def complete_oauth_from_callback_url(self, callback_url: str) -> ProvisionCompleteResponse:
@@ -155,6 +159,7 @@ class ProvisioningService:
             exchange = self.sub2api_client.exchange_openai_code(
                 code=code,
                 state=state,
+                session_id=flow.oauth_session_id,
             )
             self._record_event(
                 flow_id=flow.flow_id,
@@ -178,15 +183,11 @@ class ProvisioningService:
                 message="OpenAI OAuth account created",
                 details={"account_id": account["id"], "group_id": flow.group_id},
             )
-            self.sub2api_client.bind_account_to_group(
-                account_id=account["id"],
-                group_id=flow.group_id,
-            )
             self._record_event(
                 flow_id=flow.flow_id,
                 event_type=ProvisionEventType.account_bound,
                 status=ProvisionEventStatus.succeeded,
-                message="OpenAI OAuth account bound to group",
+                message="OpenAI OAuth account group assignment included in account creation",
                 details={"account_id": account["id"], "group_id": flow.group_id},
             )
         except Exception as exc:
@@ -244,6 +245,14 @@ class ProvisioningService:
             )
         return code, state
 
+    def _oauth_redirect_uri_from_url(self, oauth_url: str | None) -> str:
+        if not oauth_url:
+            return self.openai_oauth_redirect_uri
+        parsed = urlparse(oauth_url)
+        params = parse_qs(parsed.query or parsed.fragment)
+        redirect_uri = self._first_param(params, "redirect_uri")
+        return redirect_uri or self.openai_oauth_redirect_uri
+
     def fail_flow(self, state: str, message: str) -> ProvisionFlow | None:
         flow = self.flow_store.get_by_state(state)
         if not flow:
@@ -262,9 +271,7 @@ class ProvisioningService:
         return flow
 
     def _build_group_name(self, email: str) -> str:
-        slug = re.sub(r"[^a-zA-Z0-9]+", "-", email).strip("-").lower()
-        group_name = f"{self.group_name_prefix}{slug}"
-        return group_name[:128]
+        return email[:128]
 
     def _resolve_group_assignment(self, email: str) -> tuple[object, AssignmentMode, str]:
         if self.assignment_mode == ProvisioningAssignmentMode.dedicated:

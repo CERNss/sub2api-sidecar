@@ -53,6 +53,7 @@ class ProvisionFlow(BaseModel):
     assignment_reason: str | None = None
     account_name: str
     oauth_url: str | None = None
+    oauth_session_id: str | None = None
     oauth_account_id: Any | None = None
     oauth_exchange_payload: dict[str, Any] | None = None
     error_message: str | None = None

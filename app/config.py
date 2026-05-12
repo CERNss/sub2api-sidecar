@@ -49,6 +49,14 @@ DEFAULT_TEMPORARY_UNSCHEDULABLE_RULES: tuple[TemporaryUnschedulableRule, ...] = 
 )
 
 
+DEFAULT_ACCOUNT_MODEL_WHITELIST: tuple[str, ...] = (
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+)
+
+
 @dataclass(frozen=True)
 class Sub2APIProvisioningDefaults:
     group_platform: str = "openai"
@@ -60,6 +68,7 @@ class Sub2APIProvisioningDefaults:
     account_temporary_unschedulable_rules: tuple[TemporaryUnschedulableRule, ...] = (
         DEFAULT_TEMPORARY_UNSCHEDULABLE_RULES
     )
+    account_model_whitelist: tuple[str, ...] = DEFAULT_ACCOUNT_MODEL_WHITELIST
 
 
 class ProvisioningAssignmentMode(str, Enum):
@@ -209,6 +218,7 @@ class Settings:
                 default=True,
             ),
             account_temporary_unschedulable_rules=_rules_setting(config),
+            account_model_whitelist=_account_model_whitelist_setting(config),
         )
         values["assignment_mode"] = _assignment_mode_setting(config)
         values["auto_rotation"] = AutoRotationSettings(
@@ -490,6 +500,57 @@ def _parse_rule(
         keywords=keywords,
         description=description,
     )
+
+
+def _account_model_whitelist_setting(config: Mapping[str, Any]) -> tuple[str, ...]:
+    env_name = "SUB2API_ACCOUNT_MODEL_WHITELIST_JSON"
+    env_value = _env_string(env_name)
+    if env_value is not None:
+        try:
+            payload = json.loads(env_value)
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(f"{env_name} must be valid JSON") from exc
+        return _parse_string_list_payload(payload, source=env_name)
+
+    csv_env_name = "SUB2API_ACCOUNT_MODEL_WHITELIST"
+    csv_env_value = _env_string(csv_env_name)
+    if csv_env_value is not None:
+        return _parse_string_list_payload(csv_env_value, source=csv_env_name)
+
+    config_path = ("sub2api", "provisioning_defaults", "account_model_whitelist")
+    payload = _config_value(config, config_path)
+    if payload is None:
+        return DEFAULT_ACCOUNT_MODEL_WHITELIST
+
+    return _parse_string_list_payload(payload, source=_config_label(config_path))
+
+
+def _parse_string_list_payload(payload: Any, *, source: str) -> tuple[str, ...]:
+    if isinstance(payload, str):
+        values = [value.strip() for value in payload.split(",")]
+    elif isinstance(payload, list):
+        values = []
+        for index, value in enumerate(payload, start=1):
+            if not isinstance(value, str):
+                raise ConfigurationError(f"{source}[{index}] must be a string")
+            values.append(value.strip())
+    else:
+        raise ConfigurationError(f"{source} must be a string or array")
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        if value in seen:
+            continue
+        cleaned.append(value)
+        seen.add(value)
+
+    if not cleaned:
+        raise ConfigurationError(f"{source} must contain at least one value")
+
+    return tuple(cleaned)
 
 
 def _assignment_mode_setting(config: Mapping[str, Any]) -> ProvisioningAssignmentMode:

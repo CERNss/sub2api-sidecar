@@ -7,7 +7,7 @@ storage:
   sqlite_db_path: ./data/sub2api-sidecar.db
 
 openai:
-  oauth_redirect_uri: http://localhost:3000/callback
+  oauth_redirect_uri: http://localhost:1455/auth/callback
 
 sub2api:
   base_url: http://localhost:8080
@@ -18,6 +18,11 @@ sub2api:
     account_platform: openai
     account_type: oauth
     account_ws_mode: context_pool
+    account_model_whitelist:
+      - gpt-5.3-codex
+      - gpt-5.4
+      - gpt-5.4-mini
+      - gpt-5.5
     account_temporary_unschedulable: true
     account_temporary_unschedulable_rules:
       - error_code: "529"
@@ -40,6 +45,8 @@ sub2api:
         description: 服务不可用 - 暂停 30 分钟
 
 provisioning:
+  # Dedicated provisioning now uses the raw email as the Sub2API group name.
+  # This legacy prefix setting is kept for config compatibility.
   group_name_prefix: openai-oauth-
   assignment_mode: dedicated
 

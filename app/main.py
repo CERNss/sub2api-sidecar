@@ -79,7 +79,6 @@ logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).resolve().parent
 UI_DIST_DIR = APP_DIR / "static" / "ui"
 UI_INDEX_FILE = UI_DIST_DIR / "index.html"
-APP_TITLE = "Sub2API OpenAI OAuth 编排服务"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -373,18 +372,6 @@ def operator_view(request: Request) -> Response:
         )
 
     return serve_react_app()
-
-
-@app.get("/ui/config")
-def ui_config(request: Request) -> dict[str, str | None]:
-    settings = get_settings()
-    session = get_optional_auth_session(request)
-    return {
-        "app_title": APP_TITLE,
-        "auth_username": settings.app_auth_username,
-        "oauth_redirect_uri": settings.openai_oauth_redirect_uri,
-        "current_user": session.username if session else None,
-    }
 
 
 @app.get("/health")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from app.models.flow import ProvisionEvent, ProvisionFlow
 from app.models.schemas import (
@@ -83,7 +84,16 @@ def flow_detail_response(
         state=flow.state,
         assignment_reason=flow.assignment_reason,
         oauth_url=flow.oauth_url,
-        oauth_redirect_uri=oauth_redirect_uri,
+        oauth_redirect_uri=_oauth_redirect_uri_from_url(flow.oauth_url) or oauth_redirect_uri,
         oauth_exchange_payload=redact_sensitive(flow.oauth_exchange_payload),
         events=[event_response(event) for event in events],
     )
+
+
+def _oauth_redirect_uri_from_url(oauth_url: str | None) -> str | None:
+    if not oauth_url:
+        return None
+    parsed = urlparse(oauth_url)
+    params = parse_qs(parsed.query or parsed.fragment)
+    values = params.get("redirect_uri") or []
+    return values[0] if values else None
