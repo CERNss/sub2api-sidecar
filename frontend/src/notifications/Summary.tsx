@@ -1,10 +1,4 @@
-import { Tag } from "antd";
-import {
-  NotificationSettings,
-  notificationSignalByKey,
-  severityColor,
-  severityLabel
-} from "./types";
+import { NotificationSettings } from "./types";
 
 type Props = {
   settings: NotificationSettings;
@@ -30,32 +24,6 @@ export function Summary({ settings }: Props) {
         <SummaryStat label="未路由" value={`${unroutedRules.length}`} hint="没有选 Webhook 的规则" tone={unroutedRules.length > 0 ? "warn" : "ok"} />
       </div>
 
-      <div className="notif-summary-list">
-        {enabledRules.length === 0 ? (
-          <div className="notif-summary-placeholder">
-            暂无启用的规则。添加一条规则后这里会显示运行时状态。
-          </div>
-        ) : (
-          enabledRules.map((rule) => {
-            const signal = notificationSignalByKey.get(rule.signalKey);
-            return (
-              <div className="notif-summary-row" key={rule.id}>
-                <div>
-                  <strong>{rule.name || signal?.label || rule.signalKey}</strong>
-                  <small>
-                    {signal?.source ?? "—"} · 每 {rule.readIntervalMinutes} 分钟
-                  </small>
-                </div>
-                <Tag color={severityColor(rule.severity)}>{severityLabel(rule.severity)}</Tag>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      <p className="notif-summary-foot">
-        运行时投递记录（最近一次触发、失败原因）将在后端 deliveries API 接入 UI 后显示在此处。
-      </p>
     </section>
   );
 }

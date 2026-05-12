@@ -549,14 +549,52 @@ pre {
 
 .notification-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
-  gap: 20px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 344px);
+  grid-template-areas:
+    "webhooks summary"
+    "rules rules";
+  gap: 20px 22px;
+  align-items: stretch;
 }
 
-.notif-panel {
+.notif-webhook-area {
+  grid-area: webhooks;
   display: grid;
-  gap: 20px;
+  min-width: 0;
+}
+
+.notif-webhook-area > .notif-island,
+.notif-summary-area > .notif-summary {
+  height: 100%;
+}
+
+.notif-webhook-area > .notif-island {
+  height: 368px;
+  max-height: 368px;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.notif-summary-area {
+  grid-area: summary;
+  display: grid;
+  min-width: 0;
+}
+
+.notif-rules-area {
+  grid-area: rules;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.notif-rule-island {
+  align-self: start;
+}
+
+.notif-island {
+  min-width: 0;
+  padding: 20px;
 }
 
 .notif-section {
@@ -569,6 +607,14 @@ pre {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  flex-wrap: wrap;
+}
+
+.notif-section-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -621,6 +667,133 @@ pre {
 .notif-list-row.active {
   border-color: #0f766e;
   background: #f0fdfa;
+}
+
+.notif-webhook-cards {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.02);
+}
+
+.notif-webhook-card {
+  min-width: 0;
+  border: 1px solid #d8e1ec;
+  border-radius: 6px;
+  background: #ffffff;
+  overflow: hidden;
+  transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              background 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.notif-webhook-card:hover {
+  border-color: #7dd3c7;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+}
+
+.notif-webhook-card.expanded {
+  border-color: #0f766e;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.12);
+}
+
+.notif-rule-cards {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+}
+
+.notif-rule-card {
+  min-width: 0;
+  border: 1px solid #d8e1ec;
+  border-radius: 6px;
+  background: #ffffff;
+  overflow: hidden;
+  transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              background 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.notif-rule-card:hover {
+  border-color: #7dd3c7;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+}
+
+.notif-rule-card.expanded {
+  border-color: #0f766e;
+  background: #f0fdfa;
+  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.12);
+}
+
+.notif-webhook-card-trigger,
+.notif-rule-card-trigger {
+  width: 100%;
+  min-height: 58px;
+  border: 0;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.notif-webhook-card.expanded .notif-webhook-card-trigger {
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.notif-rule-card.expanded .notif-rule-card-trigger {
+  background: #f0fdfa;
+}
+
+.notif-webhook-card-trigger:focus-visible,
+.notif-rule-card-trigger:focus-visible {
+  outline: 3px solid rgba(15, 118, 110, 0.24);
+  outline-offset: -3px;
+}
+
+.notif-webhook-card-meta,
+.notif-rule-card-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.notif-card-chevron {
+  color: #64748b;
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.notif-webhook-card.expanded .notif-card-chevron {
+  transform: rotate(180deg);
+}
+
+.notif-rule-card.expanded .notif-card-chevron {
+  transform: rotate(180deg);
+}
+
+.notif-webhook-card-body {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+}
+
+.notif-rule-card-body {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
 }
 
 .notif-list-text {
@@ -681,7 +854,10 @@ pre {
 
 .notif-field input,
 .notif-field select {
+  width: 100%;
+  min-width: 0;
   min-height: 38px;
+  box-sizing: border-box;
   border: 1px solid #cbd5e1;
   border-radius: 8px;
   padding: 0 12px;
@@ -760,9 +936,53 @@ pre {
 
 .notif-rule-layout {
   display: grid;
-  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr);
-  gap: 12px;
+  grid-template-columns: minmax(240px, 0.42fr) minmax(0, 1fr);
+  gap: 16px;
   align-items: start;
+  min-width: 0;
+}
+
+.notif-rule-list-pane {
+  min-width: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.02);
+}
+
+.notif-rule-list-head {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 10px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.notif-rule-list-head strong {
+  min-width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #e0f2f1;
+  color: #0f766e;
+  font-size: 12px;
+}
+
+.notif-rule-list-pane .notif-rule-cards {
+  max-height: 640px;
+  overflow-y: auto;
+  align-content: start;
+}
+
+.notif-rule-editor-pane {
+  min-width: 0;
 }
 
 .notif-rule-form {
@@ -850,8 +1070,9 @@ pre {
 
 .notif-rule-trigger-grid {
   display: grid;
-  grid-template-columns: minmax(140px, 0.95fr) minmax(120px, 0.8fr) minmax(140px, 0.9fr);
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
   gap: 12px;
+  align-items: start;
 }
 
 .notif-webhook-checks {
@@ -1007,17 +1228,19 @@ pre {
   border-top: 1px solid #e2e8f0;
 }
 
+.notif-item-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .notif-action-note {
   min-width: 0;
   color: #64748b;
   font-size: 12.5px;
   line-height: 1.5;
-}
-
-.notif-save-row {
-  padding-top: 4px;
-  border-top: 1px solid #e2e8f0;
-  margin-top: 4px;
 }
 
 .notif-status {
@@ -1041,6 +1264,7 @@ pre {
 
 .notif-summary {
   display: grid;
+  align-content: start;
   gap: 16px;
 }
 
@@ -1085,33 +1309,6 @@ pre {
   font-size: 11.5px;
 }
 
-.notif-summary-list {
-  display: grid;
-  gap: 8px;
-}
-
-.notif-summary-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: #ffffff;
-}
-
-.notif-summary-row strong {
-  color: #0f172a;
-  font-size: 13.5px;
-  display: block;
-}
-
-.notif-summary-row small {
-  color: #64748b;
-  font-size: 12px;
-}
-
 .notif-summary-placeholder {
   border: 1px dashed #cbd5e1;
   border-radius: 8px;
@@ -1132,12 +1329,19 @@ pre {
 @media (max-width: 1024px) {
   .notification-workspace {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "webhooks"
+      "summary"
+      "rules";
+  }
+  .notif-summary-area {
+    max-width: none;
   }
   .notif-rule-layout {
     grid-template-columns: 1fr;
   }
-  .notif-rule-trigger-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .notif-rule-list-pane .notif-rule-cards {
+    max-height: 320px;
   }
   .notif-grid-3 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1148,6 +1352,13 @@ pre {
   .notif-section-head,
   .notif-rule-head {
     flex-direction: column;
+    align-items: stretch;
+  }
+  .notif-section-actions {
+    justify-content: stretch;
+  }
+  .notif-section-actions > .button {
+    flex: 1 1 160px;
   }
   .notif-grid-2,
   .notif-grid-3,
@@ -1157,6 +1368,19 @@ pre {
   .notif-webhook-actions,
   .notif-rule-actions {
     align-items: stretch;
+  }
+  .notif-webhook-card-trigger,
+  .notif-rule-card-trigger,
+  .notif-webhook-card-meta {
+    align-items: flex-start;
+  }
+  .notif-webhook-card-trigger,
+  .notif-rule-card-trigger {
+    grid-template-columns: 1fr;
+  }
+  .notif-webhook-card-meta,
+  .notif-rule-card-meta {
+    justify-content: space-between;
   }
 }
 

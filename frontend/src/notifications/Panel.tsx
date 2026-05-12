@@ -1,10 +1,14 @@
-import { FormEvent, useState } from "react";
-import { Save } from "lucide-react";
+import { FormEvent, useEffect, useState } from "react";
+import { LoaderCircle, Save } from "lucide-react";
 import { WebhookEditor } from "./WebhookEditor";
 import { RuleEditor } from "./RuleEditor";
 import { Summary } from "./Summary";
 import { makeDefaultWebhook, makeRuleForSignal } from "./defaults";
-import { loadSettings, persistSettings } from "./storage";
+import {
+  getNotificationApiErrorMessage,
+  loadNotificationSettings,
+  saveNotificationSettings
+} from "./api";
 import {
   NotificationRule,
   NotificationSettings,
@@ -14,16 +18,60 @@ import {
 
 type StatusTone = "idle" | "info" | "success" | "error";
 type Status = { message: string; tone: StatusTone };
+type Props = {
+  onAuthExpired: (error: unknown, setStatus?: (status: Status) => void) => boolean;
+};
 
 const emptyStatus: Status = { message: "", tone: "idle" };
 
-export function NotificationPanel() {
-  const [settings, setSettings] = useState<NotificationSettings>(() => loadSettings());
-  const [selectedWebhookId, setSelectedWebhookId] = useState(
-    () => settings.webhooks[0]?.id ?? ""
-  );
-  const [selectedRuleId, setSelectedRuleId] = useState(() => settings.rules[0]?.id ?? "");
+export function NotificationPanel({ onAuthExpired }: Props) {
+  const [settings, setSettings] = useState<NotificationSettings>(() => ({
+    webhooks: [makeDefaultWebhook()],
+    rules: []
+  }));
+  const [selectedWebhookId, setSelectedWebhookId] = useState("");
+  const [selectedRuleId, setSelectedRuleId] = useState("");
   const [status, setStatus] = useState<Status>(emptyStatus);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveScope, setSaveScope] = useState("");
+
+  function applySettings(next: NotificationSettings) {
+    setSettings(next);
+    setSelectedWebhookId((current) =>
+      current && next.webhooks.some((webhook) => webhook.id === current) ? current : ""
+    );
+    setSelectedRuleId((current) =>
+      current && next.rules.some((rule) => rule.id === current) ? current : ""
+    );
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadFromDatabase() {
+      setIsLoading(true);
+      try {
+        const loaded = await loadNotificationSettings();
+        if (cancelled) return;
+        applySettings(loaded);
+        setStatus({ message: "已从数据库加载告警配置。", tone: "success" });
+      } catch (error) {
+        if (cancelled) return;
+        if (!onAuthExpired(error, setStatus)) {
+          setStatus({
+            message: getNotificationApiErrorMessage(error, "加载告警配置失败"),
+            tone: "error"
+          });
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    }
+    void loadFromDatabase();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function updateWebhook(id: string, partial: Partial<NotificationWebhook>) {
     setSettings((current) => ({
@@ -46,8 +94,6 @@ export function NotificationPanel() {
 
   function removeWebhook(id: string) {
     if (!id) return;
-    const nextSelectedWebhookId =
-      settings.webhooks.filter((webhook) => webhook.id !== id)[0]?.id ?? "";
     setSettings((current) => {
       const remainingWebhooks = current.webhooks.filter((webhook) => webhook.id !== id);
       return {
@@ -61,9 +107,9 @@ export function NotificationPanel() {
     });
     setSelectedWebhookId((current) => {
       if (current !== id) return current;
-      return nextSelectedWebhookId;
+      return "";
     });
-    setStatus({ message: "Webhook 已删除，关联规则已取消该接收器。", tone: "success" });
+    setStatus({ message: "Webhook 已删除，保存后会写入数据库。", tone: "success" });
   }
 
   function updateRule(id: string, partial: Partial<NotificationRule>) {
@@ -83,25 +129,37 @@ export function NotificationPanel() {
   }
 
   function removeSelectedRule() {
-    if (!selectedRuleId) return;
+    const ruleId = selectedRuleId || settings.rules[0]?.id || "";
+    if (!ruleId) return;
     setSettings((current) => {
-      const remaining = current.rules.filter((rule) => rule.id !== selectedRuleId);
+      const remaining = current.rules.filter((rule) => rule.id !== ruleId);
       return { ...current, rules: remaining };
     });
-    setSelectedRuleId((current) => {
-      const remaining = settings.rules.filter((rule) => rule.id !== current);
-      return remaining[0]?.id ?? "";
-    });
+    setSelectedRuleId("");
   }
 
-  function save(event: FormEvent<HTMLFormElement>) {
+  async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    persistSettings(settings);
-    setStatus({ message: "已保存到浏览器本地。", tone: "success" });
+    setIsSaving(true);
+    setStatus({ message: "正在保存到数据库。", tone: "info" });
+    try {
+      const saved = await saveNotificationSettings(settings);
+      applySettings(saved);
+      setStatus({ message: "已保存到数据库。", tone: "success" });
+    } catch (error) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({
+          message: getNotificationApiErrorMessage(error, "保存告警配置失败"),
+          tone: "error"
+        });
+      }
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function sendTest() {
-    const rule = settings.rules.find((r) => r.id === selectedRuleId);
+    const rule = settings.rules.find((r) => r.id === selectedRuleId) ?? settings.rules[0];
     if (!rule) {
       setStatus({ message: "请先选中一条规则。", tone: "error" });
       return;
@@ -126,16 +184,34 @@ export function NotificationPanel() {
     });
   }
 
-  return (
-    <div className="notification-workspace">
-      <form className="panel form-panel notif-panel" onSubmit={save}>
-        <div className="panel-title-row">
-          <div>
-            <p className="eyebrow">Alert Center</p>
-            <h2>告警中心</h2>
-          </div>
-        </div>
+  function renderSaveAction(scope: string) {
+    return (
+      <>
+        <button
+          className="button primary compact"
+          type="submit"
+          disabled={isLoading || isSaving}
+          onClick={() => setSaveScope(scope)}
+        >
+          {isSaving && saveScope === scope ? (
+            <LoaderCircle className="spin" size={16} aria-hidden="true" />
+          ) : (
+            <Save size={16} aria-hidden="true" />
+          )}
+          {isSaving && saveScope === scope ? "保存中" : "保存设置"}
+        </button>
+        {status.message && saveScope === scope ? (
+          <span className={`notif-status tone-${status.tone}`} role={status.tone === "error" ? "alert" : "status"}>
+            {status.message}
+          </span>
+        ) : null}
+      </>
+    );
+  }
 
+  return (
+    <form className="notification-workspace" onSubmit={save}>
+      <div className="notif-webhook-area">
         <WebhookEditor
           settings={settings}
           selectedWebhookId={selectedWebhookId}
@@ -143,8 +219,15 @@ export function NotificationPanel() {
           onChange={updateWebhook}
           onAdd={addWebhook}
           onRemove={removeWebhook}
+          renderSaveAction={renderSaveAction}
         />
+      </div>
 
+      <div className="notif-summary-area">
+        <Summary settings={settings} />
+      </div>
+
+      <div className="notif-rules-area">
         <RuleEditor
           settings={settings}
           selectedRuleId={selectedRuleId}
@@ -154,22 +237,9 @@ export function NotificationPanel() {
           onRemoveRule={removeSelectedRule}
           onTest={sendTest}
           onStatus={(message, tone) => setStatus({ message, tone })}
+          renderSaveAction={renderSaveAction}
         />
-
-        <div className="notif-actions notif-save-row">
-          <button className="button primary" type="submit">
-            <Save size={16} aria-hidden="true" />
-            保存设置
-          </button>
-          {status.message ? (
-            <span className={`notif-status tone-${status.tone}`} role={status.tone === "error" ? "alert" : "status"}>
-              {status.message}
-            </span>
-          ) : null}
-        </div>
-      </form>
-
-      <Summary settings={settings} />
-    </div>
+      </div>
+    </form>
   );
 }

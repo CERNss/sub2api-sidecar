@@ -413,6 +413,9 @@ const orchestrationTabPaths: Record<OrchestrationTab, string> = {
   manual: "/orchestration/manual",
   dynamic: "/orchestration/dynamic"
 };
+const frontendRouteBase = normalizeFrontendRouteBase(
+  import.meta.env.DEV ? import.meta.env.BASE_URL : "/"
+);
 
 class ApiError extends Error {
   status: number;
@@ -455,6 +458,14 @@ function getErrorMessage(error: unknown, fallbackMessage: string): string {
     return error.message;
   }
   return fallbackMessage;
+}
+
+function getErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object" || !("status" in error)) {
+    return null;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : null;
 }
 
 function formatPayload(payload: ApiPayload | null): string {
@@ -984,6 +995,39 @@ function resolveKnownId(value: string, knownValues: unknown[]): unknown {
   return known ?? value;
 }
 
+function normalizeFrontendRouteBase(base: string): string {
+  const trimmed = base.replace(/\/+$/, "");
+  return trimmed === "" ? "" : trimmed;
+}
+
+function stripFrontendRouteBase(pathname: string): string {
+  if (!frontendRouteBase) {
+    return pathname || "/";
+  }
+  if (pathname === frontendRouteBase) {
+    return "/";
+  }
+  if (pathname.startsWith(`${frontendRouteBase}/`)) {
+    return pathname.slice(frontendRouteBase.length) || "/";
+  }
+  return pathname || "/";
+}
+
+function frontendRoutePath(pathname: string): string {
+  const logicalPath = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  if (!frontendRouteBase) {
+    return logicalPath;
+  }
+  if (logicalPath === "/") {
+    return `${frontendRouteBase}/`;
+  }
+  return `${frontendRouteBase}${logicalPath}`;
+}
+
+function currentLogicalPathname(): string {
+  return stripFrontendRouteBase(window.location.pathname);
+}
+
 function orchestrationTabFromPath(pathname: string): OrchestrationTab {
   if (pathname === orchestrationTabPaths.dynamic || pathname === "/dynamic") {
     return "dynamic";
@@ -1003,16 +1047,17 @@ function viewFromPath(pathname: string): OperatorView {
 
 function loginRedirectPath(): string {
   const nextPath = new URLSearchParams(window.location.search).get("next");
-  if (
-    nextPath &&
-    (Object.values(operatorViewPaths).includes(nextPath as OperatorView) ||
-      Object.values(orchestrationTabPaths).includes(nextPath as OrchestrationTab) ||
-      nextPath === "/orchestration" ||
-      nextPath === "/dynamic")
-  ) {
-    return nextPath;
+  const allowedPaths = new Set([
+    ...Object.values(operatorViewPaths),
+    ...Object.values(orchestrationTabPaths),
+    "/orchestration",
+    "/dynamic"
+  ]);
+  const logicalNextPath = nextPath ? stripFrontendRouteBase(nextPath) : "";
+  if (allowedPaths.has(logicalNextPath)) {
+    return frontendRoutePath(logicalNextPath);
   }
-  return "/";
+  return frontendRoutePath("/");
 }
 
 function layoutLaneWithDagre(
@@ -1247,7 +1292,7 @@ function App() {
     document.title = APP_TITLE;
   }, []);
 
-  if (window.location.pathname === "/login") {
+  if (currentLogicalPathname() === "/login") {
     return <LoginView />;
   }
 
@@ -1374,16 +1419,17 @@ function LoginView() {
 }
 
 function OperatorWorkspace() {
-  const [activeView, setActiveView] = useState<OperatorView>(() => viewFromPath(window.location.pathname));
+  const [activeView, setActiveView] = useState<OperatorView>(() => viewFromPath(currentLogicalPathname()));
   const [activeOrchestrationTab, setActiveOrchestrationTab] = useState<OrchestrationTab>(() =>
-    orchestrationTabFromPath(window.location.pathname)
+    orchestrationTabFromPath(currentLogicalPathname())
   );
   const [logoutBusy, setLogoutBusy] = useState(false);
 
   useEffect(() => {
     function syncViewFromPath() {
-      setActiveView(viewFromPath(window.location.pathname));
-      setActiveOrchestrationTab(orchestrationTabFromPath(window.location.pathname));
+      const logicalPath = currentLogicalPathname();
+      setActiveView(viewFromPath(logicalPath));
+      setActiveOrchestrationTab(orchestrationTabFromPath(logicalPath));
     }
 
     window.addEventListener("popstate", syncViewFromPath);
@@ -1393,8 +1439,8 @@ function OperatorWorkspace() {
   function navigateView(view: OperatorView) {
     setActiveView(view);
     const nextPath = view === "orchestration" ? orchestrationTabPaths[activeOrchestrationTab] : operatorViewPaths[view];
-    if (window.location.pathname !== nextPath) {
-      window.history.pushState({}, "", nextPath);
+    if (currentLogicalPathname() !== nextPath) {
+      window.history.pushState({}, "", frontendRoutePath(nextPath));
     }
   }
 
@@ -1402,8 +1448,8 @@ function OperatorWorkspace() {
     setActiveView("orchestration");
     setActiveOrchestrationTab(tab);
     const nextPath = orchestrationTabPaths[tab];
-    if (window.location.pathname !== nextPath) {
-      window.history.pushState({}, "", nextPath);
+    if (currentLogicalPathname() !== nextPath) {
+      window.history.pushState({}, "", frontendRoutePath(nextPath));
     }
   }
 
@@ -1412,15 +1458,15 @@ function OperatorWorkspace() {
     try {
       await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
     } finally {
-      window.location.href = "/login";
+      window.location.href = frontendRoutePath("/login");
     }
   }
 
   function handleAuthExpired(error: unknown, setStatus?: (status: StatusState) => void) {
-    if (error instanceof ApiError && error.status === 401) {
+    if (getErrorStatus(error) === 401) {
       setStatus?.({ message: "登录已失效，正在返回登录页", tone: "error" });
       window.setTimeout(() => {
-        window.location.href = "/login";
+        window.location.href = frontendRoutePath("/login");
       }, 500);
       return true;
     }
@@ -1473,7 +1519,7 @@ function OperatorWorkspace() {
       </section>
 
       {activeView === "notification" ? (
-        <NotificationPanel />
+        <NotificationPanel onAuthExpired={handleAuthExpired} />
       ) : activeView === "provision" ? (
         <ProvisionForm
           onAuthExpired={handleAuthExpired}

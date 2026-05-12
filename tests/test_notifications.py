@@ -119,6 +119,50 @@ def test_notification_config_round_trip_redacts_secret(client) -> None:
     assert "policy" not in payload
 
 
+def test_notification_config_preserves_redacted_secret_on_writeback(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body(secret="shh")],
+        "rules": [_rule_body()],
+    }
+    response = client.put("/notifications/config", json=body)
+    assert response.status_code == 200
+
+    redacted = client.get("/notifications/config").json()
+    redacted["webhooks"][0]["name"] = "Ops Renamed"
+    redacted["rules"][0]["cooldownMinutes"] = 45
+
+    writeback = client.put("/notifications/config", json=redacted)
+
+    assert writeback.status_code == 200
+    assert writeback.json()["webhooks"][0]["secret"] == "[redacted]"
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.webhooks[0].name == "Ops Renamed"
+    assert stored.webhooks[0].secret == "shh"
+    assert stored.rules[0].cooldown_minutes == 45
+
+
+def test_notification_config_allows_clearing_secret(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body(secret="shh")],
+        "rules": [_rule_body()],
+    }
+    response = client.put("/notifications/config", json=body)
+    assert response.status_code == 200
+
+    redacted = client.get("/notifications/config").json()
+    redacted["webhooks"][0]["secret"] = ""
+    writeback = client.put("/notifications/config", json=redacted)
+
+    assert writeback.status_code == 200
+    assert writeback.json()["webhooks"][0]["secret"] == ""
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.webhooks[0].secret == ""
+
+
 def test_notification_config_rejects_unknown_target_id(client) -> None:
     login(client)
     body = {

@@ -1,5 +1,6 @@
 import { Tag } from "antd";
 import { Copy, Download, Plus, Send } from "lucide-react";
+import type { ReactNode } from "react";
 import { downloadJson, makeRuleExport, makeRuleTemplate, makeRuleTemplateJson, toJsonFileSlug } from "./ruleExport";
 import {
   NotificationRule,
@@ -22,6 +23,7 @@ type Props = {
   onRemoveRule: () => void;
   onTest: () => void;
   onStatus: (message: string, tone: "info" | "success" | "error") => void;
+  renderSaveAction: (scope: string) => ReactNode;
 };
 
 const OPERATORS: { value: NotificationRuleOperator; label: string }[] = [
@@ -43,9 +45,10 @@ export function RuleEditor({
   onAddRule,
   onRemoveRule,
   onTest,
-  onStatus
+  onStatus,
+  renderSaveAction
 }: Props) {
-  const selected = settings.rules.find((rule) => rule.id === selectedRuleId) ?? settings.rules[0];
+  const selected = settings.rules.find((rule) => rule.id === selectedRuleId) ?? settings.rules[0] ?? null;
   const selectedSignal = selected ? notificationSignalByKey.get(selected.signalKey) : null;
   const selectedTargets = selected
     ? settings.webhooks.filter((webhook) => selected.targetWebhookIds.includes(webhook.id))
@@ -88,16 +91,14 @@ export function RuleEditor({
 
   if (settings.rules.length === 0) {
     return (
-      <section className="notif-section">
+      <section className="panel notif-section notif-island notif-rule-island">
         <header className="notif-section-head">
           <div>
             <h3>告警规则</h3>
-            <p>选择你关心的运营信号，绑定到一个 Webhook 接收器。</p>
           </div>
         </header>
         <div className="notif-empty">
           <h4>还没有告警规则</h4>
-          <p>添加一条规则来订阅你关心的运营信号。</p>
           <button className="button primary" type="button" onClick={onAddRule}>
             <Plus size={16} aria-hidden="true" />
             添加你关心的第一条告警
@@ -107,53 +108,72 @@ export function RuleEditor({
     );
   }
 
+  if (!selected) {
+    return null;
+  }
+
   return (
-    <section className="notif-section">
+    <section className="panel notif-section notif-island notif-rule-island">
       <header className="notif-section-head">
         <div>
           <h3>告警规则</h3>
-          <p>每条规则把一个信号绑定到一个或多个 Webhook 接收器。</p>
         </div>
-        <button className="button secondary compact" type="button" onClick={onAddRule}>
-          <Plus size={16} aria-hidden="true" />
-          新增规则
-        </button>
-        <button className="button tertiary compact" type="button" onClick={exportAllRules}>
-          <Download size={16} aria-hidden="true" />
-          导出规则 JSON
-        </button>
+        <div className="notif-section-actions">
+          <button className="button secondary compact" type="button" onClick={onAddRule}>
+            <Plus size={16} aria-hidden="true" />
+            新增规则
+          </button>
+          <button className="button tertiary compact" type="button" onClick={exportAllRules}>
+            <Download size={16} aria-hidden="true" />
+            导出规则 JSON
+          </button>
+        </div>
       </header>
 
       <div className="notif-rule-layout">
-        <div className="notif-list">
-          {settings.rules.map((rule) => {
-            const signal = notificationSignalByKey.get(rule.signalKey);
-            const targetCount = settings.webhooks.filter((webhook) =>
-              rule.targetWebhookIds.includes(webhook.id)
-            ).length;
-            return (
-              <button
-                key={rule.id}
-                className={`notif-list-row ${rule.id === selected?.id ? "active" : ""}`}
-                type="button"
-                onClick={() => onSelectRule(rule.id)}
-              >
-                <span className="notif-list-text">
-                  <strong>{rule.name || signal?.label || "未命名规则"}</strong>
-                  <small>
-                    {operatorLabel(rule.operator)} {rule.threshold}
-                    {rule.thresholdUnit ? ` ${rule.thresholdUnit}` : ""} · 每 {rule.readIntervalMinutes} 分钟 · {targetCount} 个接收器
-                  </small>
-                </span>
-                <Tag color={rule.enabled ? severityColor(rule.severity) : "default"}>
-                  {rule.enabled ? severityLabel(rule.severity) : "停用"}
-                </Tag>
-              </button>
-            );
-          })}
-        </div>
+        <aside className="notif-rule-list-pane" aria-label="告警规则列表">
+          <div className="notif-rule-list-head">
+            <span>规则列表</span>
+            <strong>{settings.rules.length}</strong>
+          </div>
+          <div className="notif-rule-cards">
+            {settings.rules.map((rule) => {
+              const signal = notificationSignalByKey.get(rule.signalKey);
+              const targetCount = settings.webhooks.filter((webhook) =>
+                rule.targetWebhookIds.includes(webhook.id)
+              ).length;
+              const active = rule.id === selected.id;
+              return (
+                <article
+                  key={rule.id}
+                  className={`notif-rule-card ${active ? "expanded" : ""}`}
+                >
+                  <button
+                    className="notif-rule-card-trigger"
+                    type="button"
+                    aria-current={active ? "true" : undefined}
+                    onClick={() => onSelectRule(rule.id)}
+                  >
+                    <span className="notif-list-text">
+                      <strong>{rule.name || signal?.label || "未命名规则"}</strong>
+                      <small>
+                        {operatorLabel(rule.operator)} {rule.threshold}
+                        {rule.thresholdUnit ? ` ${rule.thresholdUnit}` : ""} · 每 {rule.readIntervalMinutes} 分钟 · {targetCount} 个接收器
+                      </small>
+                    </span>
+                    <span className="notif-rule-card-meta">
+                      <Tag color={rule.enabled ? severityColor(rule.severity) : "default"}>
+                        {rule.enabled ? severityLabel(rule.severity) : "停用"}
+                      </Tag>
+                    </span>
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </aside>
 
-        {selected ? (
+        <div className="notif-rule-editor-pane">
           <div className="notif-form notif-rule-form">
             <header className="notif-rule-head">
               <div>
@@ -411,12 +431,15 @@ export function RuleEditor({
                 <Send size={16} aria-hidden="true" />
                 发送测试
               </button>
-              <button className="button danger" type="button" onClick={onRemoveRule}>
-                删除规则
-              </button>
+              <div className="notif-item-actions">
+                {renderSaveAction(`rule:${selected.id}`)}
+                <button className="button danger" type="button" onClick={onRemoveRule}>
+                  删除规则
+                </button>
+              </div>
             </div>
           </div>
-        ) : null}
+        </div>
       </div>
     </section>
   );

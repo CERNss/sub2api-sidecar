@@ -36,6 +36,7 @@ from app.stores.sqlite import SQLiteFlowStore
 logger = logging.getLogger(__name__)
 
 DEFAULT_RECEIVER_ID = "ops-default"
+REDACTED_SECRET = "[redacted]"
 
 
 class NotificationConfigError(ProvisioningError):
@@ -71,6 +72,7 @@ class NotificationService:
         return stored
 
     def save_config(self, settings: NotificationSettings) -> NotificationSettings:
+        settings = self._preserve_redacted_secrets(settings)
         self._validate(settings)
         return self.store.save_notification_settings(settings)
 
@@ -200,6 +202,26 @@ class NotificationService:
                     f"Rule {rule.id} targets unknown receiver ids: {', '.join(unknown)}"
                 )
 
+    def _preserve_redacted_secrets(
+        self, settings: NotificationSettings
+    ) -> NotificationSettings:
+        if not any(receiver.secret == REDACTED_SECRET for receiver in settings.webhooks):
+            return settings
+        stored = self.store.get_notification_settings()
+        stored_by_id = {receiver.id: receiver for receiver in stored.webhooks} if stored else {}
+        webhooks = []
+        changed = False
+        for receiver in settings.webhooks:
+            if receiver.secret != REDACTED_SECRET:
+                webhooks.append(receiver)
+                continue
+            stored_secret = stored_by_id.get(receiver.id).secret if receiver.id in stored_by_id else ""
+            webhooks.append(receiver.model_copy(update={"secret": stored_secret}))
+            changed = True
+        if not changed:
+            return settings
+        return settings.model_copy(update={"webhooks": webhooks})
+
 
 def reject_removed_keys(payload: Any) -> None:
     """Raise NotificationConfigError if the inbound payload contains any field that was
@@ -252,7 +274,7 @@ def redact_settings(settings: NotificationSettings) -> dict[str, Any]:
     payload = settings.model_dump(by_alias=True)
     for receiver in payload.get("webhooks", []):
         if receiver.get("secret"):
-            receiver["secret"] = "[redacted]"
+            receiver["secret"] = REDACTED_SECRET
     return payload
 
 
