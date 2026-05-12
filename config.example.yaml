@@ -18,6 +18,7 @@ sub2api:
     account_platform: openai
     account_type: oauth
     account_ws_mode: context_pool
+    account_concurrency: 5
     account_model_whitelist:
       - gpt-5.3-codex
       - gpt-5.4

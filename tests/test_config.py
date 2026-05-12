@@ -29,6 +29,7 @@ CONFIG_ENV_NAMES = (
     "SUB2API_ACCOUNT_PLATFORM",
     "SUB2API_ACCOUNT_TYPE",
     "SUB2API_ACCOUNT_WS_MODE",
+    "SUB2API_ACCOUNT_CONCURRENCY",
     "SUB2API_ACCOUNT_MODEL_WHITELIST",
     "SUB2API_ACCOUNT_MODEL_WHITELIST_JSON",
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
@@ -65,6 +66,7 @@ sub2api:
     account_platform: yaml-platform
     account_type: oauth
     account_ws_mode: yaml_pool
+    account_concurrency: 7
     account_model_whitelist:
       - yaml-model-a
       - yaml-model-b
@@ -115,6 +117,7 @@ auto_rotation:
     assert defaults.account_provider == "yaml-provider"
     assert defaults.account_platform == "yaml-platform"
     assert defaults.account_ws_mode == "yaml_pool"
+    assert defaults.account_concurrency == 7
     assert defaults.account_model_whitelist == ("yaml-model-a", "yaml-model-b")
     assert defaults.account_temporary_unschedulable is False
     assert defaults.account_temporary_unschedulable_rules[0].error_code == "418"
@@ -159,6 +162,7 @@ def test_settings_parse_sub2api_provisioning_overrides(monkeypatch) -> None:
     monkeypatch.setenv("SUB2API_ACCOUNT_PLATFORM", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_TYPE", "oauth")
     monkeypatch.setenv("SUB2API_ACCOUNT_WS_MODE", "context_pool")
+    monkeypatch.setenv("SUB2API_ACCOUNT_CONCURRENCY", "8")
     monkeypatch.setenv(
         "SUB2API_ACCOUNT_MODEL_WHITELIST_JSON",
         '["gpt-test-a", "gpt-test-b"]',
@@ -179,6 +183,7 @@ def test_settings_parse_sub2api_provisioning_overrides(monkeypatch) -> None:
     assert settings.sub2api_provisioning_defaults.account_platform == "openai"
     assert settings.sub2api_provisioning_defaults.account_type == "oauth"
     assert settings.sub2api_provisioning_defaults.account_ws_mode == "context_pool"
+    assert settings.sub2api_provisioning_defaults.account_concurrency == 8
     assert settings.sub2api_provisioning_defaults.account_model_whitelist == (
         "gpt-test-a",
         "gpt-test-b",

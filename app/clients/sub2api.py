@@ -486,7 +486,7 @@ class Sub2APIClient:
             "credentials": credentials,
             "extra": extra,
             "proxy_id": None,
-            "concurrency": 10,
+            "concurrency": self.provisioning_defaults.account_concurrency,
             "load_factor": None,
             "priority": 1,
             "rate_multiplier": 1,

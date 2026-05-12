@@ -64,6 +64,7 @@ class Sub2APIProvisioningDefaults:
     account_platform: str = "openai"
     account_type: str = "oauth"
     account_ws_mode: str = "context_pool"
+    account_concurrency: int = 5
     account_temporary_unschedulable: bool = True
     account_temporary_unschedulable_rules: tuple[TemporaryUnschedulableRule, ...] = (
         DEFAULT_TEMPORARY_UNSCHEDULABLE_RULES
@@ -211,6 +212,12 @@ class Settings:
                 ("sub2api", "provisioning_defaults", "account_ws_mode"),
                 default="context_pool",
             ),
+            account_concurrency=_int_setting(
+                config,
+                "SUB2API_ACCOUNT_CONCURRENCY",
+                ("sub2api", "provisioning_defaults", "account_concurrency"),
+                default=5,
+            ),
             account_temporary_unschedulable=_bool_setting(
                 config,
                 "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
@@ -264,6 +271,8 @@ class Settings:
             raise ConfigurationError("AUTO_ROTATION_IMBALANCE_EPSILON must be >= 0")
         if values["auto_rotation"].improvement_delta < 0:
             raise ConfigurationError("AUTO_ROTATION_IMPROVEMENT_DELTA must be >= 0")
+        if values["sub2api_provisioning_defaults"].account_concurrency <= 0:
+            raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
 
         return cls(**values)
 

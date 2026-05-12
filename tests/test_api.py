@@ -275,6 +275,7 @@ class FakeRotationSub2API:
             )
             assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
             assert json["group_ids"]
+            assert json["concurrency"] == 5
             assert json["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
             return FakeResponse(
                 200,
@@ -445,6 +446,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
         assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
         assert json["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
         assert json["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
+        assert json["concurrency"] == 5
         return FakeResponse(
             200,
             {

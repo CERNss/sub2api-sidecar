@@ -1534,10 +1534,6 @@ function ExistingOrchestrationView({
   }, []);
 
   const selectedUser = users.find((user) => idValue(user.user_id) === selectedUserId) ?? null;
-  const targetGroups = useMemo(
-    () => (mode === "replace_group" ? groups.filter((group) => group.rotation_supported) : groups),
-    [groups, mode]
-  );
   const selectedKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
   const userOptions = useMemo(() => users.map(buildUserOption), [users]);
   const selectedKeys = useMemo(
@@ -1602,13 +1598,45 @@ function ExistingOrchestrationView({
     const primaryGroup = mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup;
     return primaryGroup ? [primaryGroup] : [];
   }, [mode, selectedKeyPrimaryGroup, selectedUserDirectGroup]);
+  const targetGroups = useMemo(() => {
+    const currentGroup = mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup;
+    const currentGroupValue = idValue(currentGroup?.group_id);
+    if (!selectedUser) {
+      return [];
+    }
+    const candidates = mode === "replace_group"
+      ? groups.filter((group) => group.rotation_supported)
+      : groups;
+    const ordered = new Map<string, OrchestrationGroup>();
+    if (currentGroupValue && currentGroup) {
+      ordered.set(currentGroupValue, currentGroup);
+    }
+    candidates.forEach((group) => {
+      const groupValue = idValue(group.group_id);
+      if (!groupValue) {
+        return;
+      }
+      ordered.set(groupValue, group);
+    });
+    return Array.from(ordered.values());
+  }, [groups, mode, selectedKeyPrimaryGroup, selectedUser, selectedUserDirectGroup]);
   const sourceGroupOptions = useMemo(() => sourceGroups.map((group) => buildGroupOption(group)), [sourceGroups]);
   const targetGroupOptions = useMemo(
-    () =>
-      targetGroups.map((group) =>
-        buildGroupOption(group, mode === "replace_group" && !group.rotation_supported)
-      ),
-    [mode, targetGroups]
+    () => {
+      const currentGroupId = idValue((mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup)?.group_id);
+      return targetGroups.map((group) => {
+        const groupId = idValue(group.group_id);
+        const isCurrentGroup = Boolean(currentGroupId && groupId === currentGroupId);
+        const disabled = isCurrentGroup || (mode === "replace_group" && !group.rotation_supported);
+        const option = buildGroupOption(group, disabled);
+        return {
+          ...option,
+          label: isCurrentGroup ? `${option.label}（当前）` : option.label,
+          searchText: isCurrentGroup ? `${option.searchText} 当前 current` : option.searchText
+        };
+      });
+    },
+    [mode, selectedKeyPrimaryGroup, selectedUserDirectGroup, targetGroups]
   );
   const graphGroupOptions = useMemo<GroupSelectOption[]>(
     () => [
@@ -2144,9 +2172,11 @@ function ExistingOrchestrationView({
 
   useEffect(() => {
     setTargetGroupId((current) =>
-      current && targetGroups.some((group) => idValue(group.group_id) === current) ? current : ""
+      current && targetGroupOptions.some((option) => option.value === current && !option.disabled)
+        ? current
+        : ""
     );
-  }, [targetGroups]);
+  }, [targetGroupOptions]);
 
   function refreshGraphLayout() {
     setGraphRefreshTick((value) => value + 1);
