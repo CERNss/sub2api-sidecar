@@ -635,25 +635,64 @@ class Sub2APIClient:
                 group_ids.append(group_id)
                 group_names.append(str(group_name) if group_name not in (None, "") else "")
 
-        for field_name in ("group_id", "current_group_id", "default_group_id"):
-            add_group(item.get(field_name), item.get("group_name") or item.get("current_group_name"))
-
-        group = item.get("group") or item.get("current_group")
-        if isinstance(group, dict):
+        for field_name in (
+            "group_id",
+            "groupId",
+            "current_group_id",
+            "currentGroupId",
+            "default_group_id",
+            "defaultGroupId",
+            "bound_group_id",
+            "boundGroupId",
+        ):
             add_group(
-                group.get("id") or group.get("group_id"),
-                group.get("name") or group.get("group_name"),
+                item.get(field_name),
+                item.get("group_name")
+                or item.get("groupName")
+                or item.get("current_group_name")
+                or item.get("currentGroupName"),
             )
 
-        for field_name in ("groups", "group_ids", "allowed_groups", "bound_groups"):
+        for field_name in ("group", "current_group", "currentGroup", "default_group", "defaultGroup"):
+            group = item.get(field_name)
+            if isinstance(group, dict):
+                add_group(
+                    group.get("id") or group.get("group_id") or group.get("groupId"),
+                    group.get("name") or group.get("group_name") or group.get("groupName"),
+                )
+
+        for field_name in ("binding", "bindings", "account_group", "accountGroup"):
+            raw_binding = item.get(field_name)
+            raw_bindings = raw_binding if isinstance(raw_binding, list) else [raw_binding]
+            for binding in raw_bindings:
+                if isinstance(binding, dict):
+                    add_group(
+                        binding.get("group_id")
+                        or binding.get("groupId"),
+                        binding.get("group_name")
+                        or binding.get("groupName")
+                        or binding.get("name"),
+                    )
+
+        for field_name in (
+            "groups",
+            "group_ids",
+            "groupIds",
+            "allowed_groups",
+            "allowedGroups",
+            "bound_groups",
+            "boundGroups",
+            "bind_groups",
+            "bindGroups",
+        ):
             raw_groups = item.get(field_name)
             if not isinstance(raw_groups, list):
                 continue
             for raw_group in raw_groups:
                 if isinstance(raw_group, dict):
                     add_group(
-                        raw_group.get("id") or raw_group.get("group_id"),
-                        raw_group.get("name") or raw_group.get("group_name"),
+                        raw_group.get("id") or raw_group.get("group_id") or raw_group.get("groupId"),
+                        raw_group.get("name") or raw_group.get("group_name") or raw_group.get("groupName"),
                     )
                 else:
                     add_group(raw_group)

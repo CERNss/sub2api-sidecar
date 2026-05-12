@@ -1240,10 +1240,59 @@ pre {
   flex-wrap: wrap;
 }
 
+.canvas-filter-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto 320px auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.canvas-filter-row .ant-typography {
+  white-space: nowrap;
+}
+
+.canvas-group-filter {
+  min-width: 0;
+}
+
 .flow-canvas {
   flex: 1 1 auto;
   min-height: 0;
-  background: #f8fafc;
+  position: relative;
+  overflow: hidden;
+  background-color: #f8fafc;
+  background-image: radial-gradient(circle, rgba(100, 116, 139, 0.18) 1px, transparent 1.4px);
+  background-size: 20px 20px;
+}
+
+.flow-canvas .react-flow {
+  width: 100%;
+  height: 100%;
+}
+
+.flow-canvas .react-flow__node {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.flow-canvas .react-flow__node-default,
+.flow-canvas .react-flow__node-input,
+.flow-canvas .react-flow__node-output {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.flow-canvas .react-flow__edge-path {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-canvas .react-flow-node-special .graph-node {
+  border-style: dashed;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
 }
 
 .ant-orchestration-form {
@@ -1861,23 +1910,11 @@ pre {
   word-break: break-word;
 }
 
-.react-flow__node-default,
-.react-flow__node-input,
-.react-flow__node-output {
-  width: 244px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  box-shadow: none;
-  text-align: left;
-}
-
 .graph-node {
   width: 272px;
   min-height: 82px;
   padding: 12px;
-  border: 1px solid #d9e1ec;
+  border: 1px solid oklch(0.9 0.018 250);
   border-radius: 8px;
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr);
@@ -1885,6 +1922,9 @@ pre {
   align-items: center;
   background: #ffffff;
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  cursor: pointer;
+  pointer-events: auto;
+  user-select: none;
 }
 
 .graph-node:has(.account-usage-grid),
@@ -1953,10 +1993,14 @@ pre {
   font-size: 12px;
 }
 
-.graph-node .ant-tag {
+.graph-node > .ant-tag {
   grid-column: 1 / -1;
   width: fit-content;
+  max-width: 100%;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .graph-node-footer {
@@ -2481,6 +2525,7 @@ pre {
 
   .operator-toolbar,
   .toolbar-actions,
+  .canvas-filter-row,
   .canvas-title-row,
   .panel-title-row,
   .run-records-toolbar,
@@ -2511,6 +2556,7 @@ pre {
   .ant-field-grid,
   .run-records-summary,
   .summary-grid,
+  .canvas-filter-row,
   .flow-row {
     grid-template-columns: 1fr;
   }

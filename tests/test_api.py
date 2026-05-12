@@ -161,6 +161,26 @@ class FakeRotationSub2API:
                 "reset_at": "2026-05-11T09:00:00Z",
                 "groups": [{"id": 22, "name": "rotation-high"}],
             },
+            {
+                "id": 7,
+                "name": "numeric-account-id",
+                "provider": "openai",
+                "platform": "openai",
+                "type": "oauth",
+                "status": "active",
+                "available": True,
+            },
+            {
+                "id": "acct-camel",
+                "name": "camel-case-bindings",
+                "provider": "openai",
+                "platform": "openai",
+                "type": "oauth",
+                "status": "active",
+                "available": True,
+                "groupIds": [33],
+                "binding": {"id": "binding-1", "groupId": 44, "groupName": "subscription-dedicated"},
+            },
         ]
         self.user_api_keys: dict[int, list[dict[str, object]]] = {}
         self.replace_calls: list[dict[str, object]] = []
@@ -872,6 +892,9 @@ def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
     assert accounts["acct-2"]["last_error"] == "429 too many requests"
     assert accounts["acct-2"]["usage_5h_percent"] == 0.0
     assert accounts["acct-2"]["usage_7d_percent"] == 25.0
+    assert accounts[7]["group_ids"] == []
+    assert accounts["acct-camel"]["group_ids"] == [44, 33]
+    assert accounts["acct-camel"]["group_names"] == ["subscription-dedicated", ""]
     assert keys_response.status_code == 200
     assert keys_response.json()["items"][0]["key_id"] == "key-101"
 
