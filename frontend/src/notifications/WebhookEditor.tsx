@@ -1,5 +1,5 @@
 import { Tag } from "antd";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import {
   NotificationSettings,
   NotificationWebhook,
@@ -14,11 +14,15 @@ type Props = {
   onSelect: (id: string) => void;
   onChange: (id: string, partial: Partial<NotificationWebhook>) => void;
   onAdd: () => void;
+  onRemove: (id: string) => void;
 };
 
-export function WebhookEditor({ settings, selectedWebhookId, onSelect, onChange, onAdd }: Props) {
+export function WebhookEditor({ settings, selectedWebhookId, onSelect, onChange, onAdd, onRemove }: Props) {
   const selected =
     settings.webhooks.find((webhook) => webhook.id === selectedWebhookId) ?? settings.webhooks[0];
+  const selectedRuleCount = selected
+    ? settings.rules.filter((rule) => rule.targetWebhookIds.includes(selected.id)).length
+    : 0;
 
   return (
     <section className="notif-section">
@@ -113,6 +117,18 @@ export function WebhookEditor({ settings, selectedWebhookId, onSelect, onChange,
               onChange={(event) => onChange(selected.id, { secret: event.target.value })}
             />
           </label>
+
+          <div className="notif-actions notif-webhook-actions">
+            <span className="notif-action-note">
+              {selectedRuleCount > 0
+                ? `删除后会从 ${selectedRuleCount} 条规则中移除。`
+                : "删除后不会影响现有规则。"}
+            </span>
+            <button className="button danger compact" type="button" onClick={() => onRemove(selected.id)}>
+              <Trash2 size={16} aria-hidden="true" />
+              删除 Webhook
+            </button>
+          </div>
         </div>
       ) : null}
     </section>

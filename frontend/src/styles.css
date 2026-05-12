@@ -497,6 +497,17 @@ pre {
   background: #dbeafe;
 }
 
+.button.danger {
+  color: #991b1b;
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+
+.button.danger:hover {
+  background: #ffe4e6;
+  border-color: #fda4af;
+}
+
 .button.compact {
   min-height: 38px;
   padding: 0 12px;
@@ -558,6 +569,12 @@ pre {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  flex-wrap: wrap;
+}
+
+.notif-section-head > div:first-child {
+  min-width: min(100%, 260px);
+  flex: 1 1 320px;
 }
 
 .notif-section-head h3 {
@@ -750,6 +767,9 @@ pre {
 
 .notif-rule-form {
   min-width: 0;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
 .notif-rule-head {
@@ -757,6 +777,9 @@ pre {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
+  padding: 16px;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
 }
 
 .notif-rule-head h4 {
@@ -773,10 +796,68 @@ pre {
   line-height: 1.5;
 }
 
+.notif-rule-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.notif-rule-section {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.notif-rule-section-title {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.notif-rule-section-title > span {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #e0f2f1;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.notif-rule-section-title h5 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 13.5px;
+  line-height: 1.3;
+}
+
+.notif-rule-section-title p {
+  margin: 2px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.notif-rule-trigger-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.95fr) minmax(120px, 0.8fr) minmax(140px, 0.9fr);
+  gap: 12px;
+}
+
 .notif-webhook-checks {
   display: grid;
   gap: 8px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid #dbe5f0;
   border-radius: 8px;
   padding: 8px;
   background: #ffffff;
@@ -790,11 +871,21 @@ pre {
   border-radius: 6px;
   align-items: center;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background 0.12s, border-color 0.12s;
+  border: 1px solid transparent;
 }
 
 .notif-webhook-check:hover {
   background: #f1f5f9;
+}
+
+.notif-webhook-check.selected {
+  border-color: #14b8a6;
+  background: #f0fdfa;
+}
+
+.notif-webhook-check.muted:not(.selected) {
+  background: #f8fafc;
 }
 
 .notif-webhook-check input {
@@ -821,6 +912,56 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.notif-target-empty {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.notif-target-empty strong {
+  color: #0f172a;
+  font-size: 13.5px;
+}
+
+.notif-target-empty span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.notif-json-card {
+  min-width: 0;
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.notif-json-card pre {
+  max-height: 220px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  background: #0f172a;
+  color: #dbeafe;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.notif-json-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
 }
 
 .notif-empty {
@@ -852,6 +993,25 @@ pre {
   gap: 10px;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.notif-rule-actions {
+  justify-content: space-between;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.notif-webhook-actions {
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.notif-action-note {
+  min-width: 0;
+  color: #64748b;
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 
 .notif-save-row {
@@ -976,8 +1136,27 @@ pre {
   .notif-rule-layout {
     grid-template-columns: 1fr;
   }
+  .notif-rule-trigger-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .notif-grid-3 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .notif-section-head,
+  .notif-rule-head {
+    flex-direction: column;
+  }
+  .notif-grid-2,
+  .notif-grid-3,
+  .notif-rule-trigger-grid {
+    grid-template-columns: 1fr;
+  }
+  .notif-webhook-actions,
+  .notif-rule-actions {
+    align-items: stretch;
   }
 }
 

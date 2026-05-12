@@ -44,6 +44,28 @@ export function NotificationPanel() {
     setSelectedWebhookId(next.id);
   }
 
+  function removeWebhook(id: string) {
+    if (!id) return;
+    const nextSelectedWebhookId =
+      settings.webhooks.filter((webhook) => webhook.id !== id)[0]?.id ?? "";
+    setSettings((current) => {
+      const remainingWebhooks = current.webhooks.filter((webhook) => webhook.id !== id);
+      return {
+        ...current,
+        webhooks: remainingWebhooks,
+        rules: current.rules.map((rule) => ({
+          ...rule,
+          targetWebhookIds: rule.targetWebhookIds.filter((webhookId) => webhookId !== id)
+        }))
+      };
+    });
+    setSelectedWebhookId((current) => {
+      if (current !== id) return current;
+      return nextSelectedWebhookId;
+    });
+    setStatus({ message: "Webhook 已删除，关联规则已取消该接收器。", tone: "success" });
+  }
+
   function updateRule(id: string, partial: Partial<NotificationRule>) {
     setSettings((current) => ({
       ...current,
@@ -120,6 +142,7 @@ export function NotificationPanel() {
           onSelect={setSelectedWebhookId}
           onChange={updateWebhook}
           onAdd={addWebhook}
+          onRemove={removeWebhook}
         />
 
         <RuleEditor
@@ -130,6 +153,7 @@ export function NotificationPanel() {
           onAddRule={addRule}
           onRemoveRule={removeSelectedRule}
           onTest={sendTest}
+          onStatus={(message, tone) => setStatus({ message, tone })}
         />
 
         <div className="notif-actions notif-save-row">
