@@ -14,7 +14,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           "vendor-antd": ["antd", "@ant-design/icons"],
-          "vendor-flow": ["@xyflow/react"]
+          "vendor-graph": ["@xyflow/react", "dagre"]
         }
       }
     }

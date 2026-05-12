@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import dagre from "dagre";
 import { NotificationPanel } from "./notifications/Panel";
 import {
   Alert,
@@ -183,6 +184,7 @@ type GroupSelectOption = {
   label: string;
   searchText: string;
   groupIdText: string;
+  isVirtual?: boolean;
   disabled?: boolean;
 };
 
@@ -229,6 +231,49 @@ type OrchestrationAccountsPayload = ApiPayload & {
 };
 
 type GraphNodeTagColor = "default" | "blue" | "green" | "gold" | "red" | "purple" | "magenta" | "processing";
+type GraphNodeTone = "user" | "active" | "source" | "target" | "account" | "neutral";
+type GraphNodeKind = "key" | "user" | "group" | "account";
+type GraphNodeLane = "main" | "special";
+type GraphEdgeRelation = "key-user" | "user-group" | "group-account" | "key-route-group";
+
+type OrchestrationGraphNodeData = Record<string, unknown> & {
+  kind: GraphNodeKind;
+  lane: GraphNodeLane;
+  label: ReactNode;
+  width: number;
+  height: number;
+  userId?: string;
+  keyId?: string;
+  groupId?: string;
+  accountId?: string;
+  directGroupId?: string;
+  routeGroupId?: string;
+  relatedGroupIds?: string[];
+  directUserCount?: number;
+  accountCount?: number;
+  groupCount?: number;
+};
+
+type OrchestrationGraphNode = Node<OrchestrationGraphNodeData>;
+
+type OrchestrationGraphEdgeData = Record<string, unknown> & {
+  active?: boolean;
+  route?: boolean;
+  minlen?: number;
+  relation?: GraphEdgeRelation;
+};
+
+type OrchestrationGraphEdge = Edge<OrchestrationGraphEdgeData> & {
+  pathOptions?: {
+    borderRadius?: number;
+    offset?: number;
+  };
+};
+
+type OrchestrationGraphData = {
+  nodes: OrchestrationGraphNode[];
+  edges: OrchestrationGraphEdge[];
+};
 
 type OrchestrationApiKey = {
   key_id: unknown;
@@ -339,9 +384,16 @@ type AutoRotationConfigPayload = ApiPayload & {
 };
 
 const emptyStatus: StatusState = { message: "", tone: "idle" };
-const graphTopY = 42;
-const graphRowGap = 214;
-const graphNodeMinGap = 208;
+const graphCompactNodeSize = { width: 272, height: 82 };
+const graphTallNodeSize = { width: 272, height: 184 };
+const graphLayerOrder: Record<GraphNodeKind, number> = { key: 0, user: 1, group: 2, account: 3 };
+const graphLeftX = 32;
+const graphColumnStepX = 400;
+const graphTopY = 48;
+const graphColumnGapY = 34;
+const graphDagreRankSep = 142;
+const graphDagreNodeSep = 72;
+const ungroupedGraphFilterValue = "__ungrouped__";
 const usageWindowOptions = [
   { label: "最近 5 小时", value: "5h" },
   { label: "最近 1 天", value: "1d" },
@@ -469,16 +521,147 @@ function average(values: number[], fallback: number) {
   return values.reduce((total, value) => total + value, 0) / values.length;
 }
 
-function spreadVerticalPositions(items: Array<{ id: string; desiredY: number }>, minGap = graphNodeMinGap) {
-  const positions = new Map<string, number>();
-  const sortedItems = [...items].sort((first, second) => first.desiredY - second.desiredY || first.id.localeCompare(second.id));
-  let nextY = graphTopY;
-  sortedItems.forEach((item) => {
-    const y = Math.max(item.desiredY, nextY);
-    positions.set(item.id, y);
-    nextY = y + minGap;
+function graphNodeSize(kind: GraphNodeKind) {
+  return kind === "group" || kind === "account" ? graphTallNodeSize : graphCompactNodeSize;
+}
+
+function graphEdgeMinlen(sourceKind: GraphNodeKind, targetKind: GraphNodeKind): number {
+  return Math.max(1, Math.abs(graphLayerOrder[targetKind] - graphLayerOrder[sourceKind]));
+}
+
+function graphNodeX(kind: GraphNodeKind, laneOffset = 0): number {
+  return graphLeftX + (laneOffset + graphLayerOrder[kind]) * graphColumnStepX;
+}
+
+function groupIdsForGraphNode(node: OrchestrationGraphNode): string[] {
+  if (node.data.kind === "group" && node.data.groupId) {
+    return [node.data.groupId];
+  }
+  const ids = [
+    node.data.directGroupId,
+    node.data.routeGroupId,
+    ...(Array.isArray(node.data.relatedGroupIds) ? node.data.relatedGroupIds : [])
+  ];
+  return Array.from(new Set(ids.filter((id): id is string => Boolean(id))));
+}
+
+function filterGraphByGroups(
+  nodes: OrchestrationGraphNode[],
+  edges: OrchestrationGraphEdge[],
+  selectedGroupIds: string[]
+): OrchestrationGraphData {
+  if (selectedGroupIds.length === 0) {
+    return { nodes, edges };
+  }
+  const selectedGroupIdSet = new Set(selectedGroupIds);
+  const includesUngrouped = selectedGroupIdSet.has(ungroupedGraphFilterValue);
+  const seedVisibleNodeIds = new Set(
+    nodes
+      .filter((node) => {
+        const groupIds = groupIdsForGraphNode(node);
+        return (
+          groupIds.some((groupId) => selectedGroupIdSet.has(groupId)) ||
+          (includesUngrouped && groupIds.length === 0)
+        );
+      })
+      .map((node) => node.id)
+  );
+  const visibleNodeIds = new Set(seedVisibleNodeIds);
+  edges.forEach((edge) => {
+    if (edge.data?.relation !== "key-user") {
+      return;
+    }
+    if (seedVisibleNodeIds.has(edge.source) || seedVisibleNodeIds.has(edge.target)) {
+      visibleNodeIds.add(edge.source);
+      visibleNodeIds.add(edge.target);
+    }
   });
-  return positions;
+  const filteredNodes = nodes.filter((node) => visibleNodeIds.has(node.id));
+  const filteredEdges = edges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target));
+  return { nodes: filteredNodes, edges: filteredEdges };
+}
+
+function findIncompleteGraphNodeIds(
+  nodes: OrchestrationGraphNode[],
+  edges: OrchestrationGraphEdge[]
+): Set<string> {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const adjacency = new Map<string, Set<string>>();
+  const edgeRelationsByComponentNode = new Map<string, Set<GraphEdgeRelation>>();
+  nodes.forEach((node) => {
+    adjacency.set(node.id, new Set());
+    edgeRelationsByComponentNode.set(node.id, new Set());
+  });
+  edges.forEach((edge) => {
+    if (!nodeById.has(edge.source) || !nodeById.has(edge.target)) {
+      return;
+    }
+    adjacency.get(edge.source)?.add(edge.target);
+    adjacency.get(edge.target)?.add(edge.source);
+    if (edge.data?.relation) {
+      edgeRelationsByComponentNode.get(edge.source)?.add(edge.data.relation);
+      edgeRelationsByComponentNode.get(edge.target)?.add(edge.data.relation);
+    }
+  });
+
+  const incompleteIds = new Set<string>();
+  const visited = new Set<string>();
+  nodes.forEach((startNode) => {
+    if (visited.has(startNode.id)) {
+      return;
+    }
+    const componentIds: string[] = [];
+    const relationSet = new Set<GraphEdgeRelation>();
+    const stack = [startNode.id];
+    visited.add(startNode.id);
+    while (stack.length > 0) {
+      const nodeId = stack.pop();
+      if (!nodeId) {
+        continue;
+      }
+      componentIds.push(nodeId);
+      edgeRelationsByComponentNode.get(nodeId)?.forEach((relation) => relationSet.add(relation));
+      adjacency.get(nodeId)?.forEach((nextId) => {
+        if (!visited.has(nextId)) {
+          visited.add(nextId);
+          stack.push(nextId);
+        }
+      });
+    }
+    const componentNodes = componentIds.map((nodeId) => nodeById.get(nodeId)).filter((node): node is OrchestrationGraphNode => Boolean(node));
+    const hasKey = componentNodes.some((node) => node.data.kind === "key");
+    const hasUser = componentNodes.some((node) => node.data.kind === "user");
+    const hasGroup = componentNodes.some((node) => node.data.kind === "group");
+    const hasAccount = componentNodes.some((node) => node.data.kind === "account");
+    const hasUngroupedUser = componentNodes.some(
+      (node) => node.data.kind === "user" && !node.data.directGroupId
+    );
+    const hasGroupWithoutUsers = componentNodes.some(
+      (node) => node.data.kind === "group" && (node.data.directUserCount ?? 0) === 0
+    );
+    const hasGroupWithoutAccounts = componentNodes.some(
+      (node) => node.data.kind === "group" && (node.data.accountCount ?? 0) === 0
+    );
+    const hasAccountWithoutGroups = componentNodes.some(
+      (node) => node.data.kind === "account" && (node.data.groupCount ?? 0) === 0
+    );
+    const isIncomplete =
+      !hasKey ||
+      !hasUser ||
+      !hasGroup ||
+      !hasAccount ||
+      !relationSet.has("key-user") ||
+      !relationSet.has("user-group") ||
+      !relationSet.has("group-account") ||
+      hasUngroupedUser ||
+      hasGroupWithoutUsers ||
+      hasGroupWithoutAccounts ||
+      hasAccountWithoutGroups;
+    if (isIncomplete) {
+      componentIds.forEach((nodeId) => incompleteIds.add(nodeId));
+    }
+  });
+  return incompleteIds;
 }
 
 function userDisplayName(user: OrchestrationUser): string {
@@ -538,7 +721,11 @@ function renderGroupOption(option: { label?: ReactNode; data: GroupSelectOption 
   return (
     <div className="group-option">
       <span className="group-option-name">{option.label}</span>
-      {groupOption?.groupIdText ? <span className="group-option-id">ID {groupOption.groupIdText}</span> : null}
+      {groupOption?.groupIdText ? (
+        <span className="group-option-id">
+          {groupOption.isVirtual ? groupOption.groupIdText : `ID ${groupOption.groupIdText}`}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -547,13 +734,30 @@ function apiKeyGroupIdText(key: OrchestrationApiKey): string {
   return idValue(key.group_id) || "-";
 }
 
+function apiKeyRouteLabel(key: OrchestrationApiKey): string {
+  const groupId = idValue(key.group_id);
+  if (!groupId) {
+    return "未绑定路由组";
+  }
+  const groupName = key.group_name?.trim();
+  return groupName ? `路由组 ${groupName} (${groupId})` : `路由组 ${groupId}`;
+}
+
+function userDirectGroupLabel(user: OrchestrationUser): string {
+  const groupId = idValue(user.current_group_id);
+  if (!groupId) {
+    return "无直接用户组";
+  }
+  return user.current_group_name?.trim() || `用户组 ${groupId}`;
+}
+
 function accountDisplayName(account: OrchestrationAccount): string {
   return account.name?.trim() || account.email?.trim() || unknownToText(account.account_id);
 }
 
 function accountGroupCountText(account: OrchestrationAccount): string {
   const count = account.group_ids.filter((groupId) => idValue(groupId)).length;
-  return count > 0 ? `${count} 分组` : "未绑定分组";
+  return count > 0 ? `绑定 ${count} 分组` : "未绑定分组";
 }
 
 function accountAvailabilityLabel(account: OrchestrationAccount): string {
@@ -605,7 +809,7 @@ function accountAvailabilityColor(account: OrchestrationAccount): GraphNodeTagCo
 }
 
 function accountAvailabilityDetail(account: OrchestrationAccount): string {
-  return `Account ${unknownToText(account.account_id)} · ${accountGroupCountText(account)}`;
+  return `Account ID ${unknownToText(account.account_id)} · ${accountGroupCountText(account)}`;
 }
 
 function trimFixed(value: number, digits: number): string {
@@ -657,6 +861,14 @@ function capacityTone(current: number | null, total: number | null): CapacityTon
     return "warning";
   }
   return "normal";
+}
+
+function defaultGraphTagColor(tone: GraphNodeTone): GraphNodeTagColor {
+  if (tone === "target") return "green";
+  if (tone === "source") return "gold";
+  if (tone === "active") return "blue";
+  if (tone === "account") return "purple";
+  return "default";
 }
 
 function CapacityValue({
@@ -782,6 +994,224 @@ function loginRedirectPath(): string {
     return nextPath;
   }
   return "/";
+}
+
+function layoutLaneWithDagre(
+  nodes: OrchestrationGraphNode[],
+  edges: OrchestrationGraphEdge[],
+  laneOffset = 0
+): OrchestrationGraphNode[] {
+  if (nodes.length === 0) {
+    return [];
+  }
+  const dagreGraph = new dagre.graphlib.Graph();
+  dagreGraph.setDefaultEdgeLabel(() => ({}));
+  dagreGraph.setGraph({
+    rankdir: "LR",
+    align: "UL",
+    ranksep: graphDagreRankSep,
+    nodesep: graphDagreNodeSep,
+    marginx: 0,
+    marginy: graphTopY,
+    ranker: "tight-tree"
+  });
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  nodes.forEach((node) => {
+    dagreGraph.setNode(node.id, {
+      width: node.data.width,
+      height: node.data.height,
+      rank: graphLayerOrder[node.data.kind]
+    });
+  });
+  edges
+    .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+    .forEach((edge) => {
+      dagreGraph.setEdge(edge.source, edge.target, {
+        id: edge.id,
+        minlen: edge.data?.minlen ?? 1,
+        weight: edge.data?.active ? 3 : 1
+      });
+    });
+  dagre.layout(dagreGraph);
+
+  const nextNodes = nodes.map((node) => {
+    const layoutNode = dagreGraph.node(node.id) as { y?: number } | undefined;
+    return {
+      ...node,
+      position: {
+        x: graphNodeX(node.data.kind, laneOffset),
+        y: Math.max(graphTopY, (layoutNode?.y ?? graphTopY) - node.data.height / 2)
+      }
+    };
+  });
+  const layerBottom = new Map<string, number>();
+  return [...nextNodes]
+    .sort((first, second) => {
+      const laneDiff = first.data.lane.localeCompare(second.data.lane);
+      if (laneDiff) {
+        return laneDiff;
+      }
+      const layerDiff = graphLayerOrder[first.data.kind] - graphLayerOrder[second.data.kind];
+      return layerDiff || first.position.y - second.position.y || first.id.localeCompare(second.id);
+    })
+    .map((node) => {
+      const layerKey = `${node.data.lane}-${node.position.x}`;
+      const previousBottom = layerBottom.get(layerKey) ?? graphTopY - graphColumnGapY;
+      const nextY = Math.max(node.position.y, previousBottom + graphColumnGapY);
+      layerBottom.set(layerKey, nextY + node.data.height);
+      return { ...node, position: { ...node.position, y: nextY } };
+    });
+}
+
+function layoutGraphWithDagre(
+  nodes: OrchestrationGraphNode[],
+  edges: OrchestrationGraphEdge[]
+): OrchestrationGraphData {
+  const specialNodes = nodes.filter((node) => node.data.lane === "special");
+  const mainNodes = nodes.filter((node) => node.data.lane === "main");
+  const specialMaxLayer = specialNodes.reduce(
+    (maxLayer, node) => Math.max(maxLayer, graphLayerOrder[node.data.kind]),
+    -1
+  );
+  const mainLaneOffset = specialMaxLayer + 1;
+  return {
+    nodes: [
+      ...layoutLaneWithDagre(specialNodes, edges),
+      ...layoutLaneWithDagre(mainNodes, edges, mainLaneOffset)
+    ],
+    edges
+  };
+}
+
+function createGraphNode({
+  id,
+  kind,
+  lane = "main",
+  label,
+  data,
+  selected = false
+}: {
+  id: string;
+  kind: GraphNodeKind;
+  lane?: GraphNodeLane;
+  label: ReactNode;
+  data: Omit<OrchestrationGraphNodeData, "kind" | "lane" | "label" | "width" | "height">;
+  selected?: boolean;
+}): OrchestrationGraphNode {
+  const size = graphNodeSize(kind);
+  return {
+    id,
+    type: kind === "key" ? "input" : kind === "account" ? "output" : "default",
+    position: { x: graphNodeX(kind), y: graphTopY },
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
+    selected,
+    className: lane === "special" ? "react-flow-node-special" : undefined,
+    data: { ...data, kind, lane, label, width: size.width, height: size.height },
+    style: { width: size.width, height: size.height }
+  };
+}
+
+function createGraphEdge({
+  id,
+  source,
+  target,
+  sourceKind,
+  targetKind,
+  relation,
+  active = false,
+  route = false,
+  label
+}: {
+  id: string;
+  source: string;
+  target: string;
+  sourceKind: GraphNodeKind;
+  targetKind: GraphNodeKind;
+  relation: GraphEdgeRelation;
+  active?: boolean;
+  route?: boolean;
+  label?: string;
+}): OrchestrationGraphEdge {
+  return {
+    id,
+    source,
+    target,
+    type: "smoothstep",
+    markerEnd: { type: MarkerType.ArrowClosed },
+    label,
+    labelShowBg: Boolean(label),
+    labelBgPadding: [6, 3],
+    labelBgBorderRadius: 4,
+    labelStyle: { fill: active ? "#1d4ed8" : "#475569", fontSize: 11, fontWeight: 650 },
+    labelBgStyle: { fill: active ? "#eff6ff" : "#ffffff", fillOpacity: 0.94 },
+    pathOptions: { borderRadius: 10, offset: route ? 32 : 20 },
+    data: { active, route, relation, minlen: graphEdgeMinlen(sourceKind, targetKind) },
+    style: {
+      stroke: active ? "#2563eb" : "#94a3b8",
+      strokeWidth: active ? 1.9 : 1.25,
+      strokeDasharray: route ? "5 5" : undefined
+    }
+  };
+}
+
+function OrchestrationFlowCanvas({
+  data,
+  refreshSignal,
+  onSelect
+}: {
+  data: OrchestrationGraphData;
+  refreshSignal: number;
+  onSelect: (userId?: unknown, keyId?: unknown) => void;
+}) {
+  const [nodes, setNodes, onNodesChange] = useNodesState<OrchestrationGraphNode>(data.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<OrchestrationGraphEdge>(data.edges);
+  const [flowInstance, setFlowInstance] =
+    useState<ReactFlowInstance<OrchestrationGraphNode, OrchestrationGraphEdge> | null>(null);
+  const lastViewportFitRef = useRef<{ nodeCount: number; refreshSignal: number }>({
+    nodeCount: 0,
+    refreshSignal: -1
+  });
+
+  useEffect(() => {
+    setNodes(data.nodes);
+    setEdges(data.edges);
+  }, [data, setEdges, setNodes]);
+
+  useEffect(() => {
+    if (!flowInstance) {
+      return;
+    }
+    const shouldFitInitialNodes = lastViewportFitRef.current.nodeCount === 0 && data.nodes.length > 0;
+    const shouldFitRefresh = lastViewportFitRef.current.refreshSignal !== refreshSignal;
+    if (!shouldFitInitialNodes && !shouldFitRefresh) {
+      lastViewportFitRef.current.nodeCount = data.nodes.length;
+      return;
+    }
+    lastViewportFitRef.current = { nodeCount: data.nodes.length, refreshSignal };
+    window.requestAnimationFrame(() => {
+      void flowInstance.fitView({ maxZoom: 1, minZoom: 0.28, padding: 0.2, duration: 240 });
+    });
+  }, [data, flowInstance, refreshSignal]);
+
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      onNodesChange={onNodesChange}
+      onEdgesChange={onEdgesChange}
+      onNodeClick={(_, node) => onSelect(node.data.userId, node.data.keyId)}
+      onInit={setFlowInstance}
+      minZoom={0.28}
+      maxZoom={1.25}
+      nodesDraggable
+      autoPanOnNodeFocus={false}
+      proOptions={{ hideAttribution: true }}
+    >
+      <Background />
+      <Controls />
+    </ReactFlow>
+  );
 }
 
 function App() {
@@ -1100,13 +1530,14 @@ function ExistingOrchestrationView({
   const [sourceGroupId, setSourceGroupId] = useState("");
   const [targetGroupId, setTargetGroupId] = useState("");
   const [selectedKeyIds, setSelectedKeyIds] = useState<string[]>([]);
+  const [graphGroupFilterIds, setGraphGroupFilterIds] = useState<string[]>([]);
   const [reason, setReason] = useState("");
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [recordsRefreshSignal, setRecordsRefreshSignal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const [graphRefreshTick, setGraphRefreshTick] = useState(0);
   const userSelectRef = useRef<RefSelectProps | null>(null);
   const userSearchTimerRef = useRef<number | null>(null);
   const unavailableAccountCount = useMemo(
@@ -1165,6 +1596,20 @@ function ExistingOrchestrationView({
       ),
     [mode, targetGroups]
   );
+  const graphGroupOptions = useMemo<GroupSelectOption[]>(
+    () => [
+      ...groups.map((group) => buildGroupOption(group)),
+      {
+        value: ungroupedGraphFilterValue,
+        label: "未分组",
+        searchText: "未分组 无分组 ungrouped",
+        groupIdText: "无直接组 / 无绑定组",
+        isVirtual: true
+      }
+    ],
+    [groups]
+  );
+  const graphGroupFilterSet = useMemo(() => new Set(graphGroupFilterIds), [graphGroupFilterIds]);
   const selectedKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
   const userOptions = useMemo(() => users.map(buildUserOption), [users]);
   const selectedKeys = useMemo(
@@ -1315,84 +1760,58 @@ function ExistingOrchestrationView({
         };
       })
       .sort((first, second) => first.score - second.score || first.groupValue.localeCompare(second.groupValue));
-    const initialGroupYById = new Map<string, number>();
-    groupOrder.forEach(({ groupValue }, index) => {
-      initialGroupYById.set(groupValue, graphTopY + index * graphRowGap);
-    });
-
     const userRows = users
       .map((user, fallbackIndex) => {
         const userId = idValue(user.user_id);
         const userGroupId = idValue(user.current_group_id);
-        const keyRows = userKeyRows.filter((row) => row.userId === userId);
-        const keyGroupScores = keyRows.map((row) => initialGroupYById.get(idValue(row.key.group_id))).filter((value): value is number => typeof value === "number");
+        const keyGroupIndexes = userKeyRows
+          .filter((row) => row.userId === userId)
+          .map((row) => groupOrder.findIndex((item) => item.groupValue === idValue(row.key.group_id)))
+          .filter((index) => index >= 0);
+        const userGroupIndex = groupOrder.findIndex((item) => item.groupValue === userGroupId);
+        const relatedGroupIndexes = userGroupIndex >= 0 ? [userGroupIndex, ...keyGroupIndexes] : keyGroupIndexes;
         return {
           user,
           userId,
           fallbackIndex,
-          groupY: initialGroupYById.get(userGroupId) ?? graphTopY + groupOrder.length * graphRowGap + fallbackIndex * graphRowGap,
-          keyScore: average(keyGroupScores, fallbackIndex * graphRowGap)
+          groupScore: average(relatedGroupIndexes, groupOrder.length + fallbackIndex),
+          keyScore: average(keyGroupIndexes, fallbackIndex)
         };
       })
-      .sort((first, second) => first.groupY - second.groupY || first.keyScore - second.keyScore || first.userId.localeCompare(second.userId));
-    const userYById = spreadVerticalPositions(
-      userRows.map(({ userId }, index) => ({ id: userId, desiredY: graphTopY + index * graphRowGap }))
-    );
-    const groupYById = spreadVerticalPositions(
-      groupOrder.map(({ groupValue }) => {
-        const relatedUserY = userRows
-          .filter(({ user }) => idValue(user.current_group_id) === groupValue)
-          .map(({ userId }) => userYById.get(userId))
-          .filter((value): value is number => typeof value === "number");
-        const desiredY = average(relatedUserY, initialGroupYById.get(groupValue) ?? graphTopY);
-        return { id: groupValue, desiredY };
-      })
-    );
+      .sort((first, second) => first.groupScore - second.groupScore || first.keyScore - second.keyScore || first.userId.localeCompare(second.userId));
 
     const keyRows = userKeyRows
       .map((row, fallbackIndex) => ({
         ...row,
         fallbackIndex,
-        userY: userYById.get(row.userId) ?? graphTopY + fallbackIndex * graphRowGap,
-        groupY: groupYById.get(idValue(row.key.group_id)) ?? graphTopY + fallbackIndex * graphRowGap
+        userOrder: userRows.findIndex((item) => item.userId === row.userId),
+        groupOrder: groupOrder.findIndex((item) => item.groupValue === idValue(row.key.group_id))
       }))
-      .sort((first, second) => first.userY - second.userY || first.groupY - second.groupY || idValue(first.key.key_id).localeCompare(idValue(second.key.key_id)));
-    const keyYById = spreadVerticalPositions(
-      keyRows.map(({ userId, key }) => ({
-        id: `${userId}-${idValue(key.key_id)}`,
-        desiredY: userYById.get(userId) ?? graphTopY
-      }))
-    );
+      .sort((first, second) => first.userOrder - second.userOrder || first.groupOrder - second.groupOrder || idValue(first.key.key_id).localeCompare(idValue(second.key.key_id)));
     const accountRows = accounts
       .map((account, fallbackIndex) => {
         const accountId = idValue(account.account_id);
-        const relatedGroupY = account.group_ids
-          .map((groupId) => groupYById.get(idValue(groupId)))
-          .filter((value): value is number => typeof value === "number");
+        const relatedGroupIndexes = account.group_ids
+          .map((groupId) => groupOrder.findIndex((item) => item.groupValue === idValue(groupId)))
+          .filter((index) => index >= 0);
         return {
           account,
           accountId,
           fallbackIndex,
-          groupScore: average(relatedGroupY, graphTopY + fallbackIndex * graphRowGap)
+          groupScore: average(relatedGroupIndexes, groupOrder.length + fallbackIndex)
         };
       })
       .sort((first, second) => first.groupScore - second.groupScore || first.accountId.localeCompare(second.accountId));
-    const accountYById = spreadVerticalPositions(
-      accountRows.map(({ accountId, groupScore }, index) => ({
-        id: accountId,
-        desiredY: Number.isFinite(groupScore) ? groupScore : graphTopY + index * graphRowGap
-      }))
-    );
 
-    const groupNodes: Node[] = groupOrder.map(({ group, groupValue }) => {
+    const groupNodes: OrchestrationGraphNode[] = groupOrder.map(({ group, groupValue }) => {
       const fallbackCapacity = {
         currentConcurrency: groupCurrentConcurrency.get(groupValue) ?? null,
         concurrency: groupConcurrency.get(groupValue) ?? null
       };
       const tags = [
-        `${groupUserCounts.get(groupValue) ?? 0} 用户`,
-        `${groupKeyCounts.get(groupValue) ?? 0} Key`,
-        `${groupAccountCounts.get(groupValue) ?? 0} 账号`
+        `${groupUserCounts.get(groupValue) ?? 0} 直接用户`,
+        `${groupKeyCounts.get(groupValue) ?? 0} 路由 Key`,
+        `${groupAccountCounts.get(groupValue) ?? 0} 上游账号`
       ];
       if (groupValue === sourceGroupId) {
         tags.push("当前");
@@ -1400,77 +1819,78 @@ function ExistingOrchestrationView({
       if (groupValue === targetGroupId) {
         tags.push("目标");
       }
-      return {
+      return createGraphNode({
         id: `group-${groupValue}`,
-        position: { x: 692, y: groupYById.get(groupValue) ?? graphTopY },
-        sourcePosition: Position.Right,
-        targetPosition: Position.Left,
+        kind: "group",
         data: {
           groupId: groupValue,
-          label: (
-            <GraphNode
-              icon={<ClusterOutlined />}
-              title={group.name || "分组"}
-              subtitle={`Group ${unknownToText(group.group_id)}`}
-              tone={groupValue === sourceGroupId ? "source" : groupValue === targetGroupId ? "target" : "neutral"}
-              tag={tags.join(" / ")}
-              footer={<GroupCapacityRows group={group} fallback={fallbackCapacity} />}
-            />
-          )
-        }
-      };
+          directUserCount: groupUserCounts.get(groupValue) ?? 0,
+          accountCount: groupAccountCounts.get(groupValue) ?? 0
+        },
+        label: (
+          <GraphNode
+            icon={<ClusterOutlined />}
+            title={group.name || "分组"}
+            subtitle={`Group ${unknownToText(group.group_id)}`}
+            tone={groupValue === sourceGroupId ? "source" : groupValue === targetGroupId ? "target" : "neutral"}
+            tag={tags.join(" / ")}
+            footer={<GroupCapacityRows group={group} fallback={fallbackCapacity} />}
+          />
+        )
+      });
     });
 
-    const userNodes: Node[] = userRows.map(({ user, userId }) => {
-      const currentGroupId = user.current_group_id ?? null;
-      const currentGroupName = user.current_group_name ?? unknownToText(currentGroupId);
-      return {
+    const userNodes: OrchestrationGraphNode[] = userRows.map(({ user, userId }) =>
+      createGraphNode({
         id: `user-${userId}`,
-        position: { x: 360, y: userYById.get(userId) ?? graphTopY },
-        sourcePosition: Position.Right,
-        targetPosition: Position.Left,
+        kind: "user",
+        data: { userId, directGroupId: idValue(user.current_group_id) },
+        selected: userId === selectedUserId,
+        label: (
+          <GraphNode
+            icon={<UserOutlined />}
+            title={userDisplayName(user)}
+            subtitle={userEmailText(user)}
+            tone={userId === selectedUserId ? "active" : "user"}
+            tag={userDirectGroupLabel(user)}
+            tagColor={idValue(user.current_group_id) ? undefined : "default"}
+          />
+        )
+      })
+    );
+
+    const keyNodes: OrchestrationGraphNode[] = keyRows.map(({ userId, key }) => {
+      const keyId = idValue(key.key_id);
+      return createGraphNode({
+        id: `key-${userId}-${keyId}`,
+        kind: "key",
         data: {
           userId,
-          label: (
-            <GraphNode
-              icon={<UserOutlined />}
-              title={userDisplayName(user)}
-              subtitle={userEmailText(user)}
-              tone={userId === selectedUserId ? "active" : "user"}
-              tag={currentGroupName || user.status || "active"}
-            />
-          )
-        }
-      };
-    });
-
-    const keyNodes: Node[] = keyRows.map(({ userId, key }) => ({
-      id: `key-${userId}-${idValue(key.key_id)}`,
-      type: "input",
-      position: { x: 28, y: keyYById.get(`${userId}-${idValue(key.key_id)}`) ?? graphTopY },
-      sourcePosition: Position.Right,
-      data: {
-        userId,
-        keyId: idValue(key.key_id),
+          keyId,
+          routeGroupId: idValue(key.group_id)
+        },
+        selected: selectedKeySet.has(keyId),
         label: (
           <GraphNode
             icon={<KeyOutlined />}
             title={key.name || "api-key"}
             subtitle={`Key ID ${unknownToText(key.key_id)}`}
-            tone={selectedKeySet.has(idValue(key.key_id)) ? "active" : "neutral"}
-            tag={`Group ID ${apiKeyGroupIdText(key)}`}
+            tone={selectedKeySet.has(keyId) ? "active" : "neutral"}
+            tag={apiKeyRouteLabel(key)}
           />
         )
-      }
-    }));
+      });
+    });
 
-    const accountNodes: Node[] = accountRows.map(({ account, accountId }) => ({
-      id: `account-${accountId}`,
-      type: "output",
-      position: { x: 1024, y: accountYById.get(accountId) ?? graphTopY },
-      targetPosition: Position.Left,
-      data: {
-        accountId,
+    const accountNodes: OrchestrationGraphNode[] = accountRows.map(({ account, accountId }) =>
+      createGraphNode({
+        id: `account-${accountId}`,
+        kind: "account",
+        data: {
+          accountId,
+          groupCount: account.group_ids.filter((groupId) => idValue(groupId)).length,
+          relatedGroupIds: account.group_ids.map(idValue).filter(Boolean)
+        },
         label: (
           <GraphNode
             icon={<ApiOutlined />}
@@ -1482,45 +1902,57 @@ function ExistingOrchestrationView({
             footer={<AccountUsageRows account={account} />}
           />
         )
-      }
-    }));
-    const nodes: Node[] = [...accountNodes, ...groupNodes, ...userNodes, ...keyNodes];
-    const edges: Edge[] = [
+      })
+    );
+    const nodes: OrchestrationGraphNode[] = [...keyNodes, ...userNodes, ...groupNodes, ...accountNodes];
+    const edges: OrchestrationGraphEdge[] = [
       ...accounts.flatMap((account) => {
         const accountId = idValue(account.account_id);
         return account.group_ids
           .map(idValue)
           .filter(Boolean)
-          .map((groupId) => ({
-            id: `group-account-${groupId}-${accountId}`,
-            source: `group-${groupId}`,
-            target: `account-${accountId}`,
-            markerEnd: { type: MarkerType.ArrowClosed },
-            label: "分组上游账号"
-          }));
+          .map((groupId) =>
+            createGraphEdge({
+              id: `group-account-${groupId}-${accountId}`,
+              source: `group-${groupId}`,
+              target: `account-${accountId}`,
+              sourceKind: "group",
+              targetKind: "account",
+              relation: "group-account"
+            })
+          );
       }),
       ...users
         .filter((user) => idValue(user.current_group_id))
         .map((user) => {
           const userId = idValue(user.user_id);
           const groupId = idValue(user.current_group_id);
-          return {
+          const isActive = userId === selectedUserId;
+          return createGraphEdge({
             id: `group-user-${groupId}-${userId}`,
             source: `user-${userId}`,
             target: `group-${groupId}`,
-            animated: userId === selectedUserId,
-            markerEnd: { type: MarkerType.ArrowClosed },
-            label: "用户所在分组"
-          };
+            sourceKind: "user",
+            targetKind: "group",
+            relation: "user-group",
+            active: isActive,
+            label: isActive ? "直接用户组" : undefined
+          });
         }),
-      ...userKeyRows.map(({ userId, key }) => ({
-        id: `user-key-${userId}-${idValue(key.key_id)}`,
-        source: `key-${userId}-${idValue(key.key_id)}`,
-        target: `user-${userId}`,
-        animated: userId === selectedUserId || selectedKeySet.has(idValue(key.key_id)),
-        markerEnd: { type: MarkerType.ArrowClosed },
-        label: "用户 Key"
-      })),
+      ...userKeyRows.map(({ userId, key }) => {
+        const keyId = idValue(key.key_id);
+        const isActive = userId === selectedUserId || selectedKeySet.has(keyId);
+        return createGraphEdge({
+          id: `user-key-${userId}-${keyId}`,
+          source: `key-${userId}-${keyId}`,
+          target: `user-${userId}`,
+          sourceKind: "key",
+          targetKind: "user",
+          relation: "key-user",
+          active: isActive,
+          label: isActive ? "用户 Key" : undefined
+        });
+      }),
       ...userKeyRows
         .filter(({ user, key }) => {
           const keyGroupId = idValue(key.group_id);
@@ -1529,21 +1961,36 @@ function ExistingOrchestrationView({
           const userId = idValue(user.user_id);
           return keyGroupId && keyGroupId !== userGroupId && (userId === selectedUserId || selectedKeySet.has(keyId));
         })
-        .map(({ userId, key }) => ({
-          id: `group-key-${idValue(key.group_id)}-${userId}-${idValue(key.key_id)}`,
-          source: `key-${userId}-${idValue(key.key_id)}`,
-          target: `group-${idValue(key.group_id)}`,
-          animated: userId === selectedUserId || selectedKeySet.has(idValue(key.key_id)),
-          markerEnd: { type: MarkerType.ArrowClosed },
-          style: { stroke: "#2563eb", strokeWidth: 1.6, strokeDasharray: "5 5" },
-          label: "Key 当前分组"
-        }))
+        .map(({ userId, key }) =>
+          createGraphEdge({
+            id: `group-key-${idValue(key.group_id)}-${userId}-${idValue(key.key_id)}`,
+            source: `key-${userId}-${idValue(key.key_id)}`,
+            target: `group-${idValue(key.group_id)}`,
+            sourceKind: "key",
+            targetKind: "group",
+            relation: "key-route-group",
+            route: true,
+            active: true,
+            label: "Key 路由组"
+          })
+        )
     ];
-    return { nodes, edges };
+    const filteredGraph = filterGraphByGroups(nodes, edges, graphGroupFilterIds);
+    const incompleteNodeIds = findIncompleteGraphNodeIds(filteredGraph.nodes, filteredGraph.edges);
+    const laneNodes = filteredGraph.nodes.map((node) => {
+      const lane: GraphNodeLane = incompleteNodeIds.has(node.id) ? "special" : "main";
+      return {
+        ...node,
+        className: lane === "special" ? "react-flow-node-special" : undefined,
+        data: { ...node.data, lane }
+      };
+    });
+    return layoutGraphWithDagre(laneNodes, filteredGraph.edges);
   }, [
     apiKeys,
     apiKeysByUserId,
     accounts,
+    graphGroupFilterIds,
     groups,
     selectedKeySet,
     selectedUserId,
@@ -1551,9 +1998,6 @@ function ExistingOrchestrationView({
     targetGroupId,
     users
   ]);
-  const [nodes, setNodes, onNodesChange] = useNodesState(graph.nodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(graph.edges);
-
   async function loadResources(nextSelectedUserId?: string, searchOverride?: string) {
     setLoading(true);
     const searchTerm = (searchOverride !== undefined ? searchOverride : userSearch).trim();
@@ -1689,16 +2133,8 @@ function ExistingOrchestrationView({
     );
   }, [targetGroups]);
 
-  useEffect(() => {
-    setNodes(graph.nodes);
-    setEdges(graph.edges);
-    window.setTimeout(() => flowInstance?.fitView({ padding: 0.16, duration: 220 }), 0);
-  }, [flowInstance, graph, setEdges, setNodes]);
-
   function refreshGraphLayout() {
-    setNodes(graph.nodes);
-    setEdges(graph.edges);
-    window.setTimeout(() => flowInstance?.fitView({ padding: 0.16, duration: 260 }), 0);
+    setGraphRefreshTick((value) => value + 1);
   }
 
   function selectGraphEntity(userId?: unknown, keyId?: unknown) {
@@ -1872,7 +2308,7 @@ function ExistingOrchestrationView({
               description={`Key ID ${unknownToText(key.key_id)}`}
             />
             <div className="api-key-meta-tags" aria-label="API Key 分组信息">
-              <Tag color={checked ? "green" : "default"}>{`Group ID ${groupIdText}`}</Tag>
+              <Tag color={checked ? "green" : "default"}>{`路由组 ${groupIdText}`}</Tag>
             </div>
           </List.Item>
         );
@@ -1985,7 +2421,7 @@ function ExistingOrchestrationView({
                   <Select
                     className="group-select"
                     value={sourceGroupId || undefined}
-                    placeholder="当前用户未绑定分组"
+                    placeholder="当前用户无直接用户组"
                     disabled
                     optionFilterProp="searchText"
                     options={sourceGroupOptions}
@@ -2019,7 +2455,7 @@ function ExistingOrchestrationView({
                     <Typography.Text strong>
                       {mode === "api_key" ? "选择 API Key（支持多选）" : "用户 API Keys"}
                     </Typography.Text>
-                    <Tooltip title="Key ID 是 API Key 的唯一编号；Group ID 是当前绑定分组编号。右上角显示当前用户的 Key 数量。">
+                    <Tooltip title="Key ID 是 API Key 的唯一编号；路由组是该 Key 当前绑定的 Sub2API 分组，不等同于用户直接分组或上游账号 ID。">
                       <QuestionCircleOutlined className="panel-help-icon" aria-label="API Key 字段说明" />
                     </Tooltip>
                   </Space>
@@ -2103,10 +2539,32 @@ function ExistingOrchestrationView({
           <div className="canvas-meta-row">
             <Typography.Text type="secondary">Graph Canvas</Typography.Text>
             <div className="canvas-subtitle-tags">
-              <Tag color="processing">左到右：Key / 用户 / 分组 / 上游账号</Tag>
-              <Tag color="default">全局关系</Tag>
+              <Tag color="processing">左到右：Key 路由 / 用户 / Sub2API 分组 / 上游账号</Tag>
               <Tag color="purple">{accounts.length} 账号</Tag>
               {unavailableAccountCount > 0 ? <Tag color="gold">{unavailableAccountCount} 个需关注</Tag> : null}
+            </div>
+            <div className="canvas-filter-row">
+              <Typography.Text type="secondary">分组筛选</Typography.Text>
+              <Select
+                className="canvas-group-filter"
+                mode="multiple"
+                value={graphGroupFilterIds}
+                placeholder="默认展示全部，可选择一个或多个分组"
+                allowClear
+                showSearch
+                optionFilterProp="searchText"
+                options={graphGroupOptions}
+                optionRender={renderGroupOption}
+                maxTagCount="responsive"
+                onChange={(values) => {
+                  setGraphGroupFilterIds(values);
+                  setGraphRefreshTick((tick) => tick + 1);
+                }}
+                notFoundContent={loading ? <Spin size="small" /> : "暂无分组"}
+              />
+              <Tag color={graphGroupFilterIds.length > 0 ? "blue" : "default"}>
+                {graphGroupFilterIds.length > 0 ? `${graphGroupFilterIds.length} 个分组` : "全部"}
+              </Tag>
             </div>
           </div>
           <Space wrap>
@@ -2116,22 +2574,11 @@ function ExistingOrchestrationView({
           </Space>
         </div>
         <div className="flow-canvas">
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onNodeClick={(_, node) => selectGraphEntity(node.data.userId, node.data.keyId)}
-            onInit={setFlowInstance}
-            fitView
-            minZoom={0.55}
-            maxZoom={1.35}
-            nodesDraggable
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background />
-            <Controls />
-          </ReactFlow>
+          <OrchestrationFlowCanvas
+            data={graph}
+            refreshSignal={graphRefreshTick}
+            onSelect={selectGraphEntity}
+          />
         </div>
       </section>
 
@@ -2157,13 +2604,11 @@ function GraphNode({
   icon: ReactNode;
   title: string;
   subtitle: string;
-  tone: "user" | "active" | "source" | "target" | "account" | "neutral";
+  tone: GraphNodeTone;
   tag?: string;
   tagColor?: GraphNodeTagColor;
   footer?: ReactNode;
 }) {
-  const defaultTagColor =
-    tone === "target" ? "green" : tone === "source" ? "gold" : tone === "active" ? "blue" : tone === "account" ? "purple" : "default";
   return (
     <div className={`graph-node graph-node-${tone}`}>
       <span className="graph-node-icon">{icon}</span>
@@ -2171,7 +2616,7 @@ function GraphNode({
         <strong title={title}>{title}</strong>
         <small title={subtitle}>{subtitle}</small>
       </div>
-      {tag ? <Tag color={tagColor ?? defaultTagColor}>{tag}</Tag> : null}
+      {tag ? <Tag color={tagColor ?? defaultGraphTagColor(tone)}>{tag}</Tag> : null}
       {footer ? <div className="graph-node-footer">{footer}</div> : null}
     </div>
   );
