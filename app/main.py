@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import ACCESS_KEY_COOKIE_NAME, AuthSession, EphemeralAdminAuthManager
-from app.clients.sub2api import Sub2APIClient, Sub2APIError
+from app.clients.sub2api import Sub2APIAuthError, Sub2APIClient, Sub2APIError
 from app.config import Settings, get_settings
 from app.errors import FlowNotFoundError, ProvisioningError
 from app.logging_config import setup_logging
@@ -57,6 +57,7 @@ from app.models.schemas import (
     RotationPoolCandidateResponse,
     RotationPoolCandidatesEnvelope,
     RotationPoolGroupRequest,
+    Sub2APILoginRequest,
 )
 from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.notification import (
@@ -329,6 +330,36 @@ def auth_login(payload: LoginRequest) -> JSONResponse:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    response = JSONResponse(
+        status_code=200,
+        content=LoginResponse(
+            username=session.username,
+            access_key=session.access_key,
+            expires_at=session.expires_at,
+        ).model_dump(mode="json"),
+    )
+    set_auth_cookie(response, session.access_key)
+    return response
+
+
+@app.post("/auth/sub2api-login")
+def sub2api_login(payload: Sub2APILoginRequest) -> JSONResponse:
+    try:
+        profile = get_sub2api_client().validate_admin_jwt(payload.token)
+    except Sub2APIAuthError as exc:
+        status_code = (
+            exc.status_code
+            if exc.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}
+            else status.HTTP_401_UNAUTHORIZED
+        )
+        return JSONResponse(
+            status_code=status_code,
+            content=ErrorResponse(detail=str(exc)).model_dump(),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    username = str(profile.get("username") or profile.get("email") or "sub2api-admin")
+    session = get_auth_manager().create_external_session(username=username)
     response = JSONResponse(
         status_code=200,
         content=LoginResponse(

@@ -20,6 +20,10 @@ class Sub2APIError(Exception):
         self.status_code = status_code
 
 
+class Sub2APIAuthError(Sub2APIError):
+    """Raised when a Sub2API browser token cannot create a sidecar session."""
+
+
 class Sub2APIClient:
     """
     Thin admin API wrapper.
@@ -87,6 +91,7 @@ class Sub2APIClient:
         "/api/admin/groups/{group_id}/accounts",
         "/admin/groups/{group_id}/accounts",
     )
+    CURRENT_USER_PATHS = ("/api/v1/auth/me", "/api/auth/me", "/auth/me")
 
     def __init__(
         self,
@@ -106,6 +111,26 @@ class Sub2APIClient:
                 "Content-Type": "application/json",
             }
         )
+
+    def validate_admin_jwt(self, token: str) -> dict[str, Any]:
+        token = token.strip()
+        if not token:
+            raise Sub2APIAuthError("Sub2API token is required", status_code=401)
+
+        data = self._request_candidates_without_admin_key(
+            "GET",
+            self.CURRENT_USER_PATHS,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        profile = self._unwrap_data(data)
+        if not isinstance(profile, dict):
+            raise Sub2APIAuthError("Invalid Sub2API profile response", status_code=401)
+
+        role = str(profile.get("role") or "").strip().lower()
+        if role != "admin":
+            raise Sub2APIAuthError("Sub2API admin role is required", status_code=403)
+
+        return profile
 
     def create_group(self, name: str) -> dict[str, Any]:
         payload = self._build_group_payload(name)
@@ -1141,6 +1166,26 @@ class Sub2APIClient:
 
         raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
 
+    def _request_candidates_without_admin_key(
+        self,
+        method: str,
+        paths: Iterable[str],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        last_error: Sub2APIError | None = None
+        for path in paths:
+            try:
+                return self._request_without_admin_key(method, path, headers=headers)
+            except Sub2APIError as exc:
+                last_error = exc
+                if exc.status_code == 404:
+                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
+                    continue
+                raise
+
+        raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
+
     def _request(
         self,
         method: str,
@@ -1188,6 +1233,53 @@ class Sub2APIClient:
 
         logger.info("Sub2API request succeeded: %s %s", method, url)
         return data
+
+    def _request_without_admin_key(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        url = urljoin(self.base_url + "/", path.lstrip("/"))
+        logger.info("Calling Sub2API browser API: %s %s", method, url)
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    **(headers or {}),
+                },
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            logger.exception(
+                "Failed to reach Sub2API browser API | method=%s | url=%s",
+                method,
+                url,
+            )
+            raise Sub2APIAuthError(f"Failed to reach Sub2API: {exc}") from exc
+
+        if not response.ok:
+            logger.warning(
+                "Sub2API browser token validation failed | status=%s | body=%s",
+                response.status_code,
+                response.text[:1000],
+            )
+            raise Sub2APIAuthError(
+                "Invalid Sub2API admin token",
+                status_code=response.status_code,
+            )
+
+        if not response.content:
+            return {}
+
+        try:
+            return response.json()
+        except ValueError:
+            return {"raw_text": response.text}
 
     def _unwrap_data(self, payload: Any) -> Any:
         if isinstance(payload, dict) and "data" in payload:

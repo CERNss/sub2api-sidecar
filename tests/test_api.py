@@ -653,6 +653,70 @@ def test_login_returns_access_key_and_sets_cookie(client) -> None:
     assert response.cookies.get(ACCESS_KEY_COOKIE_NAME) == payload["access_key"]
 
 
+def test_sub2api_login_exchanges_admin_jwt_for_sidecar_session(client) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(method: str, url: str, headers=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "headers": headers})
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "id": 1,
+                    "email": "admin@example.com",
+                    "username": "admin-user",
+                    "role": "admin",
+                },
+            },
+        )
+
+    with patch.object(requests, "request", new=fake_request):
+        response = client.post("/auth/sub2api-login", json={"token": "jwt-123"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["username"] == "admin-user"
+    assert payload["access_key"]
+    assert response.cookies.get(ACCESS_KEY_COOKIE_NAME) == payload["access_key"]
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/v1/auth/me",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": "Bearer jwt-123",
+            },
+        }
+    ]
+
+
+def test_sub2api_login_rejects_non_admin_jwt(client) -> None:
+    def fake_request(method: str, url: str, headers=None, timeout=None):
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "id": 2,
+                    "email": "user@example.com",
+                    "role": "user",
+                },
+            },
+        )
+
+    with patch.object(requests, "request", new=fake_request):
+        response = client.post("/auth/sub2api-login", json={"token": "jwt-123"})
+
+    assert response.status_code == 403
+    assert response.cookies.get(ACCESS_KEY_COOKIE_NAME) is None
+    assert response.json()["detail"] == "Sub2API admin role is required"
+
+
 def test_login_rejects_invalid_password(client) -> None:
     response = client.post(
         "/auth/login",

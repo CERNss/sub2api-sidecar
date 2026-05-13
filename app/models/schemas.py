@@ -11,6 +11,10 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=1)
 
 
+class Sub2APILoginRequest(BaseModel):
+    token: str = Field(..., min_length=1)
+
+
 class LoginResponse(BaseModel):
     success: bool = True
     username: str

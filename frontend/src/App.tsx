@@ -1060,6 +1060,22 @@ function loginRedirectPath(): string {
   return frontendRoutePath("/");
 }
 
+function removeTokenFromCurrentUrl(): void {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("token")) {
+    return;
+  }
+  url.searchParams.delete("token");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+async function exchangeSub2APIToken(token: string): Promise<void> {
+  await requestJson("/auth/sub2api-login", {
+    method: "POST",
+    body: JSON.stringify({ token })
+  }, "Sub2API 登录校验失败");
+}
+
 function layoutLaneWithDagre(
   nodes: OrchestrationGraphNode[],
   edges: OrchestrationGraphEdge[],
@@ -1288,9 +1304,46 @@ function OrchestrationFlowCanvas({
 }
 
 function App() {
+  const [ssoStatus, setSsoStatus] = useState<StatusState>(() => {
+    const token = new URLSearchParams(window.location.search).get("token");
+    return token ? { message: "正在验证 Sub2API 管理员身份", tone: "info" } : emptyStatus;
+  });
+
   useEffect(() => {
     document.title = APP_TITLE;
   }, []);
+
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get("token");
+    if (!token) {
+      return;
+    }
+
+    let cancelled = false;
+    exchangeSub2APIToken(token)
+      .then(() => {
+        removeTokenFromCurrentUrl();
+        if (cancelled) return;
+        setSsoStatus({ message: "登录成功，正在进入控制台", tone: "success" });
+        window.location.href = frontendRoutePath("/");
+      })
+      .catch((error: unknown) => {
+        removeTokenFromCurrentUrl();
+        if (cancelled) return;
+        setSsoStatus({ message: getErrorMessage(error, "Sub2API 登录校验失败"), tone: "error" });
+        window.setTimeout(() => {
+          window.location.href = frontendRoutePath("/login");
+        }, 900);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (new URLSearchParams(window.location.search).has("token") || ssoStatus.message) {
+    return <SsoStatusView status={ssoStatus} />;
+  }
 
   if (currentLogicalPathname() === "/login") {
     return <LoginView />;
@@ -1300,6 +1353,25 @@ function App() {
     <AppChrome title={APP_TITLE}>
       <OperatorWorkspace />
     </AppChrome>
+  );
+}
+
+function SsoStatusView({ status }: { status: StatusState }) {
+  return (
+    <main className="login-page">
+      <div className="login-shell">
+        <div className="login-brand" aria-label="Sub2API">
+          <div className="login-mark" aria-hidden="true">S</div>
+          <h1>Sub2API sidecar</h1>
+        </div>
+        <section className="login-panel form-stack" aria-live="polite">
+          <div className="login-heading">
+            <h2>正在登录</h2>
+          </div>
+          <StatusLine status={status} />
+        </section>
+      </div>
+    </main>
   );
 }
 
