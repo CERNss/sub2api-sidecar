@@ -21,6 +21,7 @@ import type { ReactNode } from "react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { NotificationPanel } from "./notifications/Panel";
+import { apiUrl, appBasePath } from "./runtime";
 import {
   Alert,
   Button as AntButton,
@@ -74,6 +75,8 @@ type StatusState = {
   message: string;
   tone: StatusTone;
 };
+
+type SessionState = "checking" | "authenticated" | "anonymous";
 
 type ProvisionStartPayload = ApiPayload & {
   flow_id?: string;
@@ -413,9 +416,7 @@ const orchestrationTabPaths: Record<OrchestrationTab, string> = {
   manual: "/orchestration/manual",
   dynamic: "/orchestration/dynamic"
 };
-const frontendRouteBase = normalizeFrontendRouteBase(
-  import.meta.env.DEV ? import.meta.env.BASE_URL : "/"
-);
+const frontendRouteBase = appBasePath();
 
 class ApiError extends Error {
   status: number;
@@ -433,7 +434,7 @@ async function requestJson<T extends ApiPayload>(
   options: RequestInit,
   fallbackMessage: string
 ): Promise<T> {
-  const response = await fetch(url, {
+  const response = await fetch(apiUrl(url), {
     credentials: "same-origin",
     ...options,
     headers: {
@@ -995,11 +996,6 @@ function resolveKnownId(value: string, knownValues: unknown[]): unknown {
   return known ?? value;
 }
 
-function normalizeFrontendRouteBase(base: string): string {
-  const trimmed = base.replace(/\/+$/, "");
-  return trimmed === "" ? "" : trimmed;
-}
-
 function stripFrontendRouteBase(pathname: string): string {
   if (!frontendRouteBase) {
     return pathname || "/";
@@ -1074,6 +1070,18 @@ async function exchangeSub2APIToken(token: string): Promise<void> {
     method: "POST",
     body: JSON.stringify({ token })
   }, "Sub2API 登录校验失败");
+}
+
+async function checkAuthSession(): Promise<boolean> {
+  try {
+    await requestJson("/auth/session", { method: "GET" }, "登录状态校验失败");
+    return true;
+  } catch (error: unknown) {
+    if (getErrorStatus(error) === 401) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function layoutLaneWithDagre(
@@ -1308,6 +1316,11 @@ function App() {
     const token = new URLSearchParams(window.location.search).get("token");
     return token ? { message: "正在验证 Sub2API 管理员身份", tone: "info" } : emptyStatus;
   });
+  const isLoginRoute = currentLogicalPathname() === "/login";
+  const hasSsoToken = new URLSearchParams(window.location.search).has("token");
+  const [sessionState, setSessionState] = useState<SessionState>(() =>
+    isLoginRoute || hasSsoToken ? "anonymous" : "checking"
+  );
 
   useEffect(() => {
     document.title = APP_TITLE;
@@ -1341,12 +1354,45 @@ function App() {
     };
   }, []);
 
-  if (new URLSearchParams(window.location.search).has("token") || ssoStatus.message) {
+  useEffect(() => {
+    if (isLoginRoute || hasSsoToken) {
+      return;
+    }
+
+    let cancelled = false;
+    checkAuthSession()
+      .then((authenticated) => {
+        if (cancelled) return;
+        if (authenticated) {
+          setSessionState("authenticated");
+        } else {
+          setSessionState("anonymous");
+          window.location.replace(
+            `${frontendRoutePath("/login")}?next=${encodeURIComponent(currentLogicalPathname())}`
+          );
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSessionState("anonymous");
+        window.location.replace(frontendRoutePath("/login"));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasSsoToken, isLoginRoute]);
+
+  if (hasSsoToken || ssoStatus.message) {
     return <SsoStatusView status={ssoStatus} />;
   }
 
-  if (currentLogicalPathname() === "/login") {
+  if (isLoginRoute) {
     return <LoginView />;
+  }
+
+  if (sessionState !== "authenticated") {
+    return <SsoStatusView status={{ message: "正在确认登录状态", tone: "info" }} />;
   }
 
   return (
@@ -1528,7 +1574,7 @@ function OperatorWorkspace() {
   async function logout() {
     setLogoutBusy(true);
     try {
-      await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
+      await fetch(apiUrl("/auth/logout"), { method: "POST", credentials: "same-origin" });
     } finally {
       window.location.href = frontendRoutePath("/login");
     }

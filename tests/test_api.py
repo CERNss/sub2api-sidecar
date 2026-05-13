@@ -634,6 +634,77 @@ def test_operator_pages_redirect_to_login_when_unauthenticated(client, path: str
     assert response.headers["location"] == f"/login?next={path}"
 
 
+def test_base_path_redirects_and_cookie_scope(client, monkeypatch) -> None:
+    monkeypatch.setenv("APP_BASE_PATH", "/sidecar")
+    clear_caches()
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/sidecar/login"
+
+    response = client.get("/orchestration/manual", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/sidecar/login?next=/sidecar/orchestration/manual"
+
+    response = client.post("/auth/login", json=AUTH_PAYLOAD)
+
+    assert response.status_code == 200
+    assert "Path=/sidecar" in response.headers["set-cookie"]
+
+    clear_caches()
+
+
+def test_base_path_login_next_accepts_prefixed_path(client, monkeypatch) -> None:
+    monkeypatch.setenv("APP_BASE_PATH", "/sidecar")
+    clear_caches()
+    login_response = client.post("/auth/login", json=AUTH_PAYLOAD)
+    access_key = login_response.json()["access_key"]
+
+    response = client.get(
+        "/login?next=/sidecar/provision",
+        headers={"Authorization": f"Bearer {access_key}"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/sidecar/provision"
+
+    clear_caches()
+
+
+def test_base_path_rewrites_react_shell_asset_urls(client, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("APP_BASE_PATH", "/sidecar")
+    ui_index = tmp_path / "index.html"
+    ui_index.write_text(
+        """
+<!doctype html>
+<html>
+  <head>
+    <script type="module" src="/ui-static/assets/index.js"></script>
+    <link rel="stylesheet" href="/ui-static/assets/index.css">
+  </head>
+  <body><div id="root"></div></body>
+</html>
+        """.strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "UI_INDEX_FILE", ui_index)
+    clear_caches()
+
+    response = client.get("/login")
+
+    assert response.status_code == 200
+    assert 'window.__SUB2API_SIDECAR_BASE_PATH__ = "/sidecar";' in response.text
+    assert 'src="/sidecar/ui-static/assets/index.js"' in response.text
+    assert 'href="/sidecar/ui-static/assets/index.css"' in response.text
+    assert 'src="/ui-static/' not in response.text
+    assert 'href="/ui-static/' not in response.text
+
+    clear_caches()
+
+
 @pytest.mark.parametrize("path", ["/health", "/ping"])
 def test_probe_endpoints_return_ok_without_auth(client, path: str) -> None:
     response = client.get(path)
@@ -651,6 +722,25 @@ def test_login_returns_access_key_and_sets_cookie(client) -> None:
     assert payload["username"] == "admin"
     assert payload["access_key"]
     assert response.cookies.get(ACCESS_KEY_COOKIE_NAME) == payload["access_key"]
+
+
+def test_auth_session_requires_login(client) -> None:
+    response = client.get("/auth/session")
+
+    assert response.status_code == 401
+
+
+def test_auth_session_returns_current_session(client) -> None:
+    login_response = client.post("/auth/login", json=AUTH_PAYLOAD)
+    access_key = login_response.json()["access_key"]
+
+    response = client.get("/auth/session", headers={"Authorization": f"Bearer {access_key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["username"] == "admin"
+    assert payload["expires_at"]
 
 
 def test_sub2api_login_exchanges_admin_jwt_for_sidecar_session(client) -> None:

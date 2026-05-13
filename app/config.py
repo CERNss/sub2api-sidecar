@@ -100,6 +100,7 @@ class Settings:
     sub2api_base_url: str
     sub2api_admin_api_key: str
     app_base_url: str
+    app_base_path: str
     openai_oauth_redirect_uri: str
     sub2api_provisioning_defaults: Sub2APIProvisioningDefaults
     assignment_mode: ProvisioningAssignmentMode = ProvisioningAssignmentMode.dedicated
@@ -164,6 +165,7 @@ class Settings:
             ("app", "auth_username"),
             default="admin",
         )
+        values["app_base_path"] = _base_path_setting(config)
         values["app_auth_password"] = _env_string("APP_AUTH_PASSWORD")
         values["request_timeout_seconds"] = _int_setting(
             config,
@@ -431,6 +433,27 @@ def _parse_bool_value(raw_value: Any, *, source: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ConfigurationError(f"{source} must be a boolean value")
+
+
+def _base_path_setting(config: Mapping[str, Any]) -> str:
+    raw_value = _string_setting(
+        config,
+        "APP_BASE_PATH",
+        ("app", "base_path"),
+        default="",
+    )
+    return _normalize_base_path(raw_value or "")
+
+
+def _normalize_base_path(raw_value: str) -> str:
+    value = raw_value.strip()
+    if value in {"", "/"}:
+        return ""
+    if "://" in value or "?" in value or "#" in value or any(char.isspace() for char in value):
+        raise ConfigurationError("APP_BASE_PATH must be a URL path prefix such as /sidecar")
+    if not value.startswith("/"):
+        value = f"/{value}"
+    return value.rstrip("/")
 
 
 def _rules_setting(config: Mapping[str, Any]) -> tuple[TemporaryUnschedulableRule, ...]:

@@ -1,5 +1,7 @@
 app:
   base_url: http://127.0.0.1:8000
+  # Set to /sidecar when this service is exposed behind a path-stripping proxy.
+  base_path: ""
   auth_username: admin
   access_key_ttl_hours: 12
 

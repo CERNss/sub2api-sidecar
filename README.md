@@ -249,9 +249,45 @@ APP_AUTH_PASSWORD=change-me
 - `SUB2API_ADMIN_API_KEY` 是调用 Sub2API admin API 的密钥。
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
+- `app.base_path` 可选，默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
 
 环境变量仍然可以覆盖 `config.yaml` 中的同名旧配置项，方便兼容已有部署和测试环境；新配置建议优先改 `config.yaml`。
+
+### Nginx Proxy Manager 子路径部署
+
+如果主 Sub2API 已经占用 `https://sub2api.example.com/`，sidecar 可以挂到同域名子路径，例如：
+
+```yaml
+app:
+  base_url: https://sub2api.example.com/sidecar
+  base_path: /sidecar
+
+sub2api:
+  base_url: http://sub2api:8080
+```
+
+在 Nginx Proxy Manager 的主站 Proxy Host 里新增 Custom Location：
+
+```text
+Location: /sidecar
+Scheme: http
+Forward Hostname / IP: sub2api-sidecar
+Forward Port: 8000
+```
+
+这个 Custom Location 的 Advanced 配置：
+
+```nginx
+rewrite ^/sidecar/?(.*)$ /$1 break;
+proxy_set_header X-Forwarded-Prefix /sidecar;
+```
+
+然后从浏览器访问：
+
+```text
+https://sub2api.example.com/sidecar/
+```
 
 ## Sub2API 默认编排配置
 

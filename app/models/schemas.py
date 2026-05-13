@@ -22,6 +22,12 @@ class LoginResponse(BaseModel):
     expires_at: datetime
 
 
+class AuthSessionResponse(BaseModel):
+    success: bool = True
+    username: str
+    expires_at: datetime
+
+
 class ProvisionStartRequest(BaseModel):
     email: EmailStr
 

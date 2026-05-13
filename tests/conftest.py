@@ -31,6 +31,7 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.delenv("APP_BASE_PATH", raising=False)
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
     monkeypatch.setenv("APP_AUTH_USERNAME", "admin")
     monkeypatch.setenv("APP_AUTH_PASSWORD", "test-admin-pass")

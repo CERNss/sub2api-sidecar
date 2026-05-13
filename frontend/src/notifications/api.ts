@@ -1,4 +1,5 @@
 import { makeDefaultSettings } from "./defaults";
+import { apiUrl } from "../runtime";
 import {
   NotificationDeliveryHistory,
   NotificationDeliveryRecord,
@@ -64,7 +65,7 @@ async function requestNotificationJson<T>(
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetch(apiUrl(url), {
       credentials: "same-origin",
       ...options,
       headers: {

@@ -12,6 +12,7 @@ CONFIG_ENV_NAMES = (
     "SUB2API_BASE_URL",
     "SUB2API_ADMIN_API_KEY",
     "APP_BASE_URL",
+    "APP_BASE_PATH",
     "OPENAI_OAUTH_REDIRECT_URI",
     "APP_AUTH_USERNAME",
     "APP_AUTH_PASSWORD",
@@ -51,6 +52,7 @@ def test_settings_loads_non_secret_config_from_yaml(
         """
 app:
   base_url: http://yaml-sidecar.local
+  base_path: /sidecar/
   auth_username: ops
   access_key_ttl_hours: 6
 storage:
@@ -99,6 +101,7 @@ auto_rotation:
 
     assert settings.sub2api_base_url == "http://yaml-sub2api.local"
     assert settings.app_base_url == "http://yaml-sidecar.local"
+    assert settings.app_base_path == "/sidecar"
     assert settings.openai_oauth_redirect_uri == "http://localhost:1555/callback"
     assert settings.app_auth_username == "ops"
     assert settings.app_access_key_ttl_hours == 6
@@ -149,6 +152,19 @@ sub2api:
 
     assert settings.sub2api_base_url == "http://env-sub2api.local"
     assert settings.app_access_key_ttl_hours == 18
+
+
+def test_settings_normalizes_env_base_path(monkeypatch) -> None:
+    _clear_config_env(monkeypatch)
+    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("APP_BASE_PATH", "sidecar/")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+
+    settings = Settings.from_env()
+
+    assert settings.app_base_path == "/sidecar"
 
 
 def test_settings_parse_sub2api_provisioning_overrides(monkeypatch) -> None:

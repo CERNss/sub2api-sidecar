@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -8,7 +9,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -27,6 +28,7 @@ from app.models.schemas import (
     AutoRotationRunRequest,
     AutoRotationRunResponse,
     AutoRotationRunsEnvelope,
+    AuthSessionResponse,
     ErrorResponse,
     LoginRequest,
     LoginResponse,
@@ -265,17 +267,26 @@ def set_auth_cookie(response: JSONResponse, access_key: str) -> None:
         secure=False,
         max_age=get_auth_manager().cookie_max_age_seconds,
         expires=get_auth_manager().cookie_max_age_seconds,
-        path="/",
+        path=cookie_path(),
     )
 
 
 def clear_auth_cookie(response: JSONResponse) -> None:
-    response.delete_cookie(key=ACCESS_KEY_COOKIE_NAME, path="/")
+    response.delete_cookie(key=ACCESS_KEY_COOKIE_NAME, path=cookie_path())
 
 
 def serve_react_app() -> Response:
     if UI_INDEX_FILE.exists():
-        return FileResponse(UI_INDEX_FILE)
+        html = UI_INDEX_FILE.read_text(encoding="utf-8")
+        html = html.replace('src="/ui-static/', f'src="{external_path("/ui-static/")}')
+        html = html.replace('href="/ui-static/', f'href="{external_path("/ui-static/")}')
+        runtime_config = (
+            '<script>'
+            f"window.__SUB2API_SIDECAR_BASE_PATH__ = {json.dumps(get_settings().app_base_path)};"
+            "</script>"
+        )
+        html = html.replace("</head>", f"    {runtime_config}\n  </head>", 1)
+        return HTMLResponse(html)
 
     return HTMLResponse(
         """
@@ -296,8 +307,23 @@ def serve_react_app() -> Response:
     )
 
 
+def external_path(path: str) -> str:
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    base_path = get_settings().app_base_path
+    if not base_path:
+        return normalized_path
+    if normalized_path == "/":
+        return f"{base_path}/"
+    return f"{base_path}{normalized_path}"
+
+
+def cookie_path() -> str:
+    return get_settings().app_base_path or "/"
+
+
 def safe_operator_next_path(value: str | None) -> str:
-    if value in {
+    logical_value = strip_external_path(value or "")
+    if logical_value in {
         "/orchestration",
         "/orchestration/manual",
         "/orchestration/dynamic",
@@ -306,15 +332,28 @@ def safe_operator_next_path(value: str | None) -> str:
         "/provision",
         "/notifications",
     }:
-        return value
+        return logical_value
     return "/"
+
+
+def strip_external_path(path: str) -> str:
+    if not path:
+        return "/"
+    base_path = get_settings().app_base_path
+    if not base_path:
+        return path
+    if path == base_path:
+        return "/"
+    if path.startswith(f"{base_path}/"):
+        return path[len(base_path) :] or "/"
+    return path
 
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> Response:
     if get_optional_auth_session(request):
         next_path = safe_operator_next_path(request.query_params.get("next"))
-        return RedirectResponse(url=next_path, status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(url=external_path(next_path), status_code=status.HTTP_303_SEE_OTHER)
 
     return serve_react_app()
 
@@ -372,6 +411,11 @@ def sub2api_login(payload: Sub2APILoginRequest) -> JSONResponse:
     return response
 
 
+@app.get("/auth/session")
+def auth_session(session: AuthSession = Depends(require_api_auth)) -> AuthSessionResponse:
+    return AuthSessionResponse(username=session.username, expires_at=session.expires_at)
+
+
 @app.post("/auth/logout")
 def auth_logout(request: Request) -> JSONResponse:
     get_auth_manager().revoke(extract_access_key(request))
@@ -384,9 +428,12 @@ def auth_logout(request: Request) -> JSONResponse:
 def index(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
-        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(url=external_path("/login"), status_code=status.HTTP_303_SEE_OTHER)
 
-    return RedirectResponse(url="/orchestration/manual", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        url=external_path("/orchestration/manual"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @app.get("/orchestration", response_class=HTMLResponse)
@@ -400,7 +447,7 @@ def operator_view(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
         return RedirectResponse(
-            url=f"/login?next={request.url.path}",
+            url=f"{external_path('/login')}?next={external_path(request.url.path)}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
