@@ -5,9 +5,11 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable
+from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+URL_TEMPLATE_VARIABLE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 @dataclass
@@ -63,7 +66,7 @@ def _format_text(message: NotificationMessage) -> str:
 
 
 def _build_generic_payload(message: NotificationMessage) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "rule_id": message.rule_id,
         "rule_name": message.rule_name,
         "signal_key": message.signal_key,
@@ -73,12 +76,67 @@ def _build_generic_payload(message: NotificationMessage) -> dict[str, object]:
         "snapshot": message.snapshot,
         "occurred_at": message.occurred_at.isoformat(),
     }
+    if message.rule_config:
+        payload.update(message.rule_config)
+    return payload
+
+
+def _select_payload_fields(receiver: NotificationWebhook, message: NotificationMessage) -> dict[str, object]:
+    payload = _build_generic_payload(message)
+    return {field: payload[field] for field in receiver.payload_fields if field in payload}
+
+
+def _append_query_fields(url: str, fields: dict[str, object]) -> str:
+    query_items: list[tuple[str, str]] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            query_items.append((key, json.dumps(value, ensure_ascii=False, separators=(",", ":"))))
+            continue
+        if isinstance(value, bool):
+            query_items.append((key, "true" if value else "false"))
+            continue
+        query_items.append((key, str(value)))
+    if not query_items:
+        return url
+    parsed = urlparse(url)
+    extra = urlencode(query_items)
+    query = f"{parsed.query}&{extra}" if parsed.query else extra
+    return urlunparse(parsed._replace(query=query))
+
+
+def _stringify_url_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _render_url_template(url: str, fields: dict[str, object]) -> tuple[str, bool]:
+    matched = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal matched
+        field = match.group(1)
+        if field not in fields:
+            return match.group(0)
+        matched = True
+        return quote(_stringify_url_value(fields[field]), safe="")
+
+    return URL_TEMPLATE_VARIABLE_RE.sub(replace, url), matched
 
 
 def _adapter_generic(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
+    selected_payload = _select_payload_fields(receiver, message)
     if receiver.method == WebhookMethod.get:
-        return PreparedRequest("GET", receiver.url, {}, b"")
-    body = json.dumps(_build_generic_payload(message), ensure_ascii=False).encode("utf-8")
+        rendered_url, has_template = _render_url_template(receiver.url, _build_generic_payload(message))
+        url = rendered_url if has_template else _append_query_fields(receiver.url, selected_payload)
+        return PreparedRequest("GET", url, {}, b"")
+    body = json.dumps(selected_payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if receiver.secret:
         signature = hmac.new(

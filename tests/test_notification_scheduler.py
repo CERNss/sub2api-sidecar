@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
 
@@ -20,7 +20,10 @@ from app.models.notification import (
 )
 from app.services.notification_collector import (
     CollectorRegistry,
+    KNOWN_SIGNAL_KEYS,
+    Sub2APINotificationCollectors,
     default_registry,
+    sub2api_registry,
 )
 from app.services.notification_evaluator import evaluate_rule
 
@@ -76,6 +79,55 @@ def _settings(rules: list[NotificationRule]) -> NotificationSettings:
     )
 
 
+class _FakeSub2APIClient:
+    def list_openai_accounts(self):
+        return [
+            {
+                "id": "acct-1",
+                "name": "Key down",
+                "account_type": "apikey",
+                "availability_status": "disabled",
+                "is_available": False,
+                "current_concurrency": 4,
+                "concurrency": 5,
+                "quota_remaining": 40,
+                "raw": {"type": "apikey", "expires_at": "2026-12-31"},
+            },
+            {
+                "id": "acct-2",
+                "name": "Rate limited",
+                "account_type": "oauth",
+                "availability_status": "rate_limited",
+                "rate_limited": True,
+                "current_concurrency": 1,
+                "concurrency": 10,
+                "quota_remaining": 12,
+                "raw": {"type": "oauth"},
+            },
+            {
+                "id": "acct-3",
+                "name": "Needs reauth",
+                "account_type": "oauth",
+                "availability_status": "needs_reauth",
+                "current_concurrency": 0,
+                "concurrency": 5,
+                "quota_remaining": 80,
+                "raw": {"type": "oauth"},
+            },
+        ]
+
+    def list_users(self):
+        return [
+            {"id": "u1", "email": "a@example.com", "balance": 10},
+            {"id": "u2", "email": "b@example.com", "balance": 3},
+        ]
+
+    def get_usage_stats(self, *, user_id, start_date, end_date, timezone_name):
+        if str(start_date) == "2026-05-10":
+            return {"total_actual_cost": 200, "daily_limit_usd": 250}
+        return {"total_actual_cost": 100, "daily_limit_usd": 250}
+
+
 # --- Collector registry ---
 
 
@@ -85,6 +137,36 @@ def test_collector_registry_default_signals_are_unimplemented() -> None:
     assert sample is None
     assert reason is not None
     assert "not implemented" in reason
+
+
+def test_sub2api_registry_registers_frontend_signal_collectors() -> None:
+    registry = sub2api_registry(_FakeSub2APIClient())
+
+    for signal_key in KNOWN_SIGNAL_KEYS:
+        assert registry.is_registered(signal_key)
+
+
+def test_sub2api_collectors_account_signals() -> None:
+    collectors = Sub2APINotificationCollectors(_FakeSub2APIClient())
+
+    assert collectors.account_invalid(_rule()).value == 1
+    assert collectors.account_rate_limited(_rule()).value == 1
+    assert collectors.account_reauth_needed(_rule()).value == 1
+    assert collectors.account_capacity_high(_rule()).value == 80
+    assert collectors.account_quota_low(_rule()).value == 12
+    assert collectors.platform_key_health(_rule()).value == 1
+    assert collectors.platform_key_expiry(_rule()).value >= 0
+
+
+def test_sub2api_collectors_usage_and_balance_signals() -> None:
+    collectors = Sub2APINotificationCollectors(_FakeSub2APIClient())
+
+    assert collectors.user_balance_low(_rule()).value == 3
+    with patch("app.services.notification_collector.date") as fake_date:
+        fake_date.today.return_value = date(2026, 5, 10)
+        fake_date.fromisoformat.side_effect = date.fromisoformat
+        assert collectors.subscription_usage(_rule()).value == 80
+        assert collectors.admin_usage_anomaly(_rule()).value == 100
 
 
 def test_collector_registry_runs_registered_collector() -> None:
@@ -254,15 +336,16 @@ def test_tick_respects_read_interval(client) -> None:
     assert outcomes == []
 
 
-def test_evaluate_once_returns_no_data_when_collector_unimplemented(client) -> None:
+def test_evaluate_once_returns_no_data_when_collector_has_no_data(client) -> None:
     login(client)
     settings = _settings([_rule(threshold="10", for_minutes=0)])
     main.get_flow_store().save_notification_settings(settings)
+    main.get_notification_service().collectors.register("account_invalid", lambda rule: None)
 
     outcome = main.get_notification_service().evaluate_once("r1")
 
     assert outcome.decision.action == NotificationRuleAction.no_data
-    assert "not implemented" in outcome.decision.next_state.last_error
+    assert "returned no data" in outcome.decision.next_state.last_error
     assert outcome.deliveries == []
 
 

@@ -188,6 +188,7 @@ class NotificationService:
             summary=summary,
             trigger=trigger,
             snapshot=snapshot,
+            rule_config=_rule_payload_template(rule),
         )
 
     def _validate(self, settings: NotificationSettings) -> None:
@@ -295,6 +296,23 @@ def redact_settings(settings: NotificationSettings) -> dict[str, Any]:
         if receiver.get("secret"):
             receiver["secret"] = REDACTED_SECRET
     return payload
+
+
+def _rule_payload_template(rule: NotificationRule) -> dict[str, Any]:
+    return {
+        "name": rule.name,
+        "enabled": rule.enabled,
+        "signalKey": rule.signal_key,
+        "severity": rule.severity.value,
+        "operator": rule.operator.value,
+        "threshold": rule.threshold,
+        "thresholdUnit": rule.threshold_unit,
+        "readIntervalMinutes": rule.read_interval_minutes,
+        "forMinutes": rule.for_minutes,
+        "cooldownMinutes": rule.cooldown_minutes,
+        "includeResolved": rule.include_resolved,
+        "includeSnapshot": rule.include_snapshot,
+    }
 
 
 __all__ = [

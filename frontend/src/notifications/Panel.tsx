@@ -6,12 +6,16 @@ import { Summary } from "./Summary";
 import { makeDefaultWebhook, makeRuleForSignal } from "./defaults";
 import {
   getNotificationApiErrorMessage,
+  loadNotificationDeliveries,
   loadNotificationSettings,
-  saveNotificationSettings
+  saveNotificationSettings,
+  sendNotificationTest
 } from "./api";
 import {
+  NotificationDeliveryHistory,
   NotificationRule,
   NotificationSettings,
+  NotificationTestResult,
   NotificationWebhook,
   notificationSignals
 } from "./types";
@@ -23,6 +27,7 @@ type Props = {
 };
 
 const emptyStatus: Status = { message: "", tone: "idle" };
+const emptyDeliveryHistory: NotificationDeliveryHistory = { items: [], total: 0 };
 
 export function NotificationPanel({ onAuthExpired }: Props) {
   const [settings, setSettings] = useState<NotificationSettings>(() => ({
@@ -34,8 +39,13 @@ export function NotificationPanel({ onAuthExpired }: Props) {
   const [status, setStatus] = useState<Status>(emptyStatus);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
   const [savingWebhookToggleId, setSavingWebhookToggleId] = useState("");
   const [saveScope, setSaveScope] = useState("");
+  const [testResult, setTestResult] = useState<NotificationTestResult | null>(null);
+  const [deliveryHistory, setDeliveryHistory] =
+    useState<NotificationDeliveryHistory>(emptyDeliveryHistory);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   function applySettings(next: NotificationSettings) {
     setSettings(next);
@@ -51,11 +61,23 @@ export function NotificationPanel({ onAuthExpired }: Props) {
     let cancelled = false;
     async function loadFromDatabase() {
       setIsLoading(true);
+      setIsLoadingHistory(true);
       try {
         const loaded = await loadNotificationSettings();
         if (cancelled) return;
         applySettings(loaded);
         setStatus({ message: "已从数据库加载告警配置。", tone: "success" });
+        try {
+          const history = await loadNotificationDeliveries(50);
+          if (!cancelled) setDeliveryHistory(history);
+        } catch (error) {
+          if (!cancelled && !onAuthExpired(error, setStatus)) {
+            setStatus({
+              message: getNotificationApiErrorMessage(error, "加载告警历史失败"),
+              tone: "error"
+            });
+          }
+        }
       } catch (error) {
         if (cancelled) return;
         if (!onAuthExpired(error, setStatus)) {
@@ -65,7 +87,10 @@ export function NotificationPanel({ onAuthExpired }: Props) {
           });
         }
       } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+          setIsLoadingHistory(false);
+        }
       }
     }
     void loadFromDatabase();
@@ -73,6 +98,23 @@ export function NotificationPanel({ onAuthExpired }: Props) {
       cancelled = true;
     };
   }, []);
+
+  async function refreshDeliveryHistory() {
+    setIsLoadingHistory(true);
+    try {
+      const history = await loadNotificationDeliveries(50);
+      setDeliveryHistory(history);
+    } catch (error) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({
+          message: getNotificationApiErrorMessage(error, "刷新告警历史失败"),
+          tone: "error"
+        });
+      }
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }
 
   function updateWebhook(id: string, partial: Partial<NotificationWebhook>) {
     setSettings((current) => ({
@@ -187,7 +229,7 @@ export function NotificationPanel({ onAuthExpired }: Props) {
     }
   }
 
-  function sendTest() {
+  async function sendTest() {
     const rule = settings.rules.find((r) => r.id === selectedRuleId) ?? settings.rules[0];
     if (!rule) {
       setStatus({ message: "请先选中一条规则。", tone: "error" });
@@ -207,10 +249,42 @@ export function NotificationPanel({ onAuthExpired }: Props) {
       });
       return;
     }
+    setIsTesting(true);
+    setTestResult(null);
     setStatus({
-      message: `${rule.name} 测试消息已准备好，将发送到 ${targets.length} 个 Webhook。`,
+      message: `正在发送 ${targets.length} 个 Webhook。`,
       tone: "info"
     });
+    try {
+      const saved = await saveNotificationSettings(settings);
+      applySettings(saved);
+      const result = await sendNotificationTest(rule.id);
+      setTestResult(result);
+      void refreshDeliveryHistory();
+      const successCount = result.outcomes.filter((outcome) => outcome.status === "succeeded").length;
+      const failedCount = result.outcomes.filter((outcome) => outcome.status === "failed").length;
+      const skippedCount = result.outcomes.filter((outcome) => outcome.status === "skipped").length;
+      if (failedCount > 0) {
+        setStatus({
+          message: `测试发送失败 ${failedCount} 个，成功 ${successCount} 个。`,
+          tone: "error"
+        });
+      } else {
+        setStatus({
+          message: `测试发送完成：成功 ${successCount} 个${skippedCount > 0 ? `，跳过 ${skippedCount} 个` : ""}。`,
+          tone: "success"
+        });
+      }
+    } catch (error) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({
+          message: getNotificationApiErrorMessage(error, "发送测试消息失败"),
+          tone: "error"
+        });
+      }
+    } finally {
+      setIsTesting(false);
+    }
   }
 
   function renderSaveAction(scope: string) {
@@ -255,7 +329,11 @@ export function NotificationPanel({ onAuthExpired }: Props) {
       </div>
 
       <div className="notif-summary-area">
-        <Summary settings={settings} />
+        <Summary
+          settings={settings}
+          deliveryHistory={deliveryHistory}
+          isLoadingHistory={isLoadingHistory}
+        />
       </div>
 
       <div className="notif-rules-area">
@@ -266,7 +344,9 @@ export function NotificationPanel({ onAuthExpired }: Props) {
           onChangeRule={updateRule}
           onAddRule={addRule}
           onRemoveRule={removeSelectedRule}
-          onTest={sendTest}
+          onTest={() => void sendTest()}
+          isTesting={isTesting}
+          testResult={testResult}
           onStatus={(message, tone) => setStatus({ message, tone })}
           renderSaveAction={renderSaveAction}
         />

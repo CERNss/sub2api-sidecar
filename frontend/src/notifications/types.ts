@@ -2,6 +2,26 @@ export type NotificationRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq
 export type NotificationSeverity = "info" | "warning" | "critical";
 export type WebhookProvider = "generic" | "feishu" | "dingtalk" | "wecom" | "slack" | "discord";
 export type WebhookMethod = "GET" | "POST";
+export type WebhookPayloadField =
+  | "rule_id"
+  | "rule_name"
+  | "signal_key"
+  | "severity"
+  | "summary"
+  | "trigger"
+  | "snapshot"
+  | "occurred_at"
+  | "name"
+  | "enabled"
+  | "signalKey"
+  | "operator"
+  | "threshold"
+  | "thresholdUnit"
+  | "readIntervalMinutes"
+  | "forMinutes"
+  | "cooldownMinutes"
+  | "includeResolved"
+  | "includeSnapshot";
 
 export type NotificationSignal = {
   key: string;
@@ -27,6 +47,7 @@ export type NotificationWebhook = {
   enabled: boolean;
   provider: WebhookProvider;
   method: WebhookMethod;
+  payloadFields: WebhookPayloadField[];
   url: string;
   secret: string;
 };
@@ -53,6 +74,42 @@ export type NotificationSettings = {
   rules: NotificationRule[];
 };
 
+export type NotificationDeliveryOutcome = {
+  receiverId: string;
+  provider: WebhookProvider;
+  status: "succeeded" | "failed" | "skipped";
+  attemptCount: number;
+  responseStatus: number | null;
+  errorMessage: string | null;
+};
+
+export type NotificationDeliveryRecord = {
+  deliveryId: string;
+  receiverId: string;
+  ruleId: string;
+  provider: WebhookProvider;
+  severity: NotificationSeverity;
+  trigger: "test" | "rule" | "recovery";
+  status: "succeeded" | "failed" | "skipped";
+  attemptIndex: number;
+  responseStatus: number | null;
+  errorMessage: string | null;
+  payloadDigest: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NotificationDeliveryHistory = {
+  items: NotificationDeliveryRecord[];
+  total: number;
+};
+
+export type NotificationTestResult = {
+  ruleId: string;
+  ruleName: string;
+  outcomes: NotificationDeliveryOutcome[];
+};
+
 export const webhookProviderOptions: { value: WebhookProvider; label: string }[] = [
   { value: "generic", label: "通用 / 自定义 JSON" },
   { value: "feishu", label: "飞书 / Lark 自定义机器人" },
@@ -65,6 +122,39 @@ export const webhookProviderOptions: { value: WebhookProvider; label: string }[]
 export const webhookMethodOptions: { value: WebhookMethod; label: string }[] = [
   { value: "POST", label: "POST" },
   { value: "GET", label: "GET" }
+];
+
+export const defaultWebhookPayloadFields: WebhookPayloadField[] = [
+  "rule_id",
+  "rule_name",
+  "signal_key",
+  "severity",
+  "summary",
+  "trigger",
+  "snapshot",
+  "occurred_at"
+];
+
+export const webhookPayloadFieldOptions: { value: WebhookPayloadField; label: string }[] = [
+  { value: "rule_id", label: "规则 ID" },
+  { value: "rule_name", label: "规则名称" },
+  { value: "signal_key", label: "信号类型" },
+  { value: "severity", label: "严重等级" },
+  { value: "summary", label: "摘要" },
+  { value: "trigger", label: "触发类型" },
+  { value: "snapshot", label: "数据快照" },
+  { value: "occurred_at", label: "发生时间" },
+  { value: "name", label: "配置: 名称" },
+  { value: "enabled", label: "配置: 启用" },
+  { value: "signalKey", label: "配置: 信号类型" },
+  { value: "operator", label: "配置: 条件" },
+  { value: "threshold", label: "配置: 阈值" },
+  { value: "thresholdUnit", label: "配置: 阈值单位" },
+  { value: "readIntervalMinutes", label: "配置: 检查频率" },
+  { value: "forMinutes", label: "配置: 持续时间" },
+  { value: "cooldownMinutes", label: "配置: 冷却时间" },
+  { value: "includeResolved", label: "配置: 恢复通知" },
+  { value: "includeSnapshot", label: "配置: 数据快照" }
 ];
 
 export const webhookSecretHints: Record<WebhookProvider, string> = {

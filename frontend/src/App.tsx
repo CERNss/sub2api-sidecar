@@ -1698,6 +1698,29 @@ function ExistingOrchestrationView({
     [groups]
   );
   const graphGroupFilterSet = useMemo(() => new Set(graphGroupFilterIds), [graphGroupFilterIds]);
+  function updateGraphGroupFilters(values: string[]) {
+    setGraphGroupFilterIds(values);
+    refreshGraphLayout();
+  }
+
+  function includeGraphGroupFilter(groupId: string) {
+    if (!groupId) {
+      return;
+    }
+    setGraphGroupFilterIds((current) => {
+      if (current.includes(groupId)) {
+        return current;
+      }
+      return [...current, groupId];
+    });
+    refreshGraphLayout();
+  }
+
+  function updateTargetGroup(groupId: string) {
+    setTargetGroupId(groupId);
+    includeGraphGroupFilter(groupId);
+  }
+
   const toggleKeySelection = (keyId: string) => {
     if (!keyId) return;
     setSelectedKeyIds((current) =>
@@ -2203,9 +2226,12 @@ function ExistingOrchestrationView({
       setSourceGroupId("");
       setApiKeys([]);
       setSelectedKeyIds([]);
+      updateGraphGroupFilters([]);
       return;
     }
-    setSourceGroupId(idValue(selectedUserDirectGroup?.group_id));
+    const directGroupId = idValue(selectedUserDirectGroup?.group_id);
+    setSourceGroupId(directGroupId);
+    updateGraphGroupFilters(directGroupId ? [directGroupId] : []);
     void loadApiKeys(idValue(selectedUser.user_id));
   }, [selectedUserId, selectedUserDirectGroup?.group_id]);
 
@@ -2248,14 +2274,14 @@ function ExistingOrchestrationView({
     }
     if (selection.kind === "group" && nextGroupId) {
       if (sourceGroupId !== nextGroupId) {
-        setTargetGroupId(nextGroupId);
+        updateTargetGroup(nextGroupId);
       }
       return;
     }
     if (selection.kind === "account") {
       const firstGroupId = (selection.relatedGroupIds ?? []).map(idValue).find(Boolean);
       if (firstGroupId && sourceGroupId !== firstGroupId) {
-        setTargetGroupId(firstGroupId);
+        updateTargetGroup(firstGroupId);
       }
     }
   }
@@ -2521,6 +2547,7 @@ function ExistingOrchestrationView({
                     }
                     setUserSearch("");
                     setSelectedUserId("");
+                    updateGraphGroupFilters([]);
                     void loadResources("", "");
                   }}
                   onChange={(value) => setSelectedUserId(value ?? "")}
@@ -2571,7 +2598,7 @@ function ExistingOrchestrationView({
                     showSearch
                     allowClear
                     optionFilterProp="searchText"
-                    onChange={(value) => setTargetGroupId(value ?? "")}
+                    onChange={(value) => updateTargetGroup(value ?? "")}
                     options={targetGroupOptions}
                     optionRender={renderGroupOption}
                     notFoundContent="暂无可用分组"
@@ -2687,10 +2714,7 @@ function ExistingOrchestrationView({
                 options={graphGroupOptions}
                 optionRender={renderGroupOption}
                 maxTagCount="responsive"
-                onChange={(values) => {
-                  setGraphGroupFilterIds(values);
-                  setGraphRefreshTick((tick) => tick + 1);
-                }}
+                onChange={updateGraphGroupFilters}
                 notFoundContent={loading ? <Spin size="small" /> : "暂无分组"}
               />
               <Tag color={graphGroupFilterIds.length > 0 ? "blue" : "default"}>

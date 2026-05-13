@@ -37,14 +37,30 @@ class WebhookMethod(str, Enum):
     post = "POST"
 
 
+DEFAULT_WEBHOOK_PAYLOAD_FIELDS: tuple[str, ...] = (
+    "rule_id",
+    "rule_name",
+    "signal_key",
+    "severity",
+    "summary",
+    "trigger",
+    "snapshot",
+    "occurred_at",
+)
+
+
 class NotificationWebhook(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     id: str
     name: str = ""
     enabled: bool = False
     provider: WebhookProvider = WebhookProvider.generic
     method: WebhookMethod = WebhookMethod.post
+    payload_fields: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_WEBHOOK_PAYLOAD_FIELDS),
+        alias="payloadFields",
+    )
     url: str = ""
     secret: str = ""
 
@@ -97,6 +113,7 @@ class NotificationMessage(BaseModel):
     summary: str
     trigger: NotificationDeliveryTrigger
     snapshot: dict[str, Any] | None = None
+    rule_config: dict[str, Any] | None = None
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

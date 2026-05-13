@@ -66,6 +66,7 @@ from app.services.notification import (
     redact_settings,
     reject_removed_keys,
 )
+from app.services.notification_collector import sub2api_registry
 from app.services.notification_delivery import NotificationDeliveryService
 from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
@@ -176,6 +177,7 @@ def get_notification_service() -> NotificationService:
     return NotificationService(
         store=get_flow_store(),
         delivery=NotificationDeliveryService(store=get_flow_store()),
+        collectors=sub2api_registry(get_sub2api_client()),
     )
 
 

@@ -2,6 +2,7 @@ import {
   NotificationRule,
   NotificationSettings,
   NotificationWebhook,
+  defaultWebhookPayloadFields,
   notificationSignalByKey
 } from "./types";
 
@@ -14,6 +15,7 @@ export function makeDefaultWebhook(): NotificationWebhook {
     enabled: false,
     provider: "generic",
     method: "POST",
+    payloadFields: defaultWebhookPayloadFields,
     url: "",
     secret: ""
   };

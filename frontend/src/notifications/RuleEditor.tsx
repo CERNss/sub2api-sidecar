@@ -1,12 +1,14 @@
-import { Select, Tag } from "antd";
-import { Copy, Download, Plus, Send } from "lucide-react";
+import { Popconfirm, Select, Tag } from "antd";
+import { Copy, Download, LoaderCircle, Plus, Send, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { downloadJson, makeRuleExport, makeRuleTemplate, makeRuleTemplateJson, toJsonFileSlug } from "./ruleExport";
 import {
+  NotificationDeliveryOutcome,
   NotificationRule,
   NotificationRuleOperator,
   NotificationSettings,
   NotificationSeverity,
+  NotificationTestResult,
   notificationSignalByKey,
   notificationSignalGroups,
   operatorLabel,
@@ -22,6 +24,8 @@ type Props = {
   onAddRule: () => void;
   onRemoveRule: () => void;
   onTest: () => void;
+  isTesting: boolean;
+  testResult: NotificationTestResult | null;
   onStatus: (message: string, tone: "info" | "success" | "error") => void;
   renderSaveAction: (scope: string) => ReactNode;
 };
@@ -45,6 +49,8 @@ export function RuleEditor({
   onAddRule,
   onRemoveRule,
   onTest,
+  isTesting,
+  testResult,
   onStatus,
   renderSaveAction
 }: Props) {
@@ -84,6 +90,16 @@ export function RuleEditor({
   function exportAllRules() {
     downloadJson("sub2api-notification-rules.json", makeRuleExport(settings.rules, settings.webhooks));
     onStatus("全部规则 JSON 已导出。", "success");
+  }
+
+  function webhookName(receiverId: string): string {
+    return settings.webhooks.find((webhook) => webhook.id === receiverId)?.name || receiverId;
+  }
+
+  function outcomeTone(outcome: NotificationDeliveryOutcome): string {
+    if (outcome.status === "succeeded") return "success";
+    if (outcome.status === "skipped") return "info";
+    return "error";
   }
 
   if (settings.rules.length === 0) {
@@ -415,17 +431,47 @@ export function RuleEditor({
             </div>
 
             <div className="notif-actions notif-rule-actions">
-              <button className="button secondary" type="button" onClick={onTest}>
-                <Send size={16} aria-hidden="true" />
-                发送测试
+              <button className="button secondary" type="button" onClick={onTest} disabled={isTesting}>
+                {isTesting ? (
+                  <LoaderCircle className="spin" size={16} aria-hidden="true" />
+                ) : (
+                  <Send size={16} aria-hidden="true" />
+                )}
+                {isTesting ? "发送中" : "发送测试"}
               </button>
               <div className="notif-item-actions">
                 {renderSaveAction(`rule:${selected.id}`)}
-                <button className="button danger" type="button" onClick={onRemoveRule}>
-                  删除规则
-                </button>
+                <Popconfirm
+                  title="删除规则？"
+                  description="删除后保存才会写入数据库。"
+                  okText="确认删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={onRemoveRule}
+                >
+                  <button className="button danger" type="button">
+                    <Trash2 size={16} aria-hidden="true" />
+                    删除规则
+                  </button>
+                </Popconfirm>
               </div>
             </div>
+
+            {testResult && testResult.ruleId === selected.id ? (
+              <div className="notif-test-result">
+                {testResult.outcomes.map((outcome) => (
+                  <div className={`notif-test-row tone-${outcomeTone(outcome)}`} key={outcome.receiverId}>
+                    <strong>{webhookName(outcome.receiverId)}</strong>
+                    <span>
+                      {outcome.status === "succeeded" ? "成功" : outcome.status === "skipped" ? "跳过" : "失败"}
+                      {outcome.responseStatus ? ` · HTTP ${outcome.responseStatus}` : ""}
+                      {outcome.attemptCount > 0 ? ` · ${outcome.attemptCount} 次` : ""}
+                    </span>
+                    {outcome.errorMessage ? <small>{outcome.errorMessage}</small> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

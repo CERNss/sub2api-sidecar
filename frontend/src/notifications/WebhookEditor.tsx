@@ -1,12 +1,14 @@
-import { Tag } from "antd";
+import { Popconfirm, Select, Tag } from "antd";
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import {
   NotificationSettings,
   NotificationWebhook,
+  WebhookPayloadField,
   WebhookMethod,
   WebhookProvider,
   webhookMethodOptions,
+  webhookPayloadFieldOptions,
   webhookProviderOptions,
   webhookSecretHints
 } from "./types";
@@ -34,6 +36,64 @@ export function WebhookEditor({
   savingWebhookToggleId,
   renderSaveAction
 }: Props) {
+  function syncGetUrlTemplate(url: string, previousFields: WebhookPayloadField[], nextFields: WebhookPayloadField[]): string {
+    const addedFields = nextFields.filter((field) => !previousFields.includes(field));
+    const removedFields = previousFields.filter((field) => !nextFields.includes(field));
+    const baseUrl = ensureUrlBase(url);
+    if (!baseUrl) return url;
+    const parsed = splitUrlTemplate(baseUrl);
+    const nextQueryParts = parsed.query ? parsed.query.split("&").filter(Boolean) : [];
+    for (const field of removedFields) {
+      const template = `${field}=$${field}`;
+      const index = nextQueryParts.findIndex((part) => part === template);
+      if (index >= 0) nextQueryParts.splice(index, 1);
+    }
+    for (const field of addedFields) {
+      if (!nextQueryParts.some((part) => part.split("=")[0] === field)) {
+        nextQueryParts.push(`${field}=$${field}`);
+      }
+    }
+    const query = nextQueryParts.length > 0 ? `?${nextQueryParts.join("&")}` : "";
+    return `${parsed.base}${query}${parsed.hash}`;
+  }
+
+  function ensureUrlBase(url: string): string {
+    const trimmed = url.trim();
+    if (trimmed) return trimmed;
+    return "https://example.com/test";
+  }
+
+  function splitUrlTemplate(url: string): { base: string; query: string; hash: string } {
+    const hashIndex = url.indexOf("#");
+    const beforeHash = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+    const hash = hashIndex >= 0 ? url.slice(hashIndex) : "";
+    const queryIndex = beforeHash.indexOf("?");
+    if (queryIndex < 0) {
+      return { base: beforeHash, query: "", hash };
+    }
+    return {
+      base: beforeHash.slice(0, queryIndex),
+      query: beforeHash.slice(queryIndex + 1),
+      hash
+    };
+  }
+
+  function updateWebhookPayloadFields(webhook: NotificationWebhook, values: WebhookPayloadField[]) {
+    const partial: Partial<NotificationWebhook> = { payloadFields: values };
+    if (webhook.provider === "generic" && webhook.method === "GET") {
+      partial.url = syncGetUrlTemplate(webhook.url, webhook.payloadFields, values);
+    }
+    onChange(webhook.id, partial);
+  }
+
+  function updateWebhookMethod(webhook: NotificationWebhook, method: WebhookMethod) {
+    const partial: Partial<NotificationWebhook> = { method };
+    if (webhook.provider === "generic" && method === "GET") {
+      partial.url = syncGetUrlTemplate(webhook.url, [], webhook.payloadFields);
+    }
+    onChange(webhook.id, partial);
+  }
+
   return (
     <section className="panel notif-island webhook-island">
       <header className="webhook-island-head">
@@ -124,7 +184,7 @@ export function WebhookEditor({
                         value={webhook.method}
                         disabled={webhook.provider !== "generic"}
                         onChange={(event) =>
-                          onChange(webhook.id, { method: event.target.value as WebhookMethod })
+                          updateWebhookMethod(webhook, event.target.value as WebhookMethod)
                         }
                       >
                         {webhookMethodOptions.map((option) => (
@@ -134,6 +194,21 @@ export function WebhookEditor({
                         ))}
                       </select>
                     </label>
+                    <label className="notif-field">
+                      <span>{webhook.method === "GET" ? "Query 字段" : "JSON 字段"}</span>
+                      <Select
+                        mode="multiple"
+                        className="notif-webhook-select"
+                        value={webhook.payloadFields}
+                        disabled={webhook.provider !== "generic"}
+                        optionFilterProp="label"
+                        maxTagCount="responsive"
+                        onChange={(values) =>
+                          updateWebhookPayloadFields(webhook, values as WebhookPayloadField[])
+                        }
+                        options={webhookPayloadFieldOptions}
+                      />
+                    </label>
                   </div>
 
                   <label className="notif-field">
@@ -141,7 +216,7 @@ export function WebhookEditor({
                     <input
                       type="url"
                       value={webhook.url}
-                      placeholder="https://example.com/webhook"
+                      placeholder={webhook.method === "GET" ? "https://example.com/test?severity=$severity" : "https://example.com/webhook"}
                       onChange={(event) => onChange(webhook.id, { url: event.target.value })}
                     />
                   </label>
@@ -163,10 +238,19 @@ export function WebhookEditor({
                     </span>
                     <div className="notif-item-actions">
                       {renderSaveAction(`webhook:${webhook.id}`)}
-                      <button className="button danger compact" type="button" onClick={() => onRemove(webhook.id)}>
-                        <Trash2 size={16} aria-hidden="true" />
-                        删除 Webhook
-                      </button>
+                      <Popconfirm
+                        title="删除 Webhook？"
+                        description={ruleCount > 0 ? `会从 ${ruleCount} 条规则中移除。` : "删除后保存才会写入数据库。"}
+                        okText="确认删除"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={() => onRemove(webhook.id)}
+                      >
+                        <button className="button danger compact" type="button">
+                          <Trash2 size={16} aria-hidden="true" />
+                          删除 Webhook
+                        </button>
+                      </Popconfirm>
                     </div>
                   </div>
                 </div>

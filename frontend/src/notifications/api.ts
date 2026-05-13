@@ -1,11 +1,18 @@
 import { makeDefaultSettings } from "./defaults";
 import {
+  NotificationDeliveryHistory,
+  NotificationDeliveryRecord,
+  NotificationDeliveryOutcome,
   NotificationRule,
   NotificationSettings,
+  NotificationTestResult,
   NotificationWebhook,
+  WebhookPayloadField,
   WebhookMethod,
   WebhookProvider,
+  defaultWebhookPayloadFields,
   webhookMethodOptions,
+  webhookPayloadFieldOptions,
   webhookProviderOptions
 } from "./types";
 
@@ -45,6 +52,7 @@ const KNOWN_WEBHOOK_KEYS = new Set<keyof NotificationWebhook>([
   "enabled",
   "provider",
   "method",
+  "payloadFields",
   "url",
   "secret"
 ]);
@@ -144,12 +152,19 @@ function hydrateWebhook(raw: unknown, index: number): NotificationWebhook | null
     out.method && webhookMethodOptions.some((option) => option.value === out.method)
       ? out.method
       : "POST";
+  const validPayloadFields = new Set(webhookPayloadFieldOptions.map((option) => option.value));
+  const payloadFields = Array.isArray(out.payloadFields)
+    ? out.payloadFields.filter((field): field is WebhookPayloadField =>
+        typeof field === "string" && validPayloadFields.has(field as WebhookPayloadField)
+      )
+    : defaultWebhookPayloadFields;
   return {
     id: out.id || `webhook-${index + 1}`,
     name: out.name || `Webhook ${index + 1}`,
     enabled: Boolean(out.enabled),
     provider,
     method: provider === "generic" ? method : "POST",
+    payloadFields: payloadFields.length > 0 ? payloadFields : defaultWebhookPayloadFields,
     url: out.url || "",
     secret: out.secret || ""
   };
@@ -202,6 +217,82 @@ function hydrateSettings(raw: unknown): NotificationSettings {
   };
 }
 
+function hydrateDeliveryOutcome(raw: unknown): NotificationDeliveryOutcome | null {
+  if (!raw || typeof raw !== "object") return null;
+  const source = raw as ApiPayload;
+  const provider = typeof source.provider === "string" ? source.provider : "generic";
+  const status = typeof source.status === "string" ? source.status : "failed";
+  return {
+    receiverId: String(source.receiver_id ?? ""),
+    provider: webhookProviderOptions.some((option) => option.value === provider)
+      ? provider as WebhookProvider
+      : "generic",
+    status: status === "succeeded" || status === "skipped" ? status : "failed",
+    attemptCount: Number(source.attempt_count ?? 0),
+    responseStatus: source.response_status === null || source.response_status === undefined
+      ? null
+      : Number(source.response_status),
+    errorMessage: typeof source.error_message === "string" ? source.error_message : null
+  };
+}
+
+function hydrateDeliveryRecord(raw: unknown): NotificationDeliveryRecord | null {
+  if (!raw || typeof raw !== "object") return null;
+  const source = raw as ApiPayload;
+  const provider = typeof source.provider === "string" ? source.provider : "generic";
+  const severity = typeof source.severity === "string" ? source.severity : "warning";
+  const trigger = typeof source.trigger === "string" ? source.trigger : "rule";
+  const status = typeof source.status === "string" ? source.status : "failed";
+  return {
+    deliveryId: String(source.delivery_id ?? ""),
+    receiverId: String(source.receiver_id ?? ""),
+    ruleId: String(source.rule_id ?? ""),
+    provider: webhookProviderOptions.some((option) => option.value === provider)
+      ? provider as WebhookProvider
+      : "generic",
+    severity: severity === "info" || severity === "critical" ? severity : "warning",
+    trigger: trigger === "test" || trigger === "recovery" ? trigger : "rule",
+    status: status === "succeeded" || status === "skipped" ? status : "failed",
+    attemptIndex: Number(source.attempt_index ?? 0),
+    responseStatus: source.response_status === null || source.response_status === undefined
+      ? null
+      : Number(source.response_status),
+    errorMessage: typeof source.error_message === "string" ? source.error_message : null,
+    payloadDigest: String(source.payload_digest ?? ""),
+    createdAt: String(source.created_at ?? ""),
+    updatedAt: String(source.updated_at ?? "")
+  };
+}
+
+function hydrateTestResult(raw: unknown): NotificationTestResult {
+  if (!raw || typeof raw !== "object") {
+    return { ruleId: "", ruleName: "", outcomes: [] };
+  }
+  const source = raw as ApiPayload;
+  return {
+    ruleId: String(source.rule_id ?? ""),
+    ruleName: String(source.rule_name ?? ""),
+    outcomes: Array.isArray(source.outcomes)
+      ? source.outcomes.map(hydrateDeliveryOutcome).filter(Boolean) as NotificationDeliveryOutcome[]
+      : []
+  };
+}
+
+function hydrateDeliveryHistory(raw: unknown): NotificationDeliveryHistory {
+  if (!raw || typeof raw !== "object") {
+    return { items: [], total: 0 };
+  }
+  const source = raw as ApiPayload;
+  const items = Array.isArray(source.items)
+    ? source.items.map(hydrateDeliveryRecord).filter(Boolean) as NotificationDeliveryRecord[]
+    : [];
+  const total = Number(source.total ?? items.length);
+  return {
+    items,
+    total: Number.isFinite(total) ? total : items.length
+  };
+}
+
 export function getNotificationApiErrorMessage(error: unknown, fallbackMessage: string): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -216,6 +307,27 @@ export async function loadNotificationSettings(): Promise<NotificationSettings> 
     "加载告警配置失败"
   );
   return hydrateSettings(payload);
+}
+
+export async function loadNotificationDeliveries(limit = 50): Promise<NotificationDeliveryHistory> {
+  const payload = await requestNotificationJson<unknown>(
+    `/notifications/deliveries?limit=${encodeURIComponent(String(limit))}`,
+    { method: "GET" },
+    "加载告警历史失败"
+  );
+  return hydrateDeliveryHistory(payload);
+}
+
+export async function sendNotificationTest(ruleId: string): Promise<NotificationTestResult> {
+  const payload = await requestNotificationJson<unknown>(
+    "/notifications/test",
+    {
+      method: "POST",
+      body: JSON.stringify({ rule_id: ruleId })
+    },
+    "发送测试消息失败"
+  );
+  return hydrateTestResult(payload);
 }
 
 export async function saveNotificationSettings(

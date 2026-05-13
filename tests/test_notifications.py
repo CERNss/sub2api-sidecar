@@ -114,6 +114,16 @@ def test_notification_config_round_trip_redacts_secret(client) -> None:
     payload = get_response.json()
     assert payload["webhooks"][0]["url"] == "https://hooks.example.com/incoming"
     assert payload["webhooks"][0]["method"] == "POST"
+    assert payload["webhooks"][0]["payloadFields"] == [
+        "rule_id",
+        "rule_name",
+        "signal_key",
+        "severity",
+        "summary",
+        "trigger",
+        "snapshot",
+        "occurred_at",
+    ]
     assert payload["webhooks"][0]["secret"] == "[redacted]"
     assert payload["rules"][0]["targetWebhookIds"] == ["ops"]
     assert "recoveryThreshold" not in payload["rules"][0]
@@ -160,6 +170,22 @@ def test_notification_config_persists_generic_get_method(client) -> None:
     stored = main.get_flow_store().get_notification_settings()
     assert stored is not None
     assert stored.webhooks[0].method == WebhookMethod.get
+
+
+def test_notification_config_persists_generic_payload_fields(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body(payloadFields=["name", "severity", "threshold"])],
+        "rules": [_rule_body()],
+    }
+
+    response = client.put("/notifications/config", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["webhooks"][0]["payloadFields"] == ["name", "severity", "threshold"]
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.webhooks[0].payload_fields == ["name", "severity", "threshold"]
 
 
 def test_notification_config_forces_non_generic_webhook_method_to_post(client) -> None:
@@ -436,14 +462,96 @@ def test_provider_generic_get_uses_empty_body() -> None:
         provider=WebhookProvider.generic,
         method=WebhookMethod.get,
         url="https://example.com/hook?token=abc",
+        payloadFields=[],
     )
 
     prepared = build_request(receiver, _message())
 
     assert prepared.method == "GET"
-    assert prepared.url == "https://example.com/hook?token=abc"
+    qs = parse_qs(urlparse(prepared.url).query)
+    assert qs["token"] == ["abc"]
+    assert "rule_id" not in qs
+    assert "rule_name" not in qs
     assert prepared.headers == {}
     assert prepared.body == b""
+
+
+def test_provider_generic_post_uses_selected_json_fields() -> None:
+    receiver = NotificationWebhook(
+        id="g",
+        enabled=True,
+        provider=WebhookProvider.generic,
+        url="https://example.com/hook",
+        payloadFields=["name", "severity", "threshold"],
+    )
+    message = _message()
+    message.rule_config = {
+        "name": "限流/过载",
+        "enabled": True,
+        "signalKey": "account_rate_limited",
+        "severity": "warning",
+        "operator": "gte",
+        "threshold": "1",
+        "thresholdUnit": "accounts",
+        "readIntervalMinutes": 1,
+        "forMinutes": 5,
+        "cooldownMinutes": 5,
+        "includeResolved": True,
+        "includeSnapshot": True,
+    }
+
+    prepared = build_request(receiver, message)
+    body = json.loads(prepared.body)
+
+    assert body == {
+        "name": "限流/过载",
+        "severity": "warning",
+        "threshold": "1",
+    }
+
+
+def test_provider_generic_get_uses_selected_query_fields() -> None:
+    receiver = NotificationWebhook(
+        id="g",
+        enabled=True,
+        provider=WebhookProvider.generic,
+        method=WebhookMethod.get,
+        url="https://example.com/hook",
+        payloadFields=["name", "severity", "threshold"],
+    )
+    message = _message()
+    message.rule_config = {"name": "Account invalid", "signalKey": "account_invalid", "threshold": "1"}
+
+    prepared = build_request(receiver, message)
+    qs = parse_qs(urlparse(prepared.url).query)
+
+    assert prepared.method == "GET"
+    assert prepared.body == b""
+    assert qs["name"] == ["Account invalid"]
+    assert qs["severity"] == ["warning"]
+    assert qs["threshold"] == ["1"]
+
+
+def test_provider_generic_get_renders_url_template_fields() -> None:
+    receiver = NotificationWebhook(
+        id="g",
+        enabled=True,
+        provider=WebhookProvider.generic,
+        method=WebhookMethod.get,
+        url="https://example.com/hook?name=$name&severity=$severity&custom=$threshold",
+        payloadFields=["name", "severity", "threshold"],
+    )
+    message = _message()
+    message.rule_config = {"name": "限流/过载", "threshold": "1"}
+
+    prepared = build_request(receiver, message)
+    qs = parse_qs(urlparse(prepared.url).query)
+
+    assert prepared.method == "GET"
+    assert prepared.body == b""
+    assert qs["name"] == ["限流/过载"]
+    assert qs["severity"] == ["warning"]
+    assert qs["custom"] == ["1"]
 
 
 def test_provider_slack_uses_text_field() -> None:
