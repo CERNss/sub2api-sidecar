@@ -3,7 +3,9 @@ import {
   NotificationRule,
   NotificationSettings,
   NotificationWebhook,
+  WebhookMethod,
   WebhookProvider,
+  webhookMethodOptions,
   webhookProviderOptions
 } from "./types";
 
@@ -42,6 +44,7 @@ const KNOWN_WEBHOOK_KEYS = new Set<keyof NotificationWebhook>([
   "name",
   "enabled",
   "provider",
+  "method",
   "url",
   "secret"
 ]);
@@ -51,24 +54,79 @@ async function requestNotificationJson<T>(
   options: RequestInit,
   fallbackMessage: string
 ): Promise<T> {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers
-    }
-  });
-  const payload = (await response.json().catch(() => ({
-    detail: fallbackMessage
-  }))) as ApiPayload;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      credentials: "same-origin",
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...options.headers
+      }
+    });
+  } catch (error) {
+    throw new NotificationApiError(
+      `${fallbackMessage}：无法连接后端服务，请确认 API 服务正在运行。`,
+      0,
+      { detail: error instanceof Error ? error.message : fallbackMessage }
+    );
+  }
+  const payload = await readNotificationPayload(response, fallbackMessage);
 
   if (!response.ok) {
-    const detail = typeof payload.detail === "string" ? payload.detail : fallbackMessage;
+    const detail = makeNotificationErrorMessage(response, payload, fallbackMessage);
     throw new NotificationApiError(detail, response.status, payload);
   }
 
   return payload as T;
+}
+
+async function readNotificationPayload(
+  response: Response,
+  fallbackMessage: string
+): Promise<unknown> {
+  const text = await response.text().catch(() => "");
+  if (!text.trim()) {
+    return { detail: fallbackMessage };
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { detail: text.trim() };
+  }
+}
+
+function getPayloadDetail(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const source = payload as ApiPayload;
+  if (typeof source.detail === "string") return source.detail;
+  if (Array.isArray(source.detail)) {
+    const first = source.detail.find((item) => item && typeof item === "object") as
+      | ApiPayload
+      | undefined;
+    if (first) {
+      const path = Array.isArray(first.loc) ? first.loc.join(".") : "";
+      const message = typeof first.msg === "string" ? first.msg : "";
+      return [path, message].filter(Boolean).join(": ");
+    }
+  }
+  if (typeof source.message === "string") return source.message;
+  return "";
+}
+
+function makeNotificationErrorMessage(
+  response: Response,
+  payload: unknown,
+  fallbackMessage: string
+): string {
+  const detail = getPayloadDetail(payload);
+  if (detail && detail !== fallbackMessage) {
+    return detail;
+  }
+  if (response.status === 500 && response.headers.get("Content-Type")?.startsWith("text/plain")) {
+    return `${fallbackMessage}：后端服务不可用或代理失败，请确认 API 服务正在 127.0.0.1:8000 运行。`;
+  }
+  return `${fallbackMessage}：服务返回 HTTP ${response.status}`;
 }
 
 function hydrateWebhook(raw: unknown, index: number): NotificationWebhook | null {
@@ -82,11 +140,16 @@ function hydrateWebhook(raw: unknown, index: number): NotificationWebhook | null
     out.provider && webhookProviderOptions.some((option) => option.value === out.provider)
       ? out.provider
       : "generic";
+  const method: WebhookMethod =
+    out.method && webhookMethodOptions.some((option) => option.value === out.method)
+      ? out.method
+      : "POST";
   return {
     id: out.id || `webhook-${index + 1}`,
     name: out.name || `Webhook ${index + 1}`,
     enabled: Boolean(out.enabled),
     provider,
+    method: provider === "generic" ? method : "POST",
     url: out.url || "",
     secret: out.secret || ""
   };

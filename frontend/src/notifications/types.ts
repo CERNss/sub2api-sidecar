@@ -1,6 +1,7 @@
 export type NotificationRuleOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq";
 export type NotificationSeverity = "info" | "warning" | "critical";
 export type WebhookProvider = "generic" | "feishu" | "dingtalk" | "wecom" | "slack" | "discord";
+export type WebhookMethod = "GET" | "POST";
 
 export type NotificationSignal = {
   key: string;
@@ -25,6 +26,7 @@ export type NotificationWebhook = {
   name: string;
   enabled: boolean;
   provider: WebhookProvider;
+  method: WebhookMethod;
   url: string;
   secret: string;
 };
@@ -58,6 +60,11 @@ export const webhookProviderOptions: { value: WebhookProvider; label: string }[]
   { value: "wecom", label: "企业微信群机器人" },
   { value: "slack", label: "Slack Incoming Webhook" },
   { value: "discord", label: "Discord Webhook" }
+];
+
+export const webhookMethodOptions: { value: WebhookMethod; label: string }[] = [
+  { value: "POST", label: "POST" },
+  { value: "GET", label: "GET" }
 ];
 
 export const webhookSecretHints: Record<WebhookProvider, string> = {

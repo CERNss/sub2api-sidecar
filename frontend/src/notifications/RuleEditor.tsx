@@ -1,4 +1,4 @@
-import { Tag } from "antd";
+import { Select, Tag } from "antd";
 import { Copy, Download, Plus, Send } from "lucide-react";
 import type { ReactNode } from "react";
 import { downloadJson, makeRuleExport, makeRuleTemplate, makeRuleTemplateJson, toJsonFileSlug } from "./ruleExport";
@@ -54,12 +54,9 @@ export function RuleEditor({
     ? settings.webhooks.filter((webhook) => selected.targetWebhookIds.includes(webhook.id))
     : [];
 
-  function toggleTargetWebhook(webhookId: string, checked: boolean) {
+  function updateTargetWebhooks(webhookIds: string[]) {
     if (!selected) return;
-    const next = checked
-      ? Array.from(new Set([...selected.targetWebhookIds, webhookId]))
-      : selected.targetWebhookIds.filter((id) => id !== webhookId);
-    onChangeRule(selected.id, { targetWebhookIds: next });
+    onChangeRule(selected.id, { targetWebhookIds: Array.from(new Set(webhookIds)) });
   }
 
   async function copySelectedRuleTemplate() {
@@ -334,29 +331,20 @@ export function RuleEditor({
                 </div>
               </div>
               {settings.webhooks.length > 0 ? (
-                <div className="notif-webhook-checks">
-                  {settings.webhooks.map((webhook) => {
-                    const checked = selected.targetWebhookIds.includes(webhook.id);
-                    return (
-                      <label
-                        key={webhook.id}
-                        className={`notif-webhook-check ${checked ? "selected" : ""} ${webhook.enabled ? "" : "muted"}`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(event) => toggleTargetWebhook(webhook.id, event.target.checked)}
-                        />
-                        <span>
-                          <strong>{webhook.name || "未命名 Webhook"}</strong>
-                          <small>
-                            {webhook.enabled ? "已启用" : "未启用"} · {webhook.url || "未配置 URL"}
-                          </small>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
+                <Select
+                  className="notif-webhook-select"
+                  mode="multiple"
+                  value={selected.targetWebhookIds}
+                  placeholder="选择 Webhook 接收器"
+                  optionFilterProp="label"
+                  maxTagCount="responsive"
+                  onChange={updateTargetWebhooks}
+                  options={settings.webhooks.map((webhook) => ({
+                    value: webhook.id,
+                    label: webhook.name || "未命名 Webhook",
+                    title: webhook.url || "未配置 URL"
+                  }))}
+                />
               ) : (
                 <div className="notif-target-empty">
                   <strong>还没有 Webhook 接收器</strong>

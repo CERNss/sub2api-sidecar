@@ -34,6 +34,7 @@ export function NotificationPanel({ onAuthExpired }: Props) {
   const [status, setStatus] = useState<Status>(emptyStatus);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [savingWebhookToggleId, setSavingWebhookToggleId] = useState("");
   const [saveScope, setSaveScope] = useState("");
 
   function applySettings(next: NotificationSettings) {
@@ -80,6 +81,34 @@ export function NotificationPanel({ onAuthExpired }: Props) {
         webhook.id === id ? { ...webhook, ...partial } : webhook
       )
     }));
+  }
+
+  async function toggleWebhookEnabled(id: string, enabled: boolean) {
+    const nextSettings: NotificationSettings = {
+      ...settings,
+      webhooks: settings.webhooks.map((webhook) =>
+        webhook.id === id ? { ...webhook, enabled } : webhook
+      )
+    };
+    setSettings(nextSettings);
+    setSavingWebhookToggleId(id);
+    setSaveScope(`webhook-toggle:${id}`);
+    setStatus({ message: enabled ? "正在启用 Webhook。" : "正在停用 Webhook。", tone: "info" });
+    try {
+      const saved = await saveNotificationSettings(nextSettings);
+      applySettings(saved);
+      setStatus({ message: enabled ? "Webhook 已启用。" : "Webhook 已停用。", tone: "success" });
+    } catch (error) {
+      setSettings(settings);
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({
+          message: getNotificationApiErrorMessage(error, "保存 Webhook 开关失败"),
+          tone: "error"
+        });
+      }
+    } finally {
+      setSavingWebhookToggleId("");
+    }
   }
 
   function addWebhook() {
@@ -217,8 +246,10 @@ export function NotificationPanel({ onAuthExpired }: Props) {
           selectedWebhookId={selectedWebhookId}
           onSelect={setSelectedWebhookId}
           onChange={updateWebhook}
+          onToggleEnabled={toggleWebhookEnabled}
           onAdd={addWebhook}
           onRemove={removeWebhook}
+          savingWebhookToggleId={savingWebhookToggleId}
           renderSaveAction={renderSaveAction}
         />
       </div>

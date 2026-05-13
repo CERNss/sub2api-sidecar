@@ -19,6 +19,7 @@ from app.models.notification import (
     NotificationSettings,
     NotificationSeverity,
     NotificationWebhook,
+    WebhookMethod,
     RuleDecision,
     WebhookProvider,
 )
@@ -69,10 +70,11 @@ class NotificationService:
         stored = self.store.get_notification_settings()
         if stored is None:
             return _default_settings()
-        return stored
+        return self._normalize_methods(stored)
 
     def save_config(self, settings: NotificationSettings) -> NotificationSettings:
         settings = self._preserve_redacted_secrets(settings)
+        settings = self._normalize_methods(settings)
         self._validate(settings)
         return self.store.save_notification_settings(settings)
 
@@ -222,6 +224,22 @@ class NotificationService:
             return settings
         return settings.model_copy(update={"webhooks": webhooks})
 
+    def _normalize_methods(self, settings: NotificationSettings) -> NotificationSettings:
+        webhooks = []
+        changed = False
+        for receiver in settings.webhooks:
+            if receiver.provider == WebhookProvider.generic:
+                webhooks.append(receiver)
+                continue
+            if receiver.method == WebhookMethod.post:
+                webhooks.append(receiver)
+                continue
+            webhooks.append(receiver.model_copy(update={"method": WebhookMethod.post}))
+            changed = True
+        if not changed:
+            return settings
+        return settings.model_copy(update={"webhooks": webhooks})
+
 
 def reject_removed_keys(payload: Any) -> None:
     """Raise NotificationConfigError if the inbound payload contains any field that was
@@ -261,6 +279,7 @@ def _default_receiver() -> NotificationWebhook:
         name="Ops Webhook",
         enabled=False,
         provider=WebhookProvider.generic,
+        method=WebhookMethod.post,
         url="",
         secret="",
     )

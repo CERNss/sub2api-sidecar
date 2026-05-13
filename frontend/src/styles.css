@@ -563,16 +563,8 @@ pre {
   min-width: 0;
 }
 
-.notif-webhook-area > .notif-island,
 .notif-summary-area > .notif-summary {
   height: 100%;
-}
-
-.notif-webhook-area > .notif-island {
-  height: 368px;
-  max-height: 368px;
-  grid-template-rows: auto minmax(0, 1fr);
-  overflow: hidden;
 }
 
 .notif-summary-area {
@@ -669,21 +661,53 @@ pre {
   background: #f0fdfa;
 }
 
-.notif-webhook-cards {
-  display: grid;
-  gap: 10px;
+.webhook-island {
+  height: 560px;
+  min-height: 560px;
+  max-height: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: hidden;
+  align-self: start;
+}
+
+.webhook-island-head {
+  min-height: 38px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.webhook-island-head h3 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.webhook-list {
+  flex: 1 1 0;
   min-height: 0;
-  overflow-y: auto;
-  align-content: start;
   border: 1px solid #cbd5e1;
   border-radius: 8px;
   padding: 10px;
   background: #f8fafc;
   box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.02);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.notif-webhook-card {
+.webhook-card {
   min-width: 0;
+  min-height: 52px;
+  flex: 0 0 auto;
   border: 1px solid #d8e1ec;
   border-radius: 6px;
   background: #ffffff;
@@ -693,12 +717,12 @@ pre {
               box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.notif-webhook-card:hover {
+.webhook-card:hover {
   border-color: #7dd3c7;
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
 }
 
-.notif-webhook-card.expanded {
+.webhook-card.expanded {
   border-color: #0f766e;
   background: #ffffff;
   box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.12);
@@ -732,12 +756,11 @@ pre {
   box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.12);
 }
 
-.notif-webhook-card-trigger,
 .notif-rule-card-trigger {
   width: 100%;
-  min-height: 58px;
+  min-height: 52px;
   border: 0;
-  padding: 10px 14px;
+  padding: 9px 14px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
@@ -747,7 +770,21 @@ pre {
   cursor: pointer;
 }
 
-.notif-webhook-card.expanded .notif-webhook-card-trigger {
+.webhook-card-trigger {
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  padding: 9px 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.webhook-card.expanded .webhook-card-trigger {
   border-bottom: 1px solid #e2e8f0;
   background: #f8fafc;
 }
@@ -756,25 +793,111 @@ pre {
   background: #f0fdfa;
 }
 
-.notif-webhook-card-trigger:focus-visible,
 .notif-rule-card-trigger:focus-visible {
   outline: 3px solid rgba(15, 118, 110, 0.24);
   outline-offset: -3px;
 }
 
-.notif-webhook-card-meta,
+.webhook-card-trigger:focus-visible {
+  outline: 3px solid rgba(15, 118, 110, 0.24);
+  outline-offset: -3px;
+}
+
 .notif-rule-card-meta {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-width: max-content;
+  flex-shrink: 0;
 }
 
+.webhook-card-text {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.webhook-card-text strong {
+  color: #0f172a;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webhook-card-text small {
+  color: #64748b;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webhook-card-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: max-content;
+  flex-shrink: 0;
+}
+
+.webhook-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.webhook-switch input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.webhook-switch span {
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  background: #cbd5e1;
+  transition: background 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.webhook-switch span::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.24);
+  transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.webhook-switch input:checked + span {
+  background: #0f766e;
+}
+
+.webhook-switch input:checked + span::after {
+  transform: translateX(16px);
+}
+
+.webhook-switch input:focus-visible + span {
+  outline: 3px solid rgba(15, 118, 110, 0.24);
+  outline-offset: 2px;
+}
+
+.webhook-card-chevron,
 .notif-card-chevron {
   color: #64748b;
   transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.notif-webhook-card.expanded .notif-card-chevron {
+.webhook-card.expanded .webhook-card-chevron {
   transform: rotate(180deg);
 }
 
@@ -782,11 +905,14 @@ pre {
   transform: rotate(180deg);
 }
 
-.notif-webhook-card-body {
+.webhook-card-body {
   margin: 0;
   border: 0;
   border-radius: 0;
   background: #ffffff;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
 }
 
 .notif-rule-card-body {
@@ -1135,6 +1261,23 @@ pre {
   white-space: nowrap;
 }
 
+.notif-webhook-select {
+  width: 100%;
+}
+
+.notif-webhook-select .ant-select-selector {
+  min-height: 40px;
+  border-color: #cbd5e1 !important;
+  border-radius: 8px !important;
+  padding: 4px 10px !important;
+  background: #ffffff !important;
+}
+
+.notif-webhook-select.ant-select-focused .ant-select-selector {
+  border-color: #0f766e !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18) !important;
+}
+
 .notif-target-empty {
   display: grid;
   gap: 4px;
@@ -1270,17 +1413,18 @@ pre {
 
 .notif-summary-counts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .notif-stat {
   border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 12px 14px;
+  border-radius: 8px;
+  padding: 10px 12px;
   background: #ffffff;
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(88px, 0.9fr) auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
 }
 
 .notif-stat.tone-warn {
@@ -1294,19 +1438,21 @@ pre {
   font-weight: 600;
   letter-spacing: 0.01em;
   text-transform: uppercase;
+  min-width: 0;
 }
 
 .notif-stat-value {
   color: #0f172a;
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   line-height: 1.1;
-  letter-spacing: -0.01em;
 }
 
 .notif-stat-hint {
   color: #94a3b8;
   font-size: 11.5px;
+  min-width: 0;
+  text-align: right;
 }
 
 .notif-summary-placeholder {
@@ -1369,16 +1515,16 @@ pre {
   .notif-rule-actions {
     align-items: stretch;
   }
-  .notif-webhook-card-trigger,
+  .webhook-card-trigger,
   .notif-rule-card-trigger,
-  .notif-webhook-card-meta {
+  .webhook-card-meta {
     align-items: flex-start;
   }
-  .notif-webhook-card-trigger,
+  .webhook-card-trigger,
   .notif-rule-card-trigger {
     grid-template-columns: 1fr;
   }
-  .notif-webhook-card-meta,
+  .webhook-card-meta,
   .notif-rule-card-meta {
     justify-content: space-between;
   }
@@ -1386,7 +1532,8 @@ pre {
 
 @media (prefers-reduced-motion: reduce) {
   .notif-list-row,
-  .notif-webhook-check {
+  .notif-webhook-check,
+  .webhook-card {
     transition: none;
   }
 }

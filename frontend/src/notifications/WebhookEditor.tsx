@@ -4,7 +4,9 @@ import type { ReactNode } from "react";
 import {
   NotificationSettings,
   NotificationWebhook,
+  WebhookMethod,
   WebhookProvider,
+  webhookMethodOptions,
   webhookProviderOptions,
   webhookSecretHints
 } from "./types";
@@ -14,8 +16,10 @@ type Props = {
   selectedWebhookId: string;
   onSelect: (id: string) => void;
   onChange: (id: string, partial: Partial<NotificationWebhook>) => void;
+  onToggleEnabled: (id: string, enabled: boolean) => void;
   onAdd: () => void;
   onRemove: (id: string) => void;
+  savingWebhookToggleId: string;
   renderSaveAction: (scope: string) => ReactNode;
 };
 
@@ -24,13 +28,15 @@ export function WebhookEditor({
   selectedWebhookId,
   onSelect,
   onChange,
+  onToggleEnabled,
   onAdd,
   onRemove,
+  savingWebhookToggleId,
   renderSaveAction
 }: Props) {
   return (
-    <section className="panel notif-section notif-island">
-      <header className="notif-section-head">
+    <section className="panel notif-island webhook-island">
+      <header className="webhook-island-head">
         <div>
           <h3>Webhook 接收器</h3>
         </div>
@@ -40,7 +46,7 @@ export function WebhookEditor({
         </button>
       </header>
 
-      <div className="notif-webhook-cards">
+      <div className="webhook-list">
         {settings.webhooks.map((webhook) => {
           const ruleCount = settings.rules.filter((rule) =>
             rule.targetWebhookIds.includes(webhook.id)
@@ -49,38 +55,39 @@ export function WebhookEditor({
           return (
             <article
               key={webhook.id}
-              className={`notif-webhook-card ${expanded ? "expanded" : ""}`}
+              className={`webhook-card ${expanded ? "expanded" : ""}`}
             >
               <button
-                className="notif-webhook-card-trigger"
+                className="webhook-card-trigger"
                 type="button"
                 aria-expanded={expanded}
                 onClick={() => onSelect(expanded ? "" : webhook.id)}
               >
-                <span className="notif-list-text">
+                <span className="webhook-card-text">
                   <strong>{webhook.name || "未命名 Webhook"}</strong>
                   <small>{webhook.url || "未配置 URL"}</small>
                 </span>
-                <span className="notif-webhook-card-meta">
+                <span className="webhook-card-meta">
+                  <label
+                    className="webhook-switch"
+                    aria-label={`${webhook.enabled ? "停用" : "启用"} ${webhook.name || "Webhook"}`}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={webhook.enabled}
+                      disabled={savingWebhookToggleId === webhook.id}
+                      onChange={(event) => onToggleEnabled(webhook.id, event.target.checked)}
+                    />
+                    <span aria-hidden="true" />
+                  </label>
                   <Tag color={webhook.enabled ? "green" : "default"}>{ruleCount} 条规则</Tag>
-                  <ChevronDown className="notif-card-chevron" size={16} aria-hidden="true" />
+                  <ChevronDown className="webhook-card-chevron" size={16} aria-hidden="true" />
                 </span>
               </button>
 
               {expanded ? (
-                <div className="notif-form notif-webhook-card-body">
-                  <label className="notif-toggle">
-                    <input
-                      type="checkbox"
-                      checked={webhook.enabled}
-                      onChange={(event) => onChange(webhook.id, { enabled: event.target.checked })}
-                    />
-                    <span>
-                      <strong>启用</strong>
-                      <small>启用后才会真正发送消息。</small>
-                    </span>
-                  </label>
-
+                <div className="webhook-card-body">
                   <div className="notif-grid-2">
                     <label className="notif-field">
                       <span>名称</span>
@@ -95,10 +102,32 @@ export function WebhookEditor({
                       <select
                         value={webhook.provider}
                         onChange={(event) =>
-                          onChange(webhook.id, { provider: event.target.value as WebhookProvider })
+                          onChange(webhook.id, {
+                            provider: event.target.value as WebhookProvider,
+                            method: event.target.value === "generic" ? webhook.method : "POST"
+                          })
                         }
                       >
                         {webhookProviderOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="notif-grid-2">
+                    <label className="notif-field">
+                      <span>请求方式</span>
+                      <select
+                        value={webhook.method}
+                        disabled={webhook.provider !== "generic"}
+                        onChange={(event) =>
+                          onChange(webhook.id, { method: event.target.value as WebhookMethod })
+                        }
+                      >
+                        {webhookMethodOptions.map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>

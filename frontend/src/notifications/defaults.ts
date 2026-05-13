@@ -13,6 +13,7 @@ export function makeDefaultWebhook(): NotificationWebhook {
     name: "Ops Webhook",
     enabled: false,
     provider: "generic",
+    method: "POST",
     url: "",
     secret: ""
   };

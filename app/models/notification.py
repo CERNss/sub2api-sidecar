@@ -32,6 +32,11 @@ class WebhookProvider(str, Enum):
     discord = "discord"
 
 
+class WebhookMethod(str, Enum):
+    get = "GET"
+    post = "POST"
+
+
 class NotificationWebhook(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -39,6 +44,7 @@ class NotificationWebhook(BaseModel):
     name: str = ""
     enabled: bool = False
     provider: WebhookProvider = WebhookProvider.generic
+    method: WebhookMethod = WebhookMethod.post
     url: str = ""
     secret: str = ""
 

@@ -18,6 +18,7 @@ from app.models.notification import (
     NotificationSeverity,
     NotificationSettings,
     NotificationWebhook,
+    WebhookMethod,
     WebhookProvider,
 )
 from app.services.notification_delivery import (
@@ -51,6 +52,7 @@ def _webhook_body(**overrides: Any) -> dict[str, Any]:
         "name": "Ops",
         "enabled": True,
         "provider": "generic",
+        "method": "POST",
         "url": "https://hooks.example.com/incoming",
         "secret": "",
     }
@@ -111,6 +113,7 @@ def test_notification_config_round_trip_redacts_secret(client) -> None:
     assert get_response.status_code == 200
     payload = get_response.json()
     assert payload["webhooks"][0]["url"] == "https://hooks.example.com/incoming"
+    assert payload["webhooks"][0]["method"] == "POST"
     assert payload["webhooks"][0]["secret"] == "[redacted]"
     assert payload["rules"][0]["targetWebhookIds"] == ["ops"]
     assert "recoveryThreshold" not in payload["rules"][0]
@@ -141,6 +144,38 @@ def test_notification_config_preserves_redacted_secret_on_writeback(client) -> N
     assert stored.webhooks[0].name == "Ops Renamed"
     assert stored.webhooks[0].secret == "shh"
     assert stored.rules[0].cooldown_minutes == 45
+
+
+def test_notification_config_persists_generic_get_method(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body(method="GET")],
+        "rules": [_rule_body()],
+    }
+
+    response = client.put("/notifications/config", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["webhooks"][0]["method"] == "GET"
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.webhooks[0].method == WebhookMethod.get
+
+
+def test_notification_config_forces_non_generic_webhook_method_to_post(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body(provider="slack", method="GET")],
+        "rules": [_rule_body()],
+    }
+
+    response = client.put("/notifications/config", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["webhooks"][0]["method"] == "POST"
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.webhooks[0].method == WebhookMethod.post
 
 
 def test_notification_config_allows_clearing_secret(client) -> None:
@@ -392,6 +427,23 @@ def test_provider_generic_signs_with_hmac_when_secret_present() -> None:
     prepared = build_request(receiver, _message())
     expected = hmac.new(b"topsecret", prepared.body, hashlib.sha256).hexdigest()
     assert prepared.headers["X-Signature"] == f"sha256={expected}"
+
+
+def test_provider_generic_get_uses_empty_body() -> None:
+    receiver = NotificationWebhook(
+        id="g",
+        enabled=True,
+        provider=WebhookProvider.generic,
+        method=WebhookMethod.get,
+        url="https://example.com/hook?token=abc",
+    )
+
+    prepared = build_request(receiver, _message())
+
+    assert prepared.method == "GET"
+    assert prepared.url == "https://example.com/hook?token=abc"
+    assert prepared.headers == {}
+    assert prepared.body == b""
 
 
 def test_provider_slack_uses_text_field() -> None:

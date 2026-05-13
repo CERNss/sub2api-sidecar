@@ -18,6 +18,7 @@ from app.models.notification import (
     NotificationMessage,
     NotificationSeverity,
     NotificationWebhook,
+    WebhookMethod,
     WebhookProvider,
 )
 from app.stores.sqlite import SQLiteFlowStore
@@ -75,6 +76,8 @@ def _build_generic_payload(message: NotificationMessage) -> dict[str, object]:
 
 
 def _adapter_generic(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
+    if receiver.method == WebhookMethod.get:
+        return PreparedRequest("GET", receiver.url, {}, b"")
     body = json.dumps(_build_generic_payload(message), ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if receiver.secret:
@@ -201,7 +204,7 @@ class NotificationDeliveryService:
                 response = self.session.request(
                     prepared.method,
                     prepared.url,
-                    data=prepared.body,
+                    data=prepared.body or None,
                     headers=prepared.headers,
                     timeout=self.timeout_seconds,
                 )
