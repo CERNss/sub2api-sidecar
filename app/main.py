@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import ACCESS_KEY_COOKIE_NAME, AuthSession, EphemeralAdminAuthManager
-from app.clients.sub2api import Sub2APIClient, Sub2APIError
+from app.clients.sub2api import Sub2APIAuthError, Sub2APIClient, Sub2APIError
 from app.config import Settings, get_settings
 from app.errors import FlowNotFoundError, ProvisioningError
 from app.logging_config import setup_logging
@@ -28,6 +28,7 @@ from app.models.schemas import (
     AutoRotationRunResponse,
     AutoRotationRunsEnvelope,
     ErrorResponse,
+    AuthStatusResponse,
     LoginRequest,
     LoginResponse,
     ManualRotationRequest,
@@ -57,6 +58,7 @@ from app.models.schemas import (
     RotationPoolCandidateResponse,
     RotationPoolCandidatesEnvelope,
     RotationPoolGroupRequest,
+    Sub2APILoginRequest,
 )
 from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.notification import (
@@ -80,6 +82,8 @@ logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).resolve().parent
 UI_DIST_DIR = APP_DIR / "static" / "ui"
 UI_INDEX_FILE = UI_DIST_DIR / "index.html"
+SIDECAR_ROUTE_PREFIX = "/admin/sidecar"
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -121,6 +125,30 @@ app = FastAPI(
 
 if UI_DIST_DIR.exists():
     app.mount("/ui-static", StaticFiles(directory=str(UI_DIST_DIR)), name="ui-static")
+
+
+@app.middleware("http")
+async def strip_sidecar_route_prefix(request: Request, call_next):
+    path = request.scope.get("path") or ""
+    if path == SIDECAR_ROUTE_PREFIX or path.startswith(f"{SIDECAR_ROUTE_PREFIX}/"):
+        request.scope["sidecar_route_prefix"] = SIDECAR_ROUTE_PREFIX
+        request.scope["path"] = path[len(SIDECAR_ROUTE_PREFIX) :] or "/"
+        response = await call_next(request)
+        location = response.headers.get("location")
+        if (
+            location
+            and location.startswith("/")
+            and not location.startswith("//")
+            and not location.startswith(f"{SIDECAR_ROUTE_PREFIX}/")
+        ):
+            response.headers["location"] = (
+                f"{SIDECAR_ROUTE_PREFIX}{location}"
+                if location != "/"
+                else f"{SIDECAR_ROUTE_PREFIX}/"
+            )
+        return response
+
+    return await call_next(request)
 
 
 @lru_cache(maxsize=1)
@@ -272,8 +300,26 @@ def clear_auth_cookie(response: JSONResponse) -> None:
     response.delete_cookie(key=ACCESS_KEY_COOKIE_NAME, path="/")
 
 
-def serve_react_app() -> Response:
+def route_prefix(request: Request | None = None) -> str:
+    if request is None:
+        return ""
+    value = request.scope.get("sidecar_route_prefix")
+    return value if isinstance(value, str) else ""
+
+
+def prefix_url(request: Request, path: str) -> str:
+    prefix = route_prefix(request)
+    if not prefix:
+        return path
+    return f"{prefix}{path}" if path != "/" else f"{prefix}/"
+
+
+def serve_react_app(request: Request | None = None) -> Response:
     if UI_INDEX_FILE.exists():
+        prefix = route_prefix(request)
+        if prefix:
+            html = UI_INDEX_FILE.read_text(encoding="utf-8")
+            return HTMLResponse(html.replace('"/ui-static/', f'"{prefix}/ui-static/'))
         return FileResponse(UI_INDEX_FILE)
 
     return HTMLResponse(
@@ -296,7 +342,12 @@ def serve_react_app() -> Response:
 
 
 def safe_operator_next_path(value: str | None) -> str:
-    if value in {
+    logical_value = value
+    if logical_value == SIDECAR_ROUTE_PREFIX:
+        logical_value = "/"
+    elif logical_value and logical_value.startswith(f"{SIDECAR_ROUTE_PREFIX}/"):
+        logical_value = logical_value[len(SIDECAR_ROUTE_PREFIX) :] or "/"
+    if logical_value in {
         "/orchestration",
         "/orchestration/manual",
         "/orchestration/dynamic",
@@ -305,7 +356,7 @@ def safe_operator_next_path(value: str | None) -> str:
         "/provision",
         "/notifications",
     }:
-        return value
+        return logical_value
     return "/"
 
 
@@ -313,9 +364,9 @@ def safe_operator_next_path(value: str | None) -> str:
 def login_page(request: Request) -> Response:
     if get_optional_auth_session(request):
         next_path = safe_operator_next_path(request.query_params.get("next"))
-        return RedirectResponse(url=next_path, status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(url=prefix_url(request, next_path), status_code=status.HTTP_303_SEE_OTHER)
 
-    return serve_react_app()
+    return serve_react_app(request)
 
 
 @app.post("/auth/login")
@@ -341,6 +392,41 @@ def auth_login(payload: LoginRequest) -> JSONResponse:
     return response
 
 
+@app.post("/auth/sub2api-login")
+def auth_sub2api_login(payload: Sub2APILoginRequest) -> JSONResponse:
+    try:
+        admin_profile = get_sub2api_client().validate_admin_jwt(payload.token)
+    except Sub2APIAuthError as exc:
+        return JSONResponse(
+            status_code=exc.status_code or status.HTTP_401_UNAUTHORIZED,
+            content=ErrorResponse(detail=str(exc)).model_dump(),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    session = get_auth_manager().create_external_session(str(admin_profile["username"]))
+    response = JSONResponse(
+        status_code=200,
+        content=LoginResponse(
+            username=session.username,
+            access_key=session.access_key,
+            expires_at=session.expires_at,
+        ).model_dump(mode="json"),
+    )
+    set_auth_cookie(response, session.access_key)
+    return response
+
+
+@app.get("/auth/status")
+def auth_status(request: Request) -> JSONResponse:
+    session = get_optional_auth_session(request)
+    payload = AuthStatusResponse(
+        authenticated=session is not None,
+        username=session.username if session else None,
+        expires_at=session.expires_at if session else None,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
 @app.post("/auth/logout")
 def auth_logout(request: Request) -> JSONResponse:
     get_auth_manager().revoke(extract_access_key(request))
@@ -353,9 +439,14 @@ def auth_logout(request: Request) -> JSONResponse:
 def index(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
-        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+        if "token" in request.query_params:
+            return serve_react_app(request)
+        return RedirectResponse(url=prefix_url(request, "/login"), status_code=status.HTTP_303_SEE_OTHER)
 
-    return RedirectResponse(url="/orchestration/manual", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        url=prefix_url(request, "/orchestration/manual"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @app.get("/orchestration", response_class=HTMLResponse)
@@ -368,12 +459,14 @@ def index(request: Request) -> Response:
 def operator_view(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
+        if "token" in request.query_params:
+            return serve_react_app(request)
         return RedirectResponse(
-            url=f"/login?next={request.url.path}",
+            url=f"{prefix_url(request, '/login')}?next={request.url.path}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
-    return serve_react_app()
+    return serve_react_app(request)
 
 
 @app.get("/health")

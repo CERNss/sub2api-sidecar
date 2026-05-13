@@ -22,6 +22,12 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { NotificationPanel } from "./notifications/Panel";
 import {
+  apiPath,
+  currentLogicalPathname,
+  frontendRoutePath,
+  stripFrontendRouteBase
+} from "./runtime";
+import {
   Alert,
   Button as AntButton,
   Card,
@@ -413,9 +419,7 @@ const orchestrationTabPaths: Record<OrchestrationTab, string> = {
   manual: "/orchestration/manual",
   dynamic: "/orchestration/dynamic"
 };
-const frontendRouteBase = normalizeFrontendRouteBase(
-  import.meta.env.DEV ? import.meta.env.BASE_URL : "/"
-);
+type AuthExchangeState = "idle" | "exchanging" | "done" | "failed";
 
 class ApiError extends Error {
   status: number;
@@ -433,7 +437,7 @@ async function requestJson<T extends ApiPayload>(
   options: RequestInit,
   fallbackMessage: string
 ): Promise<T> {
-  const response = await fetch(url, {
+  const response = await fetch(apiPath(url), {
     credentials: "same-origin",
     ...options,
     headers: {
@@ -995,39 +999,6 @@ function resolveKnownId(value: string, knownValues: unknown[]): unknown {
   return known ?? value;
 }
 
-function normalizeFrontendRouteBase(base: string): string {
-  const trimmed = base.replace(/\/+$/, "");
-  return trimmed === "" ? "" : trimmed;
-}
-
-function stripFrontendRouteBase(pathname: string): string {
-  if (!frontendRouteBase) {
-    return pathname || "/";
-  }
-  if (pathname === frontendRouteBase) {
-    return "/";
-  }
-  if (pathname.startsWith(`${frontendRouteBase}/`)) {
-    return pathname.slice(frontendRouteBase.length) || "/";
-  }
-  return pathname || "/";
-}
-
-function frontendRoutePath(pathname: string): string {
-  const logicalPath = pathname.startsWith("/") ? pathname : `/${pathname}`;
-  if (!frontendRouteBase) {
-    return logicalPath;
-  }
-  if (logicalPath === "/") {
-    return `${frontendRouteBase}/`;
-  }
-  return `${frontendRouteBase}${logicalPath}`;
-}
-
-function currentLogicalPathname(): string {
-  return stripFrontendRouteBase(window.location.pathname);
-}
-
 function orchestrationTabFromPath(pathname: string): OrchestrationTab {
   if (pathname === orchestrationTabPaths.dynamic || pathname === "/dynamic") {
     return "dynamic";
@@ -1058,6 +1029,16 @@ function loginRedirectPath(): string {
     return frontendRoutePath(logicalNextPath);
   }
   return frontendRoutePath("/");
+}
+
+function readSub2APITokenFromUrl(): string {
+  return new URLSearchParams(window.location.search).get("token")?.trim() || "";
+}
+
+function removeSub2APITokenFromUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("token");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function layoutLaneWithDagre(
@@ -1288,12 +1269,65 @@ function OrchestrationFlowCanvas({
 }
 
 function App() {
+  const [authExchangeState, setAuthExchangeState] = useState<AuthExchangeState>(() =>
+    readSub2APITokenFromUrl() ? "exchanging" : "idle"
+  );
+
   useEffect(() => {
     document.title = APP_TITLE;
   }, []);
 
+  useEffect(() => {
+    const token = readSub2APITokenFromUrl();
+    if (!token) {
+      return;
+    }
+
+    let cancelled = false;
+    setAuthExchangeState("exchanging");
+
+    requestJson("/auth/sub2api-login", {
+      method: "POST",
+      body: JSON.stringify({ token })
+    }, "Sub2API 登录态验证失败")
+      .then(() => {
+        if (cancelled) return;
+        removeSub2APITokenFromUrl();
+        setAuthExchangeState("done");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        removeSub2APITokenFromUrl();
+        setAuthExchangeState("failed");
+        window.location.href = frontendRoutePath("/login");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   if (currentLogicalPathname() === "/login") {
     return <LoginView />;
+  }
+
+  if (authExchangeState === "exchanging") {
+    return (
+      <main className="login-page">
+        <div className="login-shell">
+          <div className="login-brand" aria-label="Sub2API">
+            <div className="login-mark" aria-hidden="true">S</div>
+            <h1>Sub2API sidecar</h1>
+          </div>
+          <div className="login-panel form-stack">
+            <div className="login-heading">
+              <h2>正在接入管理员登录态</h2>
+            </div>
+            <StatusLine status={{ message: "正在验证 Sub2API 管理员身份", tone: "info" }} />
+          </div>
+        </div>
+      </main>
+    );
   }
 
   return (
@@ -1456,7 +1490,7 @@ function OperatorWorkspace() {
   async function logout() {
     setLogoutBusy(true);
     try {
-      await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
+      await fetch(apiPath("/auth/logout"), { method: "POST", credentials: "same-origin" });
     } finally {
       window.location.href = frontendRoutePath("/login");
     }

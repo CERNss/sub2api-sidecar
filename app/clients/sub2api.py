@@ -20,6 +20,10 @@ class Sub2APIError(Exception):
         self.status_code = status_code
 
 
+class Sub2APIAuthError(Sub2APIError):
+    """Raised when a Sub2API browser JWT is missing, invalid, or not admin."""
+
+
 class Sub2APIClient:
     """
     Thin admin API wrapper.
@@ -106,6 +110,42 @@ class Sub2APIClient:
                 "Content-Type": "application/json",
             }
         )
+
+    def validate_admin_jwt(self, token: str) -> dict[str, Any]:
+        token = token.strip()
+        if not token:
+            raise Sub2APIAuthError("Sub2API token is required", status_code=401)
+
+        try:
+            data = self._request(
+                "GET",
+                "/api/v1/auth/me",
+                headers={"Authorization": f"Bearer {token}"},
+                use_admin_session=False,
+                log_label="Sub2API auth API",
+            )
+        except Sub2APIError as exc:
+            if exc.status_code in {401, 403}:
+                raise Sub2APIAuthError("Invalid Sub2API admin token", exc.status_code) from exc
+            raise
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIAuthError("Unable to parse Sub2API user profile", status_code=401)
+
+        role = self._first_text_value(body, "role", "user.role", "profile.role")
+        if role != "admin":
+            raise Sub2APIAuthError("Sub2API admin role is required", status_code=403)
+
+        username = self._first_text_value(
+            body,
+            "username",
+            "email",
+            "display_name",
+            "name",
+            "user.username",
+            "user.email",
+        )
+        return {"username": username or "sub2api-admin", "raw": body}
 
     def create_group(self, name: str) -> dict[str, Any]:
         payload = self._build_group_payload(name)
@@ -1148,20 +1188,36 @@ class Sub2APIClient:
         *,
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        use_admin_session: bool = True,
+        log_label: str = "Sub2API admin API",
     ) -> dict[str, Any]:
         url = urljoin(self.base_url + "/", path.lstrip("/"))
-        logger.info("Calling Sub2API admin API: %s %s", method, url)
+        logger.info("Calling %s: %s %s", log_label, method, url)
+        request_session = self.session if use_admin_session else requests.Session()
+        request_headers = None
+        if not use_admin_session:
+            request_headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        if headers:
+            request_headers = {**(request_headers or {}), **headers}
+        request_kwargs: dict[str, Any] = {
+            "method": method,
+            "url": url,
+            "json": json,
+            "params": params,
+            "timeout": self.timeout_seconds,
+        }
+        if request_headers is not None:
+            request_kwargs["headers"] = request_headers
         try:
-            response = self.session.request(
-                method=method,
-                url=url,
-                json=json,
-                params=params,
-                timeout=self.timeout_seconds,
-            )
+            response = request_session.request(**request_kwargs)
         except requests.RequestException as exc:
             logger.exception(
-                "Failed to reach Sub2API admin API | method=%s | url=%s",
+                "Failed to reach %s | method=%s | url=%s",
+                log_label,
                 method,
                 url,
             )

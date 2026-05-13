@@ -18,6 +18,16 @@ class LoginResponse(BaseModel):
     expires_at: datetime
 
 
+class Sub2APILoginRequest(BaseModel):
+    token: str = Field(..., min_length=1)
+
+
+class AuthStatusResponse(BaseModel):
+    authenticated: bool
+    username: str | None = None
+    expires_at: datetime | None = None
+
+
 class ProvisionStartRequest(BaseModel):
     email: EmailStr
 

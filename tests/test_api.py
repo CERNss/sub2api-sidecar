@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.auth import ACCESS_KEY_COOKIE_NAME
-from app.clients.sub2api import Sub2APIClient
+from app.clients.sub2api import Sub2APIAuthError, Sub2APIClient
 from app.config import Sub2APIProvisioningDefaults, get_settings
 from app.models.flow import AssignmentMode
 from app.models.rotation import RotationPoolGroup, RotationPoolKind, UserGroupAssignment
@@ -379,7 +379,15 @@ def clear_caches() -> None:
     main.get_provisioning_service.cache_clear()
 
 
-def fake_sub2api_request(self, method: str, url: str, json=None, params=None, timeout=None):
+def fake_sub2api_request(
+    self,
+    method: str,
+    url: str,
+    json=None,
+    params=None,
+    headers=None,
+    timeout=None,
+):
     path = urlparse(url).path
     if method == "POST" and path == "/api/v1/admin/groups":
         assert json["platform"] == "openai"
@@ -457,6 +465,74 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
     if method == "POST" and path == "/api/admin/groups/g-1/accounts":
         return FakeResponse(200, {"success": True, "account_id": json["account_id"]})
     return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+
+def test_sub2api_client_validate_admin_jwt_uses_bearer_without_admin_key() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, headers=None, timeout=None):
+        calls.append(
+            {
+                "method": method,
+                "path": urlparse(url).path,
+                "headers": headers,
+                "json": json,
+            }
+        )
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "id": 1,
+                    "email": "admin@example.com",
+                    "username": "admin-user",
+                    "role": "admin",
+                },
+            },
+        )
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.validate_admin_jwt("jwt-token")
+
+    assert result["username"] == "admin-user"
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/v1/auth/me",
+            "headers": {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": "Bearer jwt-token",
+            },
+            "json": None,
+        }
+    ]
+
+
+def test_sub2api_client_validate_admin_jwt_rejects_non_admin() -> None:
+    def fake_request(self, method: str, url: str, json=None, params=None, headers=None, timeout=None):
+        return FakeResponse(
+            200,
+            {"code": 0, "message": "success", "data": {"email": "user@example.com", "role": "user"}},
+        )
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        with pytest.raises(Sub2APIAuthError, match="admin role"):
+            client.validate_admin_jwt("jwt-token")
 
 
 def test_sub2api_client_updates_single_api_key_group_with_admin_endpoint() -> None:
@@ -663,6 +739,61 @@ def test_login_rejects_invalid_password(client) -> None:
     payload = response.json()
     assert payload["success"] is False
     assert payload["detail"] == "Invalid username or password"
+
+
+def test_sub2api_login_sets_sidecar_cookie(client) -> None:
+    def fake_validate_admin_jwt(token: str) -> dict[str, object]:
+        assert token == "sub2api-jwt"
+        return {"username": "admin@example.com", "raw": {"role": "admin"}}
+
+    with patch.object(main.get_sub2api_client(), "validate_admin_jwt", new=fake_validate_admin_jwt):
+        response = client.post("/auth/sub2api-login", json={"token": "sub2api-jwt"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["username"] == "admin@example.com"
+    assert payload["access_key"]
+    assert response.cookies.get(ACCESS_KEY_COOKIE_NAME) == payload["access_key"]
+
+
+def test_sub2api_login_rejects_invalid_or_non_admin_token(client) -> None:
+    def fake_validate_admin_jwt(token: str) -> dict[str, object]:
+        raise Sub2APIAuthError("Sub2API admin role is required", status_code=403)
+
+    with patch.object(main.get_sub2api_client(), "validate_admin_jwt", new=fake_validate_admin_jwt):
+        response = client.post("/auth/sub2api-login", json={"token": "sub2api-jwt"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Sub2API admin role is required"
+    assert response.cookies.get(ACCESS_KEY_COOKIE_NAME) is None
+
+
+def test_prefixed_sidecar_entry_with_token_serves_react_shell(client) -> None:
+    response = client.get("/admin/sidecar?token=sub2api-jwt", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'id="root"' in response.text
+
+
+def test_prefixed_sidecar_routes_use_prefixed_redirects_and_cookie_auth(client) -> None:
+    response = client.get("/admin/sidecar/orchestration/manual", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == (
+        "/admin/sidecar/login?next=/orchestration/manual"
+    )
+
+    login_response = client.post("/admin/sidecar/auth/login", json=AUTH_PAYLOAD)
+    assert login_response.status_code == 200
+
+    authed_response = client.get("/admin/sidecar/orchestration/manual")
+    assert authed_response.status_code == 200
+    assert 'id="root"' in authed_response.text
+
+    status_response = client.get("/admin/sidecar/auth/status")
+    assert status_response.status_code == 200
+    assert status_response.json()["authenticated"] is True
 
 
 def test_provision_start_requires_auth(client) -> None:

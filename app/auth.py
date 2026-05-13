@@ -48,16 +48,24 @@ class EphemeralAdminAuthManager:
             logger.warning("Admin login rejected | username=%s", username)
             return None
 
+        return self._create_session(self.username, "Admin login succeeded")
+
+    def create_external_session(self, username: str) -> AuthSession:
+        self._purge_expired_sessions()
+        return self._create_session(username, "External admin login succeeded")
+
+    def _create_session(self, username: str, log_message: str) -> AuthSession:
         now = datetime.now(timezone.utc)
         session = AuthSession(
             access_key=secrets.token_urlsafe(32),
-            username=self.username,
+            username=username,
             created_at=now,
             expires_at=now + self.access_key_ttl,
         )
         self._sessions[session.access_key] = session
         logger.info(
-            "Admin login succeeded | username=%s | expires_at=%s",
+            "%s | username=%s | expires_at=%s",
+            log_message,
             session.username,
             session.expires_at.isoformat(),
         )
