@@ -191,6 +191,184 @@ class OrchestrationApiKeysEnvelope(BaseModel):
     total: int
 
 
+class CreditControlUserResponse(BaseModel):
+    user_id: Any
+    email: str
+    username: str | None = None
+    name: str | None = None
+    display_name: str | None = None
+    status: str | None = None
+    group_id: Any | None = None
+    group_name: str | None = None
+    group_ids: list[Any] = Field(default_factory=list)
+    balance: float | None = None
+    balance_display: str | None = None
+    balance_unit: str | None = None
+    consumption: float | None = None
+    usage_window: str
+    usage: dict[str, Any] = Field(default_factory=dict)
+    api_key_count: int | None = None
+    last_activity_at: str | None = None
+    updated_at: str | None = None
+
+
+class CreditControlUsersEnvelope(BaseModel):
+    success: bool = True
+    items: list[CreditControlUserResponse]
+    total: int
+    limit: int
+    offset: int
+    aggregates: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreditControlApiKeyResponse(BaseModel):
+    key_id: Any
+    name: str | None = None
+    usage: float | None = None
+    group_id: Any | None = None
+    group_name: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreditControlAuditResponse(BaseModel):
+    audit_id: str | None = None
+    event_id: str | None = None
+    user_id: Any | None = None
+    policy_id: str | None = None
+    run_id: str | None = None
+    actor: str | None = None
+    action: str
+    status: str | None = None
+    amount: float | None = None
+    balance_before: float | None = None
+    balance_after: float | None = None
+    reason: str | None = None
+    summary: str | None = None
+    details: dict[str, Any] | None = None
+    created_at: datetime | None = None
+
+
+class CreditControlUserDetailEnvelope(BaseModel):
+    success: bool = True
+    item: CreditControlUserResponse
+    api_keys: list[CreditControlApiKeyResponse] = Field(default_factory=list)
+    audit_items: list[CreditControlAuditResponse] = Field(default_factory=list)
+
+
+class CreditControlTargetRequest(BaseModel):
+    mode: str = Field(..., min_length=1)
+    user_ids: list[Any] = Field(default_factory=list)
+    window: str = "1d"
+    search: str | None = None
+    status: str | None = None
+    group_id: Any | None = None
+    balance_min: float | None = None
+    balance_max: float | None = None
+    consumption_min: float | None = None
+    consumption_max: float | None = None
+
+
+class CreditControlAdjustmentRequest(BaseModel):
+    preview: bool = False
+    amount: float
+    reason: str = Field(..., min_length=1)
+    target: CreditControlTargetRequest
+
+
+class CreditControlAdjustmentItemResponse(BaseModel):
+    user_id: Any
+    email: str | None = None
+    amount: float
+    operation: str | None = None
+    balance_before: float | None = None
+    balance_after: float | None = None
+    status: str | None = None
+    error: str | None = None
+    skipped_reason: str | None = None
+
+
+class CreditControlAdjustmentEnvelope(BaseModel):
+    success: bool = True
+    run_id: str | None = None
+    status: str | None = None
+    dry_run: bool = False
+    affected_count: int
+    total_amount: float
+    items: list[CreditControlAdjustmentItemResponse]
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreditControlPolicyRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    enabled: bool = True
+    amount: float = Field(..., gt=0)
+    schedule_type: str = "one_time"
+    schedule: str | None = None
+    timezone: str = "Asia/Shanghai"
+    target_scope: str = "all"
+    target_group_id: Any | None = None
+    target_user_ids: list[Any] = Field(default_factory=list)
+    target_balance_below: float | None = None
+    reason_template: str | None = None
+
+
+class CreditControlPolicyResponse(BaseModel):
+    policy_id: str
+    name: str
+    enabled: bool
+    amount: float
+    schedule_type: str
+    schedule: str | None = None
+    timezone: str | None = None
+    target_scope: str
+    target_group_id: Any | None = None
+    target_user_ids: list[Any] = Field(default_factory=list)
+    target_balance_below: float | None = None
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreditControlPoliciesEnvelope(BaseModel):
+    success: bool = True
+    items: list[CreditControlPolicyResponse]
+    total: int
+
+
+class CreditControlPolicyEnvelope(BaseModel):
+    success: bool = True
+    item: CreditControlPolicyResponse
+
+
+class CreditControlRunResponse(BaseModel):
+    run_id: str
+    policy_id: str | None = None
+    policy_name: str | None = None
+    status: str | None = None
+    dry_run: bool = False
+    affected_count: int | None = None
+    total_amount: float | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    scheduled_for: datetime | None = None
+    error_message: str | None = None
+    details: dict[str, Any] | None = None
+
+
+class CreditControlRunsEnvelope(BaseModel):
+    success: bool = True
+    items: list[CreditControlRunResponse]
+    total: int
+
+
+class CreditControlAuditEnvelope(BaseModel):
+    success: bool = True
+    items: list[CreditControlAuditResponse]
+    total: int
+
+
 class OrchestrationAssignRequest(BaseModel):
     user_id: Any
     email: str = Field(..., min_length=1)

@@ -67,6 +67,8 @@ class Sub2APIClient:
         "/admin/openai/accounts",
     )
     USER_API_KEYS_PATHS = ("/api/v1/admin/users/{user_id}/api-keys",)
+    USER_USAGE_PATHS = ("/api/v1/admin/users/{user_id}/usage",)
+    UPDATE_USER_BALANCE_PATHS = ("/api/v1/admin/users/{user_id}/balance",)
     USAGE_STATS_PATHS = ("/api/v1/admin/usage/stats",)
     GENERATE_OPENAI_AUTH_URL_PATHS = (
         "/api/v1/admin/openai/generate-auth-url",
@@ -252,6 +254,46 @@ class Sub2APIClient:
                 items = [item for item in raw_items if isinstance(item, dict)]
             total = int(envelope.get("total", len(items)) or len(items))
         return {"items": items, "total": total, "raw": data}
+
+    def get_user_usage(self, user_id: Any, period: str) -> dict[str, Any]:
+        path_candidates = tuple(path.format(user_id=user_id) for path in self.USER_USAGE_PATHS)
+        data = self._request_candidates("GET", path_candidates, params={"period": period})
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API user usage response is not an object")
+        return body
+
+    def update_user_balance(
+        self,
+        *,
+        user_id: Any,
+        amount: float,
+        operation: str,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "balance": amount,
+            "operation": operation,
+            "notes": notes or "",
+        }
+        path_candidates = tuple(
+            path.format(user_id=user_id) for path in self.UPDATE_USER_BALANCE_PATHS
+        )
+        data = self._request_candidates("POST", path_candidates, json=payload)
+        body = self._unwrap_data(data)
+        user_body = body if isinstance(body, dict) else data
+        return {
+            "user_id": user_id,
+            "operation": operation,
+            "amount": amount,
+            "balance": self._optional_float_value(
+                user_body,
+                "balance",
+                "user.balance",
+                "data.balance",
+            ),
+            "raw": data,
+        }
 
     def list_openai_accounts(self) -> list[dict[str, Any]]:
         last_error: Sub2APIError | None = None
@@ -675,12 +717,58 @@ class Sub2APIClient:
                     "name": item.get("name") or username or email,
                     "display_name": display_name,
                     "status": item.get("status"),
+                    "balance": self._optional_float_value(
+                        item,
+                        "balance",
+                        "credit",
+                        "credits",
+                        "quota",
+                        "wallet.balance",
+                    ),
+                    "balance_display": self._first_text_value(
+                        item,
+                        "balance_display",
+                        "display_balance",
+                        "credit_display",
+                        "wallet.balance_display",
+                    ),
+                    "balance_unit": self._first_text_value(
+                        item,
+                        "balance_unit",
+                        "credit_unit",
+                        "currency",
+                        "wallet.currency",
+                    ),
                     "current_group_id": current_group_id,
                     "current_group_name": current_group_name,
+                    "group_ids": self._extract_user_group_ids(item, current_group_id),
                     "raw": item,
                 }
             )
         return users
+
+    def _extract_user_group_ids(
+        self, item: dict[str, Any], current_group_id: Any | None
+    ) -> list[Any]:
+        group_ids: list[Any] = []
+
+        def add(value: Any) -> None:
+            if value in (None, ""):
+                return
+            if not any(str(existing) == str(value) for existing in group_ids):
+                group_ids.append(value)
+
+        add(current_group_id)
+        for field_name in ("group_ids", "allowed_groups", "groups"):
+            raw_groups = item.get(field_name)
+            if not isinstance(raw_groups, list):
+                continue
+            for raw_group in raw_groups:
+                if isinstance(raw_group, dict):
+                    add(raw_group.get("id") or raw_group.get("group_id"))
+                else:
+                    add(raw_group)
+        return group_ids
 
     def _parse_account_list(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         body = self._unwrap_data(payload)

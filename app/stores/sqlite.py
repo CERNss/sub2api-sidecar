@@ -9,6 +9,12 @@ from typing import Any
 from pydantic import BaseModel
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
+from app.models.credit import (
+    CreditAuditOperation,
+    CreditAuditRecord,
+    CreditRechargePolicy,
+    CreditRechargeRunRecord,
+)
 from app.models.notification import (
     NotificationDeliveryRecord,
     NotificationRuleState,
@@ -568,6 +574,204 @@ class SQLiteFlowStore(FlowStore):
             connection.commit()
         return state
 
+    def save_credit_policy(self, policy: CreditRechargePolicy) -> CreditRechargePolicy:
+        payload = policy.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO credit_recharge_policies (
+                    policy_id, enabled, next_run_at, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(policy_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    next_run_at = excluded.next_run_at,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    policy.policy_id,
+                    1 if policy.enabled else 0,
+                    policy.next_run_at.isoformat() if policy.next_run_at else None,
+                    payload,
+                    policy.created_at.isoformat(),
+                    policy.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return policy
+
+    def get_credit_policy(self, policy_id: str) -> CreditRechargePolicy | None:
+        return self._load_single_model(
+            "SELECT payload FROM credit_recharge_policies WHERE policy_id = ?",
+            (policy_id,),
+            CreditRechargePolicy,
+        )
+
+    def list_credit_policies(self) -> list[CreditRechargePolicy]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM credit_recharge_policies
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (),
+            CreditRechargePolicy,
+        )
+
+    def delete_credit_policy(self, policy_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM credit_recharge_policies WHERE policy_id = ?",
+                (policy_id,),
+            )
+            connection.commit()
+
+    def list_due_credit_policies(self, now: datetime) -> list[CreditRechargePolicy]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM credit_recharge_policies
+            WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+            ORDER BY next_run_at ASC, policy_id ASC
+            """,
+            (now.isoformat(),),
+            CreditRechargePolicy,
+        )
+
+    def save_credit_run(self, record: CreditRechargeRunRecord) -> CreditRechargeRunRecord:
+        payload = record.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO credit_recharge_runs (
+                    run_id, policy_id, occurrence_key, operation_type, status,
+                    dry_run, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    policy_id = excluded.policy_id,
+                    occurrence_key = excluded.occurrence_key,
+                    operation_type = excluded.operation_type,
+                    status = excluded.status,
+                    dry_run = excluded.dry_run,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    record.run_id,
+                    record.policy_id,
+                    record.occurrence_key,
+                    record.operation_type.value,
+                    record.status.value,
+                    1 if record.dry_run else 0,
+                    payload,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return record
+
+    def get_credit_run_by_occurrence(
+        self, policy_id: str, occurrence_key: str
+    ) -> CreditRechargeRunRecord | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM credit_recharge_runs
+            WHERE policy_id = ? AND occurrence_key = ? AND dry_run = 0
+            """,
+            (policy_id, occurrence_key),
+            CreditRechargeRunRecord,
+        )
+
+    def list_credit_runs(
+        self,
+        *,
+        policy_id: str | None = None,
+        limit: int = 50,
+    ) -> list[CreditRechargeRunRecord]:
+        params: tuple[Any, ...]
+        where = ""
+        if policy_id:
+            where = "WHERE policy_id = ?"
+            params = (policy_id, limit)
+        else:
+            params = (limit,)
+        return self._load_many_models(
+            f"""
+            SELECT payload FROM credit_recharge_runs
+            {where}
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT ?
+            """,
+            params,
+            CreditRechargeRunRecord,
+        )
+
+    def save_credit_audit(self, record: CreditAuditRecord) -> CreditAuditRecord:
+        payload = record.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO credit_audit_records (
+                    audit_id, operation_type, status, user_id_key, policy_id,
+                    run_id, payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.audit_id,
+                    record.operation_type.value,
+                    record.status,
+                    self._serialize_key(record.user_id) if record.user_id is not None else None,
+                    record.policy_id,
+                    record.run_id,
+                    payload,
+                    record.created_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return record
+
+    def list_credit_audit_records(
+        self,
+        *,
+        user_id: Any | None = None,
+        policy_id: str | None = None,
+        run_id: str | None = None,
+        operation_type: CreditAuditOperation | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[CreditAuditRecord]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if user_id is not None:
+            user_id_keys = self._serialize_lookup_keys(user_id)
+            clauses.append(
+                "user_id_key IN (" + ",".join("?" for _ in user_id_keys) + ")"
+            )
+            params.extend(user_id_keys)
+        if policy_id:
+            clauses.append("policy_id = ?")
+            params.append(policy_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if operation_type is not None:
+            clauses.append("operation_type = ?")
+            params.append(operation_type.value)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        return self._load_many_models(
+            f"""
+            SELECT payload FROM credit_audit_records
+            {where}
+            ORDER BY created_at DESC, audit_id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+            CreditAuditRecord,
+        )
+
     def _prepare_database_path(self) -> None:
         if self.database_path == ":memory:" or self._use_uri:
             return
@@ -765,6 +969,72 @@ class SQLiteFlowStore(FlowStore):
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS credit_recharge_policies (
+                    policy_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL,
+                    next_run_at TEXT,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_credit_recharge_policies_due
+                ON credit_recharge_policies(enabled, next_run_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS credit_recharge_runs (
+                    run_id TEXT PRIMARY KEY,
+                    policy_id TEXT,
+                    occurrence_key TEXT,
+                    operation_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    dry_run INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_recharge_runs_occurrence
+                ON credit_recharge_runs(policy_id, occurrence_key)
+                WHERE policy_id IS NOT NULL AND occurrence_key IS NOT NULL AND dry_run = 0
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_credit_recharge_runs_list
+                ON credit_recharge_runs(created_at DESC, policy_id, status)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS credit_audit_records (
+                    audit_id TEXT PRIMARY KEY,
+                    operation_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    user_id_key TEXT,
+                    policy_id TEXT,
+                    run_id TEXT,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_credit_audit_records_list
+                ON credit_audit_records(created_at DESC, operation_type, status)
+                """
+            )
             connection.commit()
 
     def _ensure_column(
@@ -894,6 +1164,17 @@ class SQLiteFlowStore(FlowStore):
 
     def _serialize_key(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+    def _serialize_lookup_keys(self, value: Any) -> tuple[str, ...]:
+        keys = [self._serialize_key(value)]
+        if isinstance(value, str):
+            try:
+                numeric_value = int(value)
+            except ValueError:
+                numeric_value = None
+            if numeric_value is not None:
+                keys.append(self._serialize_key(numeric_value))
+        return tuple(dict.fromkeys(keys))
 
     def _serialize_rotation_pool_group_id_key(self, value: Any) -> str:
         return self._serialize_key(str(value))

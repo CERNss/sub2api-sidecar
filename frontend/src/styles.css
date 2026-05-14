@@ -557,6 +557,249 @@ pre {
   align-items: stretch;
 }
 
+/* --- Credit control --- */
+
+.credit-workspace {
+  min-width: 0;
+}
+
+.credit-shell {
+  min-width: 0;
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.credit-header,
+.credit-box-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.credit-header h2 {
+  margin: 0;
+}
+
+.credit-status {
+  margin: 0;
+}
+
+.credit-users-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);
+  gap: 14px;
+  align-items: start;
+}
+
+.credit-main-pane,
+.credit-side-pane,
+.credit-policy-list,
+.credit-policy-editor,
+.credit-adjustment-box {
+  min-width: 0;
+}
+
+.credit-filter-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) minmax(120px, 0.7fr) repeat(6, minmax(98px, 0.68fr)) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.credit-aggregate-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.credit-aggregate-card {
+  min-height: 70px;
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+  padding: 11px 13px;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  background: #ffffff;
+}
+
+.credit-aggregate-card span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.credit-aggregate-card strong {
+  color: #0f172a;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.credit-aggregate-balance {
+  border-left: 4px solid #0f766e;
+}
+
+.credit-aggregate-consumption {
+  border-left: 4px solid #2563eb;
+}
+
+.credit-aggregate-average {
+  border-left: 4px solid #7c3aed;
+}
+
+.credit-aggregate-danger {
+  border-left: 4px solid #dc2626;
+}
+
+.credit-table {
+  overflow: hidden;
+}
+
+.credit-table .ant-table {
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+}
+
+.credit-user-link {
+  max-width: 280px;
+  border: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.credit-user-link strong,
+.credit-user-link span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credit-user-link strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.credit-user-link span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.credit-danger-text {
+  color: #b91c1c;
+  font-weight: 700;
+}
+
+.credit-side-pane {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.credit-adjustment-box,
+.credit-policy-list,
+.credit-policy-editor {
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  background: #f8fafc;
+}
+
+.credit-box-title {
+  justify-content: flex-start;
+  color: #0f172a;
+}
+
+.credit-full-input {
+  width: 100%;
+}
+
+.credit-preview-box {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  background: #ffffff;
+}
+
+.credit-preview-box > div {
+  min-height: 54px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px;
+  display: grid;
+  gap: 2px;
+}
+
+.credit-preview-box strong {
+  color: #0f172a;
+  font-size: 18px;
+}
+
+.credit-preview-box span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.credit-preview-box pre {
+  grid-column: 1 / -1;
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  border-radius: 6px;
+  padding: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.credit-policy-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(420px, 1.1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.credit-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+.credit-switch-row {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.credit-policy-preview {
+  margin-top: 2px;
+}
+
+.credit-detail-stack {
+  display: grid;
+  gap: 14px;
+}
+
 .notif-webhook-area {
   grid-area: webhooks;
   display: grid;
@@ -3220,10 +3463,25 @@ pre {
   .workspace,
   .orchestration-grid,
   .notification-workspace,
+  .credit-users-layout,
+  .credit-policy-layout,
   .rule-layout,
   .dynamic-grid,
   .dashboard-grid {
     grid-template-columns: 1fr;
+  }
+
+  .credit-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .credit-aggregate-grid,
+  .credit-editor-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .credit-side-pane {
+    position: static;
   }
 
   .orchestration-top-form {
@@ -3305,6 +3563,9 @@ pre {
 
   .segmented,
   .filter-grid,
+  .credit-filter-grid,
+  .credit-aggregate-grid,
+  .credit-editor-grid,
   .form-grid-2,
   .webhook-list,
   .notification-event-grid,

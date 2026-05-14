@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -18,6 +21,19 @@ from app.clients.sub2api import Sub2APIAuthError, Sub2APIClient, Sub2APIError
 from app.config import Settings, get_settings
 from app.errors import FlowNotFoundError, ProvisioningError
 from app.logging_config import setup_logging
+from app.models.credit import (
+    CreditAdjustmentOutcome,
+    CreditAuditOperation,
+    CreditAuditRecord,
+    CreditBalanceOperation,
+    CreditRechargePolicy,
+    CreditRechargeRunRecord,
+    CreditRechargeSchedule,
+    CreditScheduleKind,
+    CreditTargetScope,
+    CreditTargetScopeKind,
+    CreditUsageWindow,
+)
 from app.models.flow import AssignmentMode, FlowStatus
 from app.models.notification import NotificationSettings
 from app.models.rotation import AutoRotationUsageWindow, RotationPoolGroup, RotationPoolKind
@@ -29,6 +45,21 @@ from app.models.schemas import (
     AutoRotationRunResponse,
     AutoRotationRunsEnvelope,
     AuthSessionResponse,
+    CreditControlAdjustmentEnvelope,
+    CreditControlAdjustmentItemResponse,
+    CreditControlAdjustmentRequest,
+    CreditControlAuditEnvelope,
+    CreditControlAuditResponse,
+    CreditControlApiKeyResponse,
+    CreditControlPoliciesEnvelope,
+    CreditControlPolicyEnvelope,
+    CreditControlPolicyRequest,
+    CreditControlPolicyResponse,
+    CreditControlRunResponse,
+    CreditControlRunsEnvelope,
+    CreditControlUserDetailEnvelope,
+    CreditControlUserResponse,
+    CreditControlUsersEnvelope,
     ErrorResponse,
     LoginRequest,
     LoginResponse,
@@ -62,6 +93,8 @@ from app.models.schemas import (
     Sub2APILoginRequest,
 )
 from app.services.dashboard import flow_detail_response, flow_summary_response
+from app.services.credit_control import CreditControlError, CreditControlService
+from app.services.credit_scheduler import CreditControlScheduler
 from app.services.notification import (
     NotificationConfigError,
     NotificationService,
@@ -94,6 +127,7 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     rotation_scheduler: AutoRotationScheduler | None = None
     notification_scheduler: NotificationScheduler | None = None
+    credit_scheduler: CreditControlScheduler | None = None
     if settings.auto_rotation.enabled and settings.auto_rotation.interval_seconds > 0:
         rotation_scheduler = AutoRotationScheduler(
             rotation_service=get_rotation_service(),
@@ -107,6 +141,12 @@ async def lifespan(_: FastAPI):
             tick_seconds=notification_tick,
         )
         notification_scheduler.start()
+    if settings.credit_control.recharge_tick_seconds > 0:
+        credit_scheduler = CreditControlScheduler(
+            credit_service=get_credit_control_service(),
+            tick_seconds=settings.credit_control.recharge_tick_seconds,
+        )
+        credit_scheduler.start()
     try:
         yield
     finally:
@@ -114,6 +154,8 @@ async def lifespan(_: FastAPI):
             rotation_scheduler.stop()
         if notification_scheduler is not None:
             notification_scheduler.stop()
+        if credit_scheduler is not None:
+            credit_scheduler.stop()
 
 
 app = FastAPI(
@@ -184,6 +226,14 @@ def get_notification_service() -> NotificationService:
     )
 
 
+@lru_cache(maxsize=1)
+def get_credit_control_service() -> CreditControlService:
+    return CreditControlService(
+        store=get_flow_store(),
+        sub2api_client=get_sub2api_client(),
+    )
+
+
 @app.exception_handler(RequestValidationError)
 def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
@@ -221,6 +271,16 @@ def handle_provisioning_error(_: Request, exc: ProvisioningError) -> JSONRespons
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(detail=str(exc)).model_dump(),
+    )
+
+
+@app.exception_handler(CreditControlError)
+def handle_credit_control_error(_: Request, exc: CreditControlError) -> JSONResponse:
+    detail = str(exc) or "Credit-control request failed"
+    status_code = 404 if "not found" in detail.lower() else 422
+    return JSONResponse(
+        status_code=status_code,
+        content=ErrorResponse(detail=detail).model_dump(),
     )
 
 
@@ -331,6 +391,11 @@ def safe_operator_next_path(value: str | None) -> str:
         "/dashboard",
         "/provision",
         "/notifications",
+        "/credit-control",
+        "/credit-control/users",
+        "/credit-control/policies",
+        "/credit-control/runs",
+        "/credit-control/audit",
     }:
         return logical_value
     return "/"
@@ -443,6 +508,11 @@ def index(request: Request) -> Response:
 @app.get("/dashboard", response_class=HTMLResponse)
 @app.get("/provision", response_class=HTMLResponse)
 @app.get("/notifications", response_class=HTMLResponse)
+@app.get("/credit-control", response_class=HTMLResponse)
+@app.get("/credit-control/users", response_class=HTMLResponse)
+@app.get("/credit-control/policies", response_class=HTMLResponse)
+@app.get("/credit-control/runs", response_class=HTMLResponse)
+@app.get("/credit-control/audit", response_class=HTMLResponse)
 def operator_view(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
@@ -540,6 +610,346 @@ def group_response(candidate: dict[str, object]) -> OrchestrationGroupResponse:
     )
 
 
+def credit_usage_window(value: str | None) -> CreditUsageWindow:
+    try:
+        return CreditUsageWindow(value or CreditUsageWindow.window_1d.value)
+    except ValueError as exc:
+        raise CreditControlError("unsupported credit usage window") from exc
+
+
+def credit_user_response(item: Any) -> CreditControlUserResponse:
+    return CreditControlUserResponse(
+        user_id=item.user_id,
+        email=item.email,
+        username=item.username,
+        name=item.name,
+        display_name=item.display_name,
+        status=item.status,
+        group_id=item.current_group_id,
+        group_name=item.current_group_name,
+        group_ids=list(item.group_ids or []),
+        balance=item.balance,
+        balance_display=item.balance_display,
+        balance_unit=item.balance_unit,
+        consumption=item.consumption,
+        usage_window=item.usage_window.value,
+        usage=item.usage,
+    )
+
+
+def credit_api_key_response(item: dict[str, Any], window: CreditUsageWindow) -> CreditControlApiKeyResponse:
+    usage = (
+        item.get(f"usage_{window.value}")
+        or item.get("usage")
+        or item.get("cost")
+        or item.get("total_cost")
+    )
+    if isinstance(usage, str):
+        try:
+            usage = float(usage.strip().rstrip("%"))
+        except ValueError:
+            usage = None
+    raw_group = item.get("group")
+    group_id = item.get("group_id")
+    group_name = item.get("group_name")
+    if isinstance(raw_group, dict):
+        group_id = group_id or raw_group.get("id") or raw_group.get("group_id")
+        group_name = group_name or raw_group.get("name") or raw_group.get("group_name")
+    return CreditControlApiKeyResponse(
+        key_id=item.get("id") or item.get("key_id"),
+        name=item.get("name"),
+        usage=float(usage) if isinstance(usage, (int, float)) and not isinstance(usage, bool) else None,
+        group_id=group_id,
+        group_name=group_name,
+        raw=redact_credit_payload(item),
+    )
+
+
+def credit_adjustment_response(record: CreditRechargeRunRecord) -> CreditControlAdjustmentEnvelope:
+    items = [credit_adjustment_item_response(item) for item in record.outcomes]
+    return CreditControlAdjustmentEnvelope(
+        run_id=record.run_id,
+        status=record.status.value,
+        dry_run=record.dry_run,
+        affected_count=record.target_count,
+        total_amount=record.amount * record.target_count,
+        items=items,
+        details=redact_credit_payload(record.model_dump(mode="json")),
+    )
+
+
+def credit_adjustment_item_response(
+    item: CreditAdjustmentOutcome,
+) -> CreditControlAdjustmentItemResponse:
+    return CreditControlAdjustmentItemResponse(
+        user_id=item.user_id,
+        email=item.email,
+        amount=item.amount,
+        operation=item.operation.value if item.operation else None,
+        balance_before=item.balance_before,
+        balance_after=item.balance_after,
+        status=item.status.value,
+        error=item.error_message,
+        skipped_reason=item.skipped_reason,
+    )
+
+
+def credit_policy_response(policy: CreditRechargePolicy) -> CreditControlPolicyResponse:
+    target_scope = "all"
+    target_group_id: Any | None = None
+    target_user_ids: list[Any] = []
+    target_balance_below: float | None = None
+    if policy.target_scope.kind == CreditTargetScopeKind.explicit_user_ids:
+        target_scope = "users"
+        target_user_ids = list(policy.target_scope.user_ids)
+    elif policy.target_scope.kind == CreditTargetScopeKind.group_ids:
+        target_scope = "group"
+        target_group_id = policy.target_scope.group_ids[0] if policy.target_scope.group_ids else None
+    elif policy.target_scope.kind == CreditTargetScopeKind.balance_threshold:
+        target_scope = "balance_threshold"
+        target_balance_below = policy.target_scope.balance_below
+
+    return CreditControlPolicyResponse(
+        policy_id=policy.policy_id,
+        name=policy.name,
+        enabled=policy.enabled,
+        amount=policy.amount,
+        schedule_type="one_time" if policy.schedule.kind == CreditScheduleKind.once else "recurring",
+        schedule=policy_schedule_display(policy),
+        timezone=policy.schedule.timezone,
+        target_scope=target_scope,
+        target_group_id=target_group_id,
+        target_user_ids=target_user_ids,
+        target_balance_below=target_balance_below,
+        next_run_at=policy.next_run_at,
+        last_run_at=policy.last_run_at,
+        created_at=policy.created_at,
+        updated_at=policy.updated_at,
+        raw=redact_credit_payload(policy.model_dump(mode="json")),
+    )
+
+
+def policy_schedule_display(policy: CreditRechargePolicy) -> str:
+    start = policy.schedule.start_at.astimezone(ZoneInfo(policy.schedule.timezone))
+    if policy.schedule.kind == CreditScheduleKind.once:
+        return start.isoformat()
+    return f"{policy.schedule.kind.value} {start.strftime('%H:%M')}"
+
+
+def credit_run_response(record: CreditRechargeRunRecord) -> CreditControlRunResponse:
+    first_error = next(
+        (outcome.error_message for outcome in record.outcomes if outcome.error_message),
+        None,
+    )
+    return CreditControlRunResponse(
+        run_id=record.run_id,
+        policy_id=record.policy_id,
+        policy_name=record.policy_name,
+        status=record.status.value,
+        dry_run=record.dry_run,
+        affected_count=record.target_count,
+        total_amount=record.amount * record.target_count,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+        scheduled_for=record.scheduled_for,
+        error_message=first_error,
+        details=redact_credit_payload(record.model_dump(mode="json")),
+    )
+
+
+def credit_audit_response(record: CreditAuditRecord) -> CreditControlAuditResponse:
+    details = redact_credit_payload(record.details)
+    return CreditControlAuditResponse(
+        audit_id=record.audit_id,
+        event_id=record.audit_id,
+        user_id=record.user_id,
+        policy_id=record.policy_id,
+        run_id=record.run_id,
+        actor=record.actor,
+        action=record.operation_type.value,
+        status=record.status,
+        amount=optional_float(details.get("amount")),
+        balance_before=optional_float(details.get("balance_before")),
+        balance_after=optional_float(details.get("balance_after")),
+        reason=str(details.get("reason")) if details.get("reason") not in (None, "") else None,
+        summary=record.summary,
+        details=details,
+        created_at=record.created_at,
+    )
+
+
+def credit_policy_from_request(
+    payload: CreditControlPolicyRequest,
+    *,
+    policy_id: str | None = None,
+    existing: CreditRechargePolicy | None = None,
+) -> CreditRechargePolicy:
+    timezone_name = payload.timezone.strip() or "Asia/Shanghai"
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise CreditControlError(f"unknown timezone: {timezone_name}") from exc
+    schedule = credit_schedule_from_request(payload, zone)
+    return CreditRechargePolicy(
+        policy_id=policy_id or (existing.policy_id if existing else None) or str(uuid.uuid4()),
+        name=payload.name.strip(),
+        enabled=payload.enabled,
+        amount=payload.amount,
+        target_scope=credit_target_scope_from_policy_request(payload),
+        schedule=schedule,
+        reason_template=(payload.reason_template or f"automatic recharge: {payload.name}").strip(),
+        next_run_at=existing.next_run_at if existing else None,
+        last_run_at=existing.last_run_at if existing else None,
+        created_at=existing.created_at if existing else datetime.now(timezone.utc),
+    )
+
+
+def credit_schedule_from_request(
+    payload: CreditControlPolicyRequest,
+    zone: ZoneInfo,
+) -> CreditRechargeSchedule:
+    start_at = parse_credit_schedule_start(payload.schedule, zone)
+    if payload.schedule_type == "one_time":
+        kind = CreditScheduleKind.once
+    elif payload.schedule_type == "recurring":
+        kind = parse_recurring_schedule_kind(payload.schedule)
+    else:
+        raise CreditControlError("schedule_type must be one_time or recurring")
+    return CreditRechargeSchedule(kind=kind, start_at=start_at, timezone=str(zone))
+
+
+def parse_credit_schedule_start(value: str | None, zone: ZoneInfo) -> datetime:
+    if not value or not value.strip():
+        return datetime.now(zone) + timedelta(minutes=5)
+    text = value.strip()
+    if text.startswith("@"):
+        text = text[1:].strip()
+    cron_parts = text.split()
+    if len(cron_parts) == 5 and cron_parts[0].isdigit() and cron_parts[1].isdigit():
+        minute = int(cron_parts[0])
+        hour = int(cron_parts[1])
+        now = datetime.now(zone)
+        candidate = datetime.combine(now.date(), time(hour=hour, minute=minute), tzinfo=zone)
+        if candidate < now:
+            candidate += timedelta(days=1)
+        return candidate
+    if " " in text and "T" not in text and ":" in text:
+        parts = text.split()
+        time_part = next((part for part in parts if ":" in part), None)
+        if time_part:
+            text = time_part
+    try:
+        if ":" in text and "T" not in text and "-" not in text:
+            hour_text, minute_text, *_ = text.split(":")
+            now = datetime.now(zone)
+            candidate = datetime.combine(
+                now.date(),
+                time(hour=int(hour_text), minute=int(minute_text)),
+                tzinfo=zone,
+            )
+            if candidate < now:
+                candidate += timedelta(days=1)
+            return candidate
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CreditControlError("schedule must be an ISO timestamp or HH:MM time") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=zone)
+    return parsed
+
+
+def parse_recurring_schedule_kind(value: str | None) -> CreditScheduleKind:
+    text = (value or "").strip().lower()
+    if text.startswith("monthly"):
+        return CreditScheduleKind.monthly
+    if text.startswith("weekly") or text.endswith(" * * 1") or " * * 1" in text:
+        return CreditScheduleKind.weekly
+    return CreditScheduleKind.daily
+
+
+def credit_target_scope_from_policy_request(
+    payload: CreditControlPolicyRequest,
+) -> CreditTargetScope:
+    if payload.target_scope == "all":
+        return CreditTargetScope(kind=CreditTargetScopeKind.all_users)
+    if payload.target_scope == "users":
+        return CreditTargetScope(
+            kind=CreditTargetScopeKind.explicit_user_ids,
+            user_ids=tuple(payload.target_user_ids),
+        )
+    if payload.target_scope == "group":
+        return CreditTargetScope(
+            kind=CreditTargetScopeKind.group_ids,
+            group_ids=(payload.target_group_id,) if payload.target_group_id not in (None, "") else (),
+        )
+    if payload.target_scope == "balance_threshold":
+        return CreditTargetScope(
+            kind=CreditTargetScopeKind.balance_threshold,
+            balance_below=payload.target_balance_below,
+        )
+    raise CreditControlError("target_scope must be all, users, group, or balance_threshold")
+
+
+def credit_target_scope_from_adjustment(
+    payload: CreditControlAdjustmentRequest,
+) -> CreditTargetScope:
+    if payload.target.mode == "users":
+        user_ids = [str(user_id) for user_id in payload.target.user_ids]
+        if len(user_ids) != len(set(user_ids)):
+            raise CreditControlError("duplicate user ids are not allowed")
+        return CreditTargetScope(
+            kind=CreditTargetScopeKind.explicit_user_ids,
+            user_ids=tuple(payload.target.user_ids),
+        )
+    if payload.target.mode == "filter":
+        return CreditTargetScope(kind=CreditTargetScopeKind.all_users)
+    raise CreditControlError("target mode must be users or filter")
+
+
+def credit_adjustment_operation(amount: float) -> tuple[CreditBalanceOperation, float]:
+    if amount == 0:
+        raise CreditControlError("amount must not be zero")
+    operation = CreditBalanceOperation.add if amount > 0 else CreditBalanceOperation.subtract
+    return operation, abs(amount)
+
+
+def redact_credit_payload(value: Any) -> Any:
+    sensitive_keys = {
+        "api_key",
+        "access_key",
+        "authorization",
+        "bearer",
+        "password",
+        "secret",
+        "token",
+        "access_token",
+        "refresh_token",
+    }
+    if isinstance(value, dict):
+        return {
+            key: "***REDACTED***"
+            if any(marker in str(key).lower() for marker in sensitive_keys)
+            else redact_credit_payload(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_credit_payload(item) for item in value]
+    return value
+
+
+def optional_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
 @app.get("/orchestration/users")
 def orchestration_users(
     email: str | None = None,
@@ -571,6 +981,259 @@ def orchestration_users(
             )
         )
     payload = OrchestrationUsersEnvelope(items=items, total=len(items))
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/api/credit-control/users")
+def credit_control_users(
+    window: str = "1d",
+    search: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
+    group_id: str | None = None,
+    balance_min: float | None = None,
+    balance_max: float | None = None,
+    consumption_min: float | None = None,
+    consumption_max: float | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    service = get_credit_control_service()
+    items, total, aggregates = service.list_users(
+        usage_window=credit_usage_window(window),
+        search=search,
+        status=status_filter,
+        group_id=group_id,
+        balance_min=balance_min,
+        balance_max=balance_max,
+        consumption_min=consumption_min,
+        consumption_max=consumption_max,
+        limit=limit,
+        offset=offset,
+    )
+    payload = CreditControlUsersEnvelope(
+        items=[credit_user_response(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+        aggregates=aggregates,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/api/credit-control/users/{user_id}")
+def credit_control_user_detail(
+    user_id: str,
+    window: str = "1d",
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    usage_window = credit_usage_window(window)
+    item, audits = get_credit_control_service().get_user_detail(
+        user_id,
+        usage_window=usage_window,
+    )
+    api_keys_payload = get_sub2api_client().get_user_api_keys(user_id)
+    api_keys = [
+        credit_api_key_response(api_key, usage_window)
+        for api_key in api_keys_payload.get("items", [])
+        if isinstance(api_key, dict)
+    ]
+    response_item = credit_user_response(item)
+    payload = CreditControlUserDetailEnvelope(
+        item=response_item,
+        api_keys=api_keys,
+        audit_items=[credit_audit_response(record) for record in audits],
+    )
+    item_payload = payload.model_dump(mode="json")
+    item_payload["item"]["api_keys"] = item_payload.pop("api_keys")
+    return JSONResponse(status_code=200, content=item_payload)
+
+
+@app.post("/api/credit-control/adjustments/preview")
+def credit_control_adjustment_preview(
+    payload: CreditControlAdjustmentRequest,
+    session: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    response = run_credit_adjustment(payload, session=session, preview=True)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.post("/api/credit-control/adjustments")
+def credit_control_adjustment_execute(
+    payload: CreditControlAdjustmentRequest,
+    session: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    response = run_credit_adjustment(payload, session=session, preview=False)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+def run_credit_adjustment(
+    payload: CreditControlAdjustmentRequest,
+    *,
+    session: AuthSession,
+    preview: bool,
+) -> CreditControlAdjustmentEnvelope:
+    service = get_credit_control_service()
+    operation, amount = credit_adjustment_operation(payload.amount)
+    target_scope = credit_target_scope_from_adjustment(payload)
+    if payload.target.mode == "filter":
+        users = service.preview_filter_target(
+            usage_window=credit_usage_window(payload.target.window),
+            search=payload.target.search,
+            status=payload.target.status,
+            group_id=payload.target.group_id,
+            balance_min=payload.target.balance_min,
+            balance_max=payload.target.balance_max,
+            consumption_min=payload.target.consumption_min,
+            consumption_max=payload.target.consumption_max,
+        )
+        record = (
+            service.preview_adjustment_for_users(
+                users=users,
+                target_scope=target_scope,
+                amount=amount,
+                operation=operation,
+                reason=payload.reason,
+                actor=session.username,
+            )
+            if preview
+            else service.execute_adjustment_for_users(
+                users=users,
+                target_scope=target_scope,
+                amount=amount,
+                operation=operation,
+                reason=payload.reason,
+                actor=session.username,
+            )
+        )
+    else:
+        record = (
+            service.preview_adjustment(
+                target_scope=target_scope,
+                amount=amount,
+                operation=operation,
+                reason=payload.reason,
+                actor=session.username,
+            )
+            if preview
+            else service.execute_adjustment(
+                target_scope=target_scope,
+                amount=amount,
+                operation=operation,
+                reason=payload.reason,
+                actor=session.username,
+            )
+        )
+    return credit_adjustment_response(record)
+
+
+@app.get("/api/credit-control/policies")
+def credit_control_policies(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
+    items = get_credit_control_service().list_policies()
+    payload = CreditControlPoliciesEnvelope(
+        items=[credit_policy_response(policy) for policy in items],
+        total=len(items),
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.post("/api/credit-control/policies")
+def credit_control_policy_create(
+    payload: CreditControlPolicyRequest,
+    session: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    policy = credit_policy_from_request(payload)
+    saved = get_credit_control_service().save_policy(policy, actor=session.username)
+    response = CreditControlPolicyEnvelope(item=credit_policy_response(saved))
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.put("/api/credit-control/policies/{policy_id}")
+def credit_control_policy_update(
+    policy_id: str,
+    payload: CreditControlPolicyRequest,
+    session: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    service = get_credit_control_service()
+    existing = service.get_policy(policy_id)
+    policy = credit_policy_from_request(payload, policy_id=policy_id, existing=existing)
+    saved = service.save_policy(policy, actor=session.username, previous=existing)
+    response = CreditControlPolicyEnvelope(item=credit_policy_response(saved))
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.delete("/api/credit-control/policies/{policy_id}")
+def credit_control_policy_delete(
+    policy_id: str,
+    session: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    get_credit_control_service().delete_policy(policy_id, actor=session.username)
+    return JSONResponse(status_code=200, content={"success": True})
+
+
+@app.post("/api/credit-control/policies/preview")
+def credit_control_policy_preview(
+    payload: CreditControlPolicyRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    policy = credit_policy_from_request(payload)
+    record = get_credit_control_service().preview_policy(policy)
+    response = credit_adjustment_response(record)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.post("/api/credit-control/policies/{policy_id}/run")
+def credit_control_policy_run(
+    policy_id: str,
+    session: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    record = get_credit_control_service().run_policy_now(policy_id, actor=session.username)
+    response = credit_adjustment_response(record)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/api/credit-control/runs")
+def credit_control_runs(
+    policy_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    records = get_credit_control_service().list_runs(policy_id=policy_id, limit=limit)
+    payload = CreditControlRunsEnvelope(
+        items=[credit_run_response(record) for record in records],
+        total=len(records),
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/api/credit-control/audit")
+def credit_control_audit(
+    user_id: str | None = None,
+    policy_id: str | None = None,
+    run_id: str | None = None,
+    operation_type: str | None = None,
+    audit_status: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    parsed_operation = None
+    if operation_type:
+        try:
+            parsed_operation = CreditAuditOperation(operation_type)
+        except ValueError as exc:
+            raise CreditControlError("unsupported audit operation_type") from exc
+    records = get_credit_control_service().list_audit_records(
+        user_id=user_id,
+        policy_id=policy_id,
+        run_id=run_id,
+        operation_type=parsed_operation,
+        status=audit_status,
+        limit=limit,
+    )
+    payload = CreditControlAuditEnvelope(
+        items=[credit_audit_response(record) for record in records],
+        total=len(records),
+    )
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 

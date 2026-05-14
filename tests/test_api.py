@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
@@ -68,6 +68,9 @@ class FakeRotationSub2API:
                 "status": "active",
                 "group_id": 11,
                 "group_name": "rotation-low",
+                "balance": 12.5,
+                "balance_display": "12.5 credits",
+                "balance_unit": "credits",
             },
             {
                 "id": 202,
@@ -76,6 +79,9 @@ class FakeRotationSub2API:
                 "status": "active",
                 "group_id": 22,
                 "group_name": "rotation-high",
+                "balance": 3.0,
+                "balance_display": "3.0 credits",
+                "balance_unit": "credits",
             },
         ]
         self.groups = [
@@ -191,6 +197,7 @@ class FakeRotationSub2API:
         self.replace_calls: list[dict[str, object]] = []
         self.set_user_group_calls: list[dict[str, object]] = []
         self.api_key_group_calls: list[dict[str, object]] = []
+        self.balance_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
 
     def request(self, method: str, url: str, json=None, params=None, timeout=None):
@@ -199,6 +206,36 @@ class FakeRotationSub2API:
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.groups})
         if method == "GET" and path in {"/api/v1/admin/users/all", "/api/v1/admin/users"}:
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
+        if method == "GET" and path.startswith("/api/v1/admin/users/") and path.endswith("/usage"):
+            user_id = int(path.split("/")[5])
+            period = (params or {}).get("period", "1d")
+            cost = {101: {"5h": 1.5, "1d": 2.5, "7d": 6.0, "30d": 20.0}, 202: {"5h": 0.2, "1d": 0.5, "7d": 1.2, "30d": 4.0}}.get(user_id, {})
+            return FakeResponse(
+                200,
+                {"code": 0, "message": "success", "data": {"total_cost": cost.get(period, 0)}},
+            )
+        if method == "POST" and path.startswith("/api/v1/admin/users/") and path.endswith("/balance"):
+            user_id = int(path.split("/")[5])
+            self.balance_calls.append(
+                {
+                    "user_id": user_id,
+                    "balance": json["balance"],
+                    "operation": json["operation"],
+                    "notes": json["notes"],
+                }
+            )
+            if user_id == 202 and json["operation"] == "subtract":
+                return FakeResponse(422, {"message": "insufficient balance"})
+            for user in self.users:
+                if user["id"] == user_id:
+                    current = float(user.get("balance") or 0)
+                    delta = float(json["balance"])
+                    user["balance"] = current + delta if json["operation"] == "add" else current - delta
+                    return FakeResponse(
+                        200,
+                        {"code": 0, "message": "success", "data": {"balance": user["balance"]}},
+                    )
+            return FakeResponse(404, {"message": "user not found"})
         if method == "GET" and path == "/api/v1/admin/accounts":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.accounts})
         if method == "POST" and path in {"/admin/groups", "/api/v1/admin/groups", "/api/admin/groups"}:
@@ -377,6 +414,8 @@ def clear_caches() -> None:
     main.get_sub2api_client.cache_clear()
     main.get_rotation_service.cache_clear()
     main.get_provisioning_service.cache_clear()
+    main.get_notification_service.cache_clear()
+    main.get_credit_control_service.cache_clear()
 
 
 def fake_sub2api_request(self, method: str, url: str, json=None, params=None, timeout=None):
@@ -626,7 +665,7 @@ def test_login_page_serves_react_shell(client) -> None:
     assert 'id="root"' in response.text
 
 
-@pytest.mark.parametrize("path", ["/orchestration/manual", "/provision", "/notifications"])
+@pytest.mark.parametrize("path", ["/orchestration/manual", "/provision", "/notifications", "/credit-control"])
 def test_operator_pages_redirect_to_login_when_unauthenticated(client, path: str) -> None:
     response = client.get(path, follow_redirects=False)
 
@@ -1173,6 +1212,205 @@ def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
     assert accounts["acct-camel"]["group_names"] == ["subscription-dedicated", ""]
     assert keys_response.status_code == 200
     assert keys_response.json()["items"][0]["key_id"] == "key-101"
+
+
+def test_credit_control_lists_filters_and_details_users(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.get(
+            "/api/credit-control/users?window=7d&search=rotate&balance_min=10&limit=10"
+        )
+        detail_response = client.get("/api/credit-control/users/101?window=5h")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["total"] == 1
+    assert payload["items"][0]["user_id"] == 101
+    assert payload["items"][0]["balance"] == 12.5
+    assert payload["items"][0]["balance_display"] == "12.5 credits"
+    assert payload["items"][0]["balance_unit"] == "credits"
+    assert payload["items"][0]["consumption"] == 6.0
+    assert payload["aggregates"]["total_balance"] == 12.5
+    assert payload["aggregates"]["total_consumption"] == 6.0
+    assert detail_response.status_code == 200
+    detail_payload = detail_response.json()
+    assert detail_payload["item"]["user_id"] == 101
+    assert detail_payload["item"]["api_keys"][0]["key_id"] == "key-101"
+    assert detail_payload["item"]["api_keys"][0]["usage"] == 1.0
+
+
+def test_credit_control_manual_adjustment_preview_execute_and_audit(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    payload = {
+        "amount": 5,
+        "reason": "top up selected users",
+        "target": {"mode": "users", "user_ids": [101]},
+    }
+    with patch.object(requests.Session, "request", new=backend.request):
+        preview = client.post("/api/credit-control/adjustments/preview", json=payload)
+        execute = client.post("/api/credit-control/adjustments", json=payload)
+        audit = client.get("/api/credit-control/audit?user_id=101")
+
+    assert preview.status_code == 200
+    assert preview.json()["dry_run"] is True
+    assert preview.json()["items"][0]["balance_after"] == 17.5
+    assert backend.balance_calls == [
+        {"user_id": 101, "balance": 5.0, "operation": "add", "notes": "top up selected users"}
+    ]
+    assert execute.status_code == 200
+    execute_payload = execute.json()
+    assert execute_payload["status"] == "succeeded"
+    assert execute_payload["items"][0]["operation"] == "add"
+    assert execute_payload["items"][0]["balance_after"] == 17.5
+    assert audit.status_code == 200
+    audit_payload = audit.json()
+    assert audit_payload["total"] == 1
+    assert audit_payload["items"][0]["action"] == "manual_adjustment"
+    assert audit_payload["items"][0]["reason"] == "top up selected users"
+
+
+def test_credit_control_manual_adjustment_partial_failure_records_audit(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    payload = {
+        "amount": -5,
+        "reason": "deduct cohort",
+        "target": {"mode": "users", "user_ids": [101, 202]},
+    }
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/api/credit-control/adjustments", json=payload)
+        audit = client.get("/api/credit-control/audit?run_id=" + response.json()["run_id"])
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "partial_failed"
+    statuses = {item["user_id"]: item["status"] for item in payload["items"]}
+    assert statuses == {101: "succeeded", 202: "failed"}
+    assert backend.balance_calls == [
+        {"user_id": 101, "balance": 5.0, "operation": "subtract", "notes": "deduct cohort"},
+        {"user_id": 202, "balance": 5.0, "operation": "subtract", "notes": "deduct cohort"},
+    ]
+    assert audit.status_code == 200
+    assert audit.json()["total"] == 3
+
+
+def test_credit_control_rejects_invalid_adjustment_without_upstream_call(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        zero = client.post(
+            "/api/credit-control/adjustments",
+            json={"amount": 0, "reason": "noop", "target": {"mode": "users", "user_ids": [101]}},
+        )
+        duplicate = client.post(
+            "/api/credit-control/adjustments",
+            json={
+                "amount": 1,
+                "reason": "duplicate ids",
+                "target": {"mode": "users", "user_ids": [101, 101]},
+            },
+        )
+
+    assert zero.status_code == 422
+    assert duplicate.status_code == 422
+    assert backend.balance_calls == []
+
+
+def test_credit_control_policy_crud_preview_schedule_and_dedup(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    start_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    policy_payload = {
+        "name": "low balance recharge",
+        "enabled": True,
+        "amount": 2,
+        "schedule_type": "one_time",
+        "schedule": start_at,
+        "timezone": "Asia/Shanghai",
+        "target_scope": "balance_threshold",
+        "target_balance_below": 5,
+        "reason_template": "auto top up low balance",
+    }
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        create = client.post("/api/credit-control/policies", json=policy_payload)
+        preview = client.post("/api/credit-control/policies/preview", json=policy_payload)
+        policies = client.get("/api/credit-control/policies")
+
+    assert create.status_code == 200
+    policy_id = create.json()["item"]["policy_id"]
+    assert create.json()["item"]["target_scope"] == "balance_threshold"
+    assert create.json()["item"]["target_balance_below"] == 5.0
+    assert preview.status_code == 200
+    assert preview.json()["dry_run"] is True
+    assert preview.json()["affected_count"] == 1
+    assert preview.json()["items"][0]["user_id"] == 202
+    assert policies.status_code == 200
+    assert policies.json()["total"] == 1
+
+    stored = main.get_flow_store().get_credit_policy(policy_id)
+    assert stored is not None
+    due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    stored.schedule.start_at = due_at
+    stored.next_run_at = due_at
+    stored.enabled = True
+    main.get_flow_store().save_credit_policy(stored)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        runs = main.get_credit_control_service().tick()
+        duplicate_runs = main.get_credit_control_service().tick()
+        runs_response = client.get("/api/credit-control/runs")
+        audit_response = client.get(f"/api/credit-control/audit?policy_id={policy_id}")
+
+    assert len(runs) == 1
+    assert duplicate_runs == []
+    assert backend.balance_calls == [
+        {"user_id": 202, "balance": 2.0, "operation": "add", "notes": "auto top up low balance"}
+    ]
+    assert runs_response.status_code == 200
+    assert runs_response.json()["total"] == 1
+    assert runs_response.json()["items"][0]["policy_id"] == policy_id
+    assert audit_response.status_code == 200
+    assert audit_response.json()["total"] >= 2
+
+    delete = client.delete(f"/api/credit-control/policies/{policy_id}")
+    assert delete.status_code == 200
+    assert main.get_flow_store().get_credit_policy(policy_id) is None
+
+
+def test_credit_control_recurring_policy_round_trips_dashboard_schedule(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    policy_payload = {
+        "name": "weekly group recharge",
+        "enabled": True,
+        "amount": 1,
+        "schedule_type": "recurring",
+        "schedule": "weekly 09:30",
+        "timezone": "Asia/Shanghai",
+        "target_scope": "group",
+        "target_group_id": 11,
+    }
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        create = client.post("/api/credit-control/policies", json=policy_payload)
+        policy = create.json()["item"]
+        update = client.put(f"/api/credit-control/policies/{policy['policy_id']}", json=policy)
+
+    assert create.status_code == 200
+    assert policy["schedule_type"] == "recurring"
+    assert policy["schedule"] == "weekly 09:30"
+    assert policy["target_scope"] == "group"
+    assert policy["target_group_id"] == 11
+    assert update.status_code == 200
+    assert update.json()["item"]["schedule"] == "weekly 09:30"
 
 
 def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups(client) -> None:

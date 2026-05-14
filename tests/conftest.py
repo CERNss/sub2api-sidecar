@@ -22,6 +22,7 @@ def clear_app_caches() -> None:
     main.get_rotation_service.cache_clear()
     main.get_provisioning_service.cache_clear()
     main.get_notification_service.cache_clear()
+    main.get_credit_control_service.cache_clear()
 
 
 @pytest.fixture
@@ -44,6 +45,7 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("AUTO_ROTATION_COOLDOWN_MINUTES", "0")
     monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
     monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
+    monkeypatch.setenv("CREDIT_CONTROL_RECHARGE_TICK_SECONDS", "0")
     monkeypatch.setenv("SUB2API_GROUP_PLATFORM", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PROVIDER", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PLATFORM", "openai")

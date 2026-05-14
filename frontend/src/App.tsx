@@ -8,14 +8,19 @@ import {
   LogIn,
   LoaderCircle,
   LogOut,
+  FileText,
+  History,
   Play,
   Plus,
+  Settings,
   RefreshCw,
   Save,
   Search,
   Send,
+  Trash2,
   TimerReset,
-  UserRound
+  UserRound,
+  Wallet
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -32,10 +37,14 @@ import {
   Input,
   List,
   Modal,
+  Drawer,
+  InputNumber,
   Segmented as AntSegmented,
   Select,
   Space,
   Spin,
+  Switch,
+  Table,
   Tag,
   Tooltip,
   Typography
@@ -86,8 +95,9 @@ type ProvisionStartPayload = ApiPayload & {
 
 type FlowStatusFilter = "" | "pending_oauth" | "completed" | "failed";
 type AssignmentModeFilter = "" | "dedicated" | "managed_pool";
-type OperatorView = "orchestration" | "provision" | "notification";
+type OperatorView = "orchestration" | "provision" | "notification" | "creditControl";
 type OrchestrationTab = "manual" | "dynamic";
+type CreditControlTab = "users" | "policies" | "runs" | "audit";
 
 type ProvisionFlowSummary = {
   flow_id: string;
@@ -387,6 +397,172 @@ type AutoRotationConfigPayload = ApiPayload & {
   rotation_pool?: RotationPoolCandidate[];
 };
 
+type CreditControlUser = {
+  user_id: unknown;
+  email: string;
+  username?: string | null;
+  name?: string | null;
+  status?: string | null;
+  group_id?: unknown | null;
+  group_name?: string | null;
+  group_ids?: unknown[];
+  balance: number | null;
+  balance_display?: string | null;
+  balance_unit?: string | null;
+  consumption: number | null;
+  api_key_count?: number | null;
+  last_activity_at?: string | null;
+  updated_at?: string | null;
+};
+
+type CreditControlAggregates = {
+  total_balance?: number | null;
+  total_consumption?: number | null;
+  average_balance?: number | null;
+  negative_balance_count?: number | null;
+  active_user_count?: number | null;
+  user_count?: number | null;
+};
+
+type CreditControlUsersPayload = ApiPayload & {
+  items: CreditControlUser[];
+  total: number;
+  limit: number;
+  offset: number;
+  aggregates?: CreditControlAggregates;
+};
+
+type CreditControlAuditItem = {
+  audit_id?: string | null;
+  event_id?: string | null;
+  user_id?: unknown;
+  policy_id?: unknown;
+  actor?: string | null;
+  action: string;
+  status?: string | null;
+  amount?: number | null;
+  balance_before?: number | null;
+  balance_after?: number | null;
+  reason?: string | null;
+  details?: Record<string, unknown> | null;
+  created_at?: string | null;
+};
+
+type CreditControlUserDetailPayload = ApiPayload & {
+  item: CreditControlUser & {
+    api_keys?: Array<{
+      key_id: unknown;
+      name?: string | null;
+      usage?: number | null;
+      group_id?: unknown | null;
+      group_name?: string | null;
+    }>;
+  };
+  audit_items: CreditControlAuditItem[];
+};
+
+type CreditControlAdjustmentPreview = ApiPayload & {
+  success?: boolean;
+  items?: Array<{
+    user_id: unknown;
+    email?: string | null;
+    amount: number;
+    balance_before?: number | null;
+    balance_after?: number | null;
+    status?: string | null;
+    error?: string | null;
+  }>;
+  total_amount?: number | null;
+  affected_count?: number | null;
+};
+
+type CreditControlPolicy = {
+  policy_id: string;
+  name: string;
+  enabled: boolean;
+  amount: number;
+  schedule_type: "one_time" | "recurring";
+  schedule?: string | null;
+  timezone?: string | null;
+  target_scope: "all" | "group" | "users" | "balance_threshold";
+  target_group_id?: unknown | null;
+  target_user_ids?: unknown[];
+  target_balance_below?: number | null;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+type CreditControlPoliciesPayload = ApiPayload & {
+  items: CreditControlPolicy[];
+  total?: number;
+};
+
+type CreditControlPolicyPreview = ApiPayload & {
+  success?: boolean;
+  affected_count?: number | null;
+  total_amount?: number | null;
+  items?: Array<{
+    user_id: unknown;
+    email?: string | null;
+    amount?: number | null;
+    balance_before?: number | null;
+    balance_after?: number | null;
+    status?: string | null;
+  }>;
+};
+
+type CreditControlRun = {
+  run_id: string;
+  policy_id?: string | null;
+  policy_name?: string | null;
+  status?: string | null;
+  affected_count?: number | null;
+  total_amount?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_message?: string | null;
+  details?: Record<string, unknown> | null;
+};
+
+type CreditControlRunsPayload = ApiPayload & {
+  items: CreditControlRun[];
+  total?: number;
+};
+
+type CreditControlAuditPayload = ApiPayload & {
+  items: CreditControlAuditItem[];
+  total?: number;
+};
+
+type CreditUserFilters = {
+  window: "5h" | "1d" | "7d" | "30d";
+  search: string;
+  status: string;
+  groupId: string;
+  balanceMin: string;
+  balanceMax: string;
+  consumptionMin: string;
+  consumptionMax: string;
+};
+
+type AdjustmentTargetMode = "selected" | "filtered";
+
+type CreditPolicyDraft = {
+  policy_id?: string;
+  name: string;
+  enabled: boolean;
+  amount: number;
+  schedule_type: "one_time" | "recurring";
+  schedule: string;
+  timezone: string;
+  target_scope: "all" | "group" | "users" | "balance_threshold";
+  target_group_id: string;
+  target_user_ids: string;
+  target_balance_below: string;
+};
+
 const emptyStatus: StatusState = { message: "", tone: "idle" };
 const APP_TITLE = "Sub2API OpenAI OAuth 编排服务";
 const DEFAULT_AUTH_USERNAME = "admin";
@@ -410,7 +586,8 @@ const usageWindowOptions = [
 const operatorViewPaths: Record<OperatorView, string> = {
   orchestration: "/orchestration/manual",
   provision: "/provision",
-  notification: "/notifications"
+  notification: "/notifications",
+  creditControl: "/credit-control"
 };
 const orchestrationTabPaths: Record<OrchestrationTab, string> = {
   manual: "/orchestration/manual",
@@ -498,6 +675,98 @@ function unknownToText(value: unknown): string {
     return String(value);
   }
   return JSON.stringify(value);
+}
+
+function formatMoney(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "-";
+  }
+  return new Intl.NumberFormat("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4
+  }).format(value);
+}
+
+function parseOptionalNumber(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function compactParams(entries: Record<string, string | number | undefined>): string {
+  const params = new URLSearchParams();
+  Object.entries(entries).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") {
+      params.set(key, String(value));
+    }
+  });
+  return params.toString();
+}
+
+function creditUserName(user: CreditControlUser): string {
+  return user.name?.trim() || user.username?.trim() || user.email?.split("@", 1)[0] || unknownToText(user.user_id);
+}
+
+function statusTagColor(status: string | null | undefined): string {
+  const normalized = (status ?? "").toLowerCase();
+  if (["active", "ok", "enabled", "completed", "success", "succeeded"].includes(normalized)) return "green";
+  if (["pending", "running", "processing"].includes(normalized)) return "blue";
+  if (["disabled", "inactive", "failed", "error"].includes(normalized)) return "red";
+  return "default";
+}
+
+function defaultPolicyDraft(): CreditPolicyDraft {
+  return {
+    name: "",
+    enabled: true,
+    amount: 10,
+    schedule_type: "one_time",
+    schedule: "",
+    timezone: "Asia/Shanghai",
+    target_scope: "all",
+    target_group_id: "",
+    target_user_ids: "",
+    target_balance_below: ""
+  };
+}
+
+function policyToDraft(policy: CreditControlPolicy): CreditPolicyDraft {
+  return {
+    policy_id: policy.policy_id,
+    name: policy.name,
+    enabled: policy.enabled,
+    amount: policy.amount,
+    schedule_type: policy.schedule_type,
+    schedule: policy.schedule ?? "",
+    timezone: policy.timezone ?? "Asia/Shanghai",
+    target_scope: policy.target_scope,
+    target_group_id: idValue(policy.target_group_id),
+    target_user_ids: (policy.target_user_ids ?? []).map(idValue).filter(Boolean).join(","),
+    target_balance_below:
+      policy.target_balance_below === null || policy.target_balance_below === undefined
+        ? ""
+        : String(policy.target_balance_below)
+  };
+}
+
+function draftToPolicyPayload(draft: CreditPolicyDraft): ApiPayload {
+  return {
+    name: draft.name.trim(),
+    enabled: draft.enabled,
+    amount: draft.amount,
+    schedule_type: draft.schedule_type,
+    schedule: draft.schedule.trim() || null,
+    timezone: draft.timezone.trim() || "Asia/Shanghai",
+    target_scope: draft.target_scope,
+    target_group_id: draft.target_scope === "group" ? draft.target_group_id.trim() : null,
+    target_user_ids:
+      draft.target_scope === "users"
+        ? draft.target_user_ids.split(",").map((item) => item.trim()).filter(Boolean)
+        : [],
+    target_balance_below:
+      draft.target_scope === "balance_threshold" ? parseOptionalNumber(draft.target_balance_below) ?? null : null
+  };
 }
 
 function runKindLabel(run: AutoRotationRunPayload): string {
@@ -1032,6 +1301,9 @@ function orchestrationTabFromPath(pathname: string): OrchestrationTab {
 }
 
 function viewFromPath(pathname: string): OperatorView {
+  if (pathname === operatorViewPaths.creditControl || pathname.startsWith("/credit-control/")) {
+    return "creditControl";
+  }
   if (pathname === operatorViewPaths.provision) {
     return "provision";
   }
@@ -1041,13 +1313,28 @@ function viewFromPath(pathname: string): OperatorView {
   return "orchestration";
 }
 
+function creditControlTabFromPath(pathname: string): CreditControlTab {
+  if (pathname === "/credit-control/policies") return "policies";
+  if (pathname === "/credit-control/runs") return "runs";
+  if (pathname === "/credit-control/audit") return "audit";
+  return "users";
+}
+
+function creditControlPath(tab: CreditControlTab): string {
+  return tab === "users" ? "/credit-control" : `/credit-control/${tab}`;
+}
+
 function loginRedirectPath(): string {
   const nextPath = new URLSearchParams(window.location.search).get("next");
   const allowedPaths = new Set([
     ...Object.values(operatorViewPaths),
     ...Object.values(orchestrationTabPaths),
     "/orchestration",
-    "/dynamic"
+    "/dynamic",
+    "/credit-control/users",
+    "/credit-control/policies",
+    "/credit-control/runs",
+    "/credit-control/audit"
   ]);
   const logicalNextPath = nextPath ? stripFrontendRouteBase(nextPath) : "";
   if (allowedPaths.has(logicalNextPath)) {
@@ -1541,6 +1828,9 @@ function OperatorWorkspace() {
   const [activeOrchestrationTab, setActiveOrchestrationTab] = useState<OrchestrationTab>(() =>
     orchestrationTabFromPath(currentLogicalPathname())
   );
+  const [activeCreditTab, setActiveCreditTab] = useState<CreditControlTab>(() =>
+    creditControlTabFromPath(currentLogicalPathname())
+  );
   const [logoutBusy, setLogoutBusy] = useState(false);
 
   useEffect(() => {
@@ -1548,6 +1838,7 @@ function OperatorWorkspace() {
       const logicalPath = currentLogicalPathname();
       setActiveView(viewFromPath(logicalPath));
       setActiveOrchestrationTab(orchestrationTabFromPath(logicalPath));
+      setActiveCreditTab(creditControlTabFromPath(logicalPath));
     }
 
     window.addEventListener("popstate", syncViewFromPath);
@@ -1556,7 +1847,12 @@ function OperatorWorkspace() {
 
   function navigateView(view: OperatorView) {
     setActiveView(view);
-    const nextPath = view === "orchestration" ? orchestrationTabPaths[activeOrchestrationTab] : operatorViewPaths[view];
+    const nextPath =
+      view === "orchestration"
+        ? orchestrationTabPaths[activeOrchestrationTab]
+        : view === "creditControl"
+        ? creditControlPath(activeCreditTab)
+        : operatorViewPaths[view];
     if (currentLogicalPathname() !== nextPath) {
       window.history.pushState({}, "", frontendRoutePath(nextPath));
     }
@@ -1566,6 +1862,15 @@ function OperatorWorkspace() {
     setActiveView("orchestration");
     setActiveOrchestrationTab(tab);
     const nextPath = orchestrationTabPaths[tab];
+    if (currentLogicalPathname() !== nextPath) {
+      window.history.pushState({}, "", frontendRoutePath(nextPath));
+    }
+  }
+
+  function navigateCreditTab(tab: CreditControlTab) {
+    setActiveView("creditControl");
+    setActiveCreditTab(tab);
+    const nextPath = creditControlPath(tab);
     if (currentLogicalPathname() !== nextPath) {
       window.history.pushState({}, "", frontendRoutePath(nextPath));
     }
@@ -1624,6 +1929,14 @@ function OperatorWorkspace() {
               <ClipboardCheck size={17} aria-hidden="true" />
               告警中心
             </button>
+            <button
+              className={activeView === "creditControl" ? "active" : ""}
+              type="button"
+              onClick={() => navigateView("creditControl")}
+            >
+              <Wallet size={17} aria-hidden="true" />
+              余额管理
+            </button>
           </div>
           <button className="button secondary compact" type="button" onClick={logout} disabled={logoutBusy}>
             {logoutBusy ? (
@@ -1638,6 +1951,12 @@ function OperatorWorkspace() {
 
       {activeView === "notification" ? (
         <NotificationPanel onAuthExpired={handleAuthExpired} />
+      ) : activeView === "creditControl" ? (
+        <CreditControlView
+          activeTab={activeCreditTab}
+          onTabChange={navigateCreditTab}
+          onAuthExpired={handleAuthExpired}
+        />
       ) : activeView === "provision" ? (
         <ProvisionForm
           onAuthExpired={handleAuthExpired}
@@ -2861,6 +3180,855 @@ function ExistingOrchestrationView({
         refreshSignal={recordsRefreshSignal}
         onStatus={setStatus}
       />
+    </div>
+  );
+}
+
+function CreditControlView({
+  activeTab,
+  onTabChange,
+  onAuthExpired
+}: {
+  activeTab: CreditControlTab;
+  onTabChange: (tab: CreditControlTab) => void;
+  onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+}) {
+  const [filters, setFilters] = useState<CreditUserFilters>({
+    window: "1d",
+    search: "",
+    status: "",
+    groupId: "",
+    balanceMin: "",
+    balanceMax: "",
+    consumptionMin: "",
+    consumptionMax: ""
+  });
+  const [users, setUsers] = useState<CreditControlUser[]>([]);
+  const [aggregates, setAggregates] = useState<CreditControlAggregates>({});
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState({ limit: 25, offset: 0 });
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<CreditControlUserDetailPayload | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [status, setStatus] = useState<StatusState>(emptyStatus);
+
+  const [adjustmentMode, setAdjustmentMode] = useState<AdjustmentTargetMode>("selected");
+  const [adjustmentAmount, setAdjustmentAmount] = useState<number | null>(10);
+  const [adjustmentReason, setAdjustmentReason] = useState("");
+  const [adjustmentPreview, setAdjustmentPreview] = useState<CreditControlAdjustmentPreview | null>(null);
+  const [adjustmentBusy, setAdjustmentBusy] = useState<"preview" | "run" | null>(null);
+
+  const [policies, setPolicies] = useState<CreditControlPolicy[]>([]);
+  const [policyDraft, setPolicyDraft] = useState<CreditPolicyDraft>(() => defaultPolicyDraft());
+  const [policyPreview, setPolicyPreview] = useState<CreditControlPolicyPreview | null>(null);
+  const [loadingPolicies, setLoadingPolicies] = useState(false);
+  const [policyBusy, setPolicyBusy] = useState<"save" | "preview" | "delete" | null>(null);
+
+  const [runs, setRuns] = useState<CreditControlRun[]>([]);
+  const [auditItems, setAuditItems] = useState<CreditControlAuditItem[]>([]);
+  const [loadingRuns, setLoadingRuns] = useState(false);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+  const [selectedPayload, setSelectedPayload] = useState<ApiPayload | null>(null);
+
+  const selectedUserSet = useMemo(() => new Set(selectedUserIds), [selectedUserIds]);
+
+  function userListQuery(nextPage = page) {
+    return compactParams({
+      window: filters.window,
+      search: filters.search.trim(),
+      status: filters.status,
+      group_id: filters.groupId.trim(),
+      balance_min: parseOptionalNumber(filters.balanceMin),
+      balance_max: parseOptionalNumber(filters.balanceMax),
+      consumption_min: parseOptionalNumber(filters.consumptionMin),
+      consumption_max: parseOptionalNumber(filters.consumptionMax),
+      limit: nextPage.limit,
+      offset: nextPage.offset
+    });
+  }
+
+  function adjustmentPayload(preview: boolean): ApiPayload {
+    return {
+      preview,
+      amount: adjustmentAmount ?? 0,
+      reason: adjustmentReason.trim(),
+      target:
+        adjustmentMode === "selected"
+          ? { mode: "users", user_ids: selectedUserIds }
+          : {
+              mode: "filter",
+              window: filters.window,
+              search: filters.search.trim(),
+              status: filters.status,
+              group_id: filters.groupId.trim(),
+              balance_min: parseOptionalNumber(filters.balanceMin),
+              balance_max: parseOptionalNumber(filters.balanceMax),
+              consumption_min: parseOptionalNumber(filters.consumptionMin),
+              consumption_max: parseOptionalNumber(filters.consumptionMax)
+            }
+    };
+  }
+
+  async function loadUsers(nextPage = page) {
+    setLoadingUsers(true);
+    try {
+      const payload = await requestJson<CreditControlUsersPayload>(
+        `/api/credit-control/users?${userListQuery(nextPage)}`,
+        { method: "GET" },
+        "加载余额用户失败"
+      );
+      setUsers(payload.items);
+      setTotal(payload.total);
+      setAggregates(payload.aggregates ?? {});
+      setPage({ limit: payload.limit, offset: payload.offset });
+      setSelectedUserIds((current) => {
+        const visibleIds = new Set(payload.items.map((user) => idValue(user.user_id)));
+        return current.filter((id) => visibleIds.has(id));
+      });
+      setStatus({ message: `已加载 ${payload.items.length}/${payload.total} 个用户`, tone: "success" });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setUsers([]);
+        setTotal(0);
+        setAggregates({});
+        setStatus({ message: getErrorMessage(error, "加载余额用户失败"), tone: "error" });
+      }
+    } finally {
+      setLoadingUsers(false);
+    }
+  }
+
+  async function loadUserDetail(userId: string) {
+    setSelectedUserId(userId);
+    setDetailOpen(true);
+    setLoadingDetail(true);
+    try {
+      const payload = await requestJson<CreditControlUserDetailPayload>(
+        `/api/credit-control/users/${encodeURIComponent(userId)}?window=${encodeURIComponent(filters.window)}`,
+        { method: "GET" },
+        "加载用户余额详情失败"
+      );
+      setDetail(payload);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setDetail(null);
+        setStatus({ message: getErrorMessage(error, "加载用户余额详情失败"), tone: "error" });
+      }
+    } finally {
+      setLoadingDetail(false);
+    }
+  }
+
+  async function runAdjustment(preview: boolean) {
+    if (!adjustmentAmount || adjustmentAmount === 0) {
+      setStatus({ message: "请输入非 0 调整金额。", tone: "error" });
+      return;
+    }
+    if (adjustmentMode === "selected" && selectedUserIds.length === 0) {
+      setStatus({ message: "请先选择需要调整的用户。", tone: "error" });
+      return;
+    }
+    setAdjustmentBusy(preview ? "preview" : "run");
+    setStatus({ message: preview ? "正在生成调整预览" : "正在提交余额调整", tone: "info" });
+    try {
+      const payload = await requestJson<CreditControlAdjustmentPreview>(
+        preview ? "/api/credit-control/adjustments/preview" : "/api/credit-control/adjustments",
+        { method: "POST", body: JSON.stringify(adjustmentPayload(preview)) },
+        preview ? "余额调整预览失败" : "余额调整失败"
+      );
+      setAdjustmentPreview(payload);
+      setStatus({
+        message: preview
+          ? `预览完成：影响 ${payload.affected_count ?? payload.items?.length ?? 0} 个用户`
+          : `调整完成：影响 ${payload.affected_count ?? payload.items?.length ?? 0} 个用户`,
+        tone: "success"
+      });
+      if (!preview) {
+        await loadUsers();
+        if (selectedUserId) void loadUserDetail(selectedUserId);
+      }
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, preview ? "余额调整预览失败" : "余额调整失败"), tone: "error" });
+      }
+    } finally {
+      setAdjustmentBusy(null);
+    }
+  }
+
+  async function loadPolicies() {
+    setLoadingPolicies(true);
+    try {
+      const payload = await requestJson<CreditControlPoliciesPayload>(
+        "/api/credit-control/policies",
+        { method: "GET" },
+        "加载自动充值策略失败"
+      );
+      setPolicies(payload.items);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setPolicies([]);
+        setStatus({ message: getErrorMessage(error, "加载自动充值策略失败"), tone: "error" });
+      }
+    } finally {
+      setLoadingPolicies(false);
+    }
+  }
+
+  async function savePolicy() {
+    if (!policyDraft.name.trim()) {
+      setStatus({ message: "请输入策略名称。", tone: "error" });
+      return;
+    }
+    if (!policyDraft.amount || policyDraft.amount <= 0) {
+      setStatus({ message: "自动充值金额必须大于 0。", tone: "error" });
+      return;
+    }
+    setPolicyBusy("save");
+    try {
+      const isUpdate = Boolean(policyDraft.policy_id);
+      await requestJson<ApiPayload>(
+        isUpdate
+          ? `/api/credit-control/policies/${encodeURIComponent(policyDraft.policy_id ?? "")}`
+          : "/api/credit-control/policies",
+        {
+          method: isUpdate ? "PUT" : "POST",
+          body: JSON.stringify(draftToPolicyPayload(policyDraft))
+        },
+        "保存自动充值策略失败"
+      );
+      setPolicyDraft(defaultPolicyDraft());
+      setPolicyPreview(null);
+      await loadPolicies();
+      setStatus({ message: "自动充值策略已保存", tone: "success" });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "保存自动充值策略失败"), tone: "error" });
+      }
+    } finally {
+      setPolicyBusy(null);
+    }
+  }
+
+  async function previewPolicy() {
+    setPolicyBusy("preview");
+    try {
+      const payload = await requestJson<CreditControlPolicyPreview>(
+        "/api/credit-control/policies/preview",
+        { method: "POST", body: JSON.stringify(draftToPolicyPayload(policyDraft)) },
+        "策略预览失败"
+      );
+      setPolicyPreview(payload);
+      setStatus({ message: `策略预览完成：影响 ${payload.affected_count ?? payload.items?.length ?? 0} 个用户`, tone: "success" });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "策略预览失败"), tone: "error" });
+      }
+    } finally {
+      setPolicyBusy(null);
+    }
+  }
+
+  async function deletePolicy(policyId: string) {
+    setPolicyBusy("delete");
+    try {
+      await requestJson<ApiPayload>(
+        `/api/credit-control/policies/${encodeURIComponent(policyId)}`,
+        { method: "DELETE" },
+        "删除自动充值策略失败"
+      );
+      if (policyDraft.policy_id === policyId) setPolicyDraft(defaultPolicyDraft());
+      await loadPolicies();
+      setStatus({ message: "自动充值策略已删除", tone: "success" });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "删除自动充值策略失败"), tone: "error" });
+      }
+    } finally {
+      setPolicyBusy(null);
+    }
+  }
+
+  async function loadRuns() {
+    setLoadingRuns(true);
+    try {
+      const payload = await requestJson<CreditControlRunsPayload>(
+        "/api/credit-control/runs?limit=50",
+        { method: "GET" },
+        "加载自动充值运行记录失败"
+      );
+      setRuns(payload.items);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setRuns([]);
+        setStatus({ message: getErrorMessage(error, "加载自动充值运行记录失败"), tone: "error" });
+      }
+    } finally {
+      setLoadingRuns(false);
+    }
+  }
+
+  async function loadAudit() {
+    setLoadingAudit(true);
+    try {
+      const payload = await requestJson<CreditControlAuditPayload>(
+        "/api/credit-control/audit?limit=80",
+        { method: "GET" },
+        "加载余额审计失败"
+      );
+      setAuditItems(payload.items);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setAuditItems([]);
+        setStatus({ message: getErrorMessage(error, "加载余额审计失败"), tone: "error" });
+      }
+    } finally {
+      setLoadingAudit(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadUsers();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "policies") void loadPolicies();
+    if (activeTab === "runs") void loadRuns();
+    if (activeTab === "audit") void loadAudit();
+  }, [activeTab]);
+
+  function applyUserFilters(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    void loadUsers({ ...page, offset: 0 });
+  }
+
+  const aggregateCards = [
+    { label: "总余额", value: formatMoney(aggregates.total_balance), tone: "balance" },
+    { label: "窗口消耗", value: formatMoney(aggregates.total_consumption), tone: "consumption" },
+    { label: "平均余额", value: formatMoney(aggregates.average_balance), tone: "average" },
+    { label: "负余额", value: unknownToText(aggregates.negative_balance_count ?? 0), tone: "danger" }
+  ];
+
+  return (
+    <div className="credit-workspace">
+      <section className="panel credit-shell">
+        <div className="credit-header">
+          <div>
+            <p className="eyebrow">Credit Control</p>
+            <h2>余额管理</h2>
+          </div>
+          <Space wrap>
+            <AntSegmented
+              value={activeTab}
+              onChange={(value) => onTabChange(value as CreditControlTab)}
+              options={[
+                { label: "用户余额", value: "users", icon: <Wallet size={15} /> },
+                { label: "自动充值", value: "policies", icon: <Settings size={15} /> },
+                { label: "运行记录", value: "runs", icon: <History size={15} /> },
+                { label: "审计", value: "audit", icon: <FileText size={15} /> }
+              ]}
+            />
+            <AntButton
+              icon={<ReloadOutlined />}
+              loading={loadingUsers || loadingPolicies || loadingRuns || loadingAudit}
+              onClick={() => {
+                if (activeTab === "users") void loadUsers();
+                if (activeTab === "policies") void loadPolicies();
+                if (activeTab === "runs") void loadRuns();
+                if (activeTab === "audit") void loadAudit();
+              }}
+            >
+              刷新
+            </AntButton>
+          </Space>
+        </div>
+
+        {status.message ? (
+          <Alert
+            className="credit-status"
+            showIcon
+            type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
+            message={status.message}
+          />
+        ) : null}
+
+        {activeTab === "users" ? (
+          <div className="credit-users-layout">
+            <section className="credit-main-pane">
+              <form className="credit-filter-grid" onSubmit={applyUserFilters}>
+                <Input
+                  prefix={<Search size={15} />}
+                  value={filters.search}
+                  placeholder="用户 / email / ID"
+                  onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
+                />
+                <Select
+                  value={filters.window}
+                  onChange={(value) => setFilters((current) => ({ ...current, window: value }))}
+                  options={[
+                    { label: "最近 5 小时", value: "5h" },
+                    { label: "最近 1 天", value: "1d" },
+                    { label: "最近 7 天", value: "7d" },
+                    { label: "最近 30 天", value: "30d" }
+                  ]}
+                />
+                <Input
+                  value={filters.status}
+                  placeholder="状态"
+                  onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
+                />
+                <Input
+                  value={filters.groupId}
+                  placeholder="Group ID"
+                  onChange={(event) => setFilters((current) => ({ ...current, groupId: event.target.value }))}
+                />
+                <Input
+                  value={filters.balanceMin}
+                  placeholder="余额 ≥"
+                  onChange={(event) => setFilters((current) => ({ ...current, balanceMin: event.target.value }))}
+                />
+                <Input
+                  value={filters.balanceMax}
+                  placeholder="余额 ≤"
+                  onChange={(event) => setFilters((current) => ({ ...current, balanceMax: event.target.value }))}
+                />
+                <Input
+                  value={filters.consumptionMin}
+                  placeholder="消耗 ≥"
+                  onChange={(event) => setFilters((current) => ({ ...current, consumptionMin: event.target.value }))}
+                />
+                <Input
+                  value={filters.consumptionMax}
+                  placeholder="消耗 ≤"
+                  onChange={(event) => setFilters((current) => ({ ...current, consumptionMax: event.target.value }))}
+                />
+                <AntButton type="primary" htmlType="submit" icon={<Search size={15} />} loading={loadingUsers}>
+                  查询
+                </AntButton>
+              </form>
+
+              <div className="credit-aggregate-grid">
+                {aggregateCards.map((item) => (
+                  <div key={item.label} className={`credit-aggregate-card credit-aggregate-${item.tone}`}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
+
+              <Table
+                className="credit-table"
+                size="small"
+                rowKey={(user) => idValue(user.user_id)}
+                loading={loadingUsers}
+                dataSource={users}
+                rowSelection={{
+                  selectedRowKeys: selectedUserIds,
+                  onChange: (keys) => setSelectedUserIds(keys.map(String))
+                }}
+                pagination={{
+                  current: Math.floor(page.offset / page.limit) + 1,
+                  pageSize: page.limit,
+                  total,
+                  showSizeChanger: true,
+                  onChange: (nextPage, nextLimit) => {
+                    void loadUsers({ limit: nextLimit, offset: (nextPage - 1) * nextLimit });
+                  }
+                }}
+                columns={[
+                  {
+                    title: "用户",
+                    dataIndex: "email",
+                    render: (_, user) => (
+                      <button
+                        className="credit-user-link"
+                        type="button"
+                        onClick={() => void loadUserDetail(idValue(user.user_id))}
+                      >
+                        <strong>{creditUserName(user)}</strong>
+                        <span>{user.email || unknownToText(user.user_id)}</span>
+                      </button>
+                    )
+                  },
+                  {
+                    title: "状态",
+                    dataIndex: "status",
+                    width: 92,
+                    render: (value) => <Tag color={statusTagColor(value)}>{value || "-"}</Tag>
+                  },
+                  {
+                    title: "分组",
+                    dataIndex: "group_name",
+                    render: (_, user) => user.group_name || unknownToText(user.group_id)
+                  },
+                  {
+                    title: "余额",
+                    dataIndex: "balance",
+                    align: "right",
+                    render: (value) => <span className={Number(value) < 0 ? "credit-danger-text" : ""}>{formatMoney(value)}</span>
+                  },
+                  {
+                    title: "窗口消耗",
+                    dataIndex: "consumption",
+                    align: "right",
+                    render: (value) => formatMoney(value)
+                  },
+                  {
+                    title: "Keys",
+                    dataIndex: "api_key_count",
+                    width: 80,
+                    align: "right",
+                    render: (value) => unknownToText(value ?? 0)
+                  },
+                  {
+                    title: "最近活动",
+                    dataIndex: "last_activity_at",
+                    width: 142,
+                    render: (value) => (value ? formatDate(value) : "-")
+                  }
+                ]}
+              />
+            </section>
+
+            <aside className="credit-side-pane">
+              <section className="credit-adjustment-box">
+                <div className="credit-box-title">
+                  <Wallet size={16} />
+                  <Typography.Text strong>手动调整</Typography.Text>
+                </div>
+                <AntSegmented
+                  block
+                  value={adjustmentMode}
+                  onChange={(value) => setAdjustmentMode(value as AdjustmentTargetMode)}
+                  options={[
+                    { label: `已选 ${selectedUserIds.length}`, value: "selected" },
+                    { label: "当前筛选", value: "filtered" }
+                  ]}
+                />
+                <InputNumber
+                  className="credit-full-input"
+                  value={adjustmentAmount}
+                  step={1}
+                  precision={4}
+                  placeholder="正数充值，负数扣减"
+                  onChange={setAdjustmentAmount}
+                />
+                <Input.TextArea
+                  rows={3}
+                  value={adjustmentReason}
+                  placeholder="调整原因"
+                  onChange={(event) => setAdjustmentReason(event.target.value)}
+                />
+                <Space wrap>
+                  <AntButton
+                    icon={<Eye size={15} />}
+                    loading={adjustmentBusy === "preview"}
+                    onClick={() => void runAdjustment(true)}
+                  >
+                    预览
+                  </AntButton>
+                  <AntButton
+                    type="primary"
+                    icon={<Send size={15} />}
+                    loading={adjustmentBusy === "run"}
+                    disabled={!adjustmentPreview}
+                    onClick={() => void runAdjustment(false)}
+                  >
+                    确认执行
+                  </AntButton>
+                </Space>
+                {adjustmentPreview ? (
+                  <div className="credit-preview-box">
+                    <div>
+                      <strong>{adjustmentPreview.affected_count ?? adjustmentPreview.items?.length ?? 0}</strong>
+                      <span>影响用户</span>
+                    </div>
+                    <div>
+                      <strong>{formatMoney(adjustmentPreview.total_amount)}</strong>
+                      <span>调整总额</span>
+                    </div>
+                    <pre>{formatPayload(adjustmentPreview)}</pre>
+                  </div>
+                ) : null}
+              </section>
+            </aside>
+          </div>
+        ) : null}
+
+        {activeTab === "policies" ? (
+          <div className="credit-policy-layout">
+            <section className="credit-policy-list">
+              <div className="credit-box-title">
+                <Settings size={16} />
+                <Typography.Text strong>自动充值策略</Typography.Text>
+                <Tag>{policies.length}</Tag>
+              </div>
+              <List
+                loading={loadingPolicies}
+                dataSource={policies}
+                locale={{ emptyText: "暂无自动充值策略" }}
+                renderItem={(policy) => (
+                  <List.Item
+                    actions={[
+                      <AntButton key="edit" size="small" onClick={() => setPolicyDraft(policyToDraft(policy))}>编辑</AntButton>,
+                      <AntButton
+                        key="delete"
+                        size="small"
+                        danger
+                        icon={<Trash2 size={14} />}
+                        loading={policyBusy === "delete"}
+                        onClick={() => void deletePolicy(policy.policy_id)}
+                      />
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={
+                        <Space wrap>
+                          <Typography.Text strong>{policy.name}</Typography.Text>
+                          <Tag color={policy.enabled ? "green" : "default"}>{policy.enabled ? "启用" : "停用"}</Tag>
+                          <Tag>{policy.schedule_type === "one_time" ? "一次性" : "周期"}</Tag>
+                        </Space>
+                      }
+                      description={`${formatMoney(policy.amount)} · ${policy.schedule || "-"} · next ${policy.next_run_at ? formatDate(policy.next_run_at) : "-"}`}
+                    />
+                  </List.Item>
+                )}
+              />
+            </section>
+
+            <section className="credit-policy-editor">
+              <div className="credit-box-title">
+                <Save size={16} />
+                <Typography.Text strong>{policyDraft.policy_id ? "编辑策略" : "新建策略"}</Typography.Text>
+              </div>
+              <div className="credit-editor-grid">
+                <Input
+                  value={policyDraft.name}
+                  placeholder="策略名称"
+                  onChange={(event) => setPolicyDraft((current) => ({ ...current, name: event.target.value }))}
+                />
+                <InputNumber
+                  className="credit-full-input"
+                  value={policyDraft.amount}
+                  min={0}
+                  precision={4}
+                  onChange={(value) => setPolicyDraft((current) => ({ ...current, amount: value ?? 0 }))}
+                />
+                <Select
+                  value={policyDraft.schedule_type}
+                  onChange={(value) => setPolicyDraft((current) => ({ ...current, schedule_type: value }))}
+                  options={[
+                    { label: "一次性", value: "one_time" },
+                    { label: "周期", value: "recurring" }
+                  ]}
+                />
+                <Input
+                  value={policyDraft.schedule}
+                  placeholder={policyDraft.schedule_type === "one_time" ? "2026-05-14T10:00:00+08:00" : "0 9 * * 1"}
+                  onChange={(event) => setPolicyDraft((current) => ({ ...current, schedule: event.target.value }))}
+                />
+                <Input
+                  value={policyDraft.timezone}
+                  placeholder="Asia/Shanghai"
+                  onChange={(event) => setPolicyDraft((current) => ({ ...current, timezone: event.target.value }))}
+                />
+                <Select
+                  value={policyDraft.target_scope}
+                  onChange={(value) => setPolicyDraft((current) => ({ ...current, target_scope: value }))}
+                  options={[
+                    { label: "全部用户", value: "all" },
+                    { label: "按分组", value: "group" },
+                    { label: "指定用户", value: "users" },
+                    { label: "余额低于", value: "balance_threshold" }
+                  ]}
+                />
+                {policyDraft.target_scope === "group" ? (
+                  <Input
+                    value={policyDraft.target_group_id}
+                    placeholder="Group ID"
+                    onChange={(event) => setPolicyDraft((current) => ({ ...current, target_group_id: event.target.value }))}
+                  />
+                ) : null}
+                {policyDraft.target_scope === "users" ? (
+                  <Input
+                    value={policyDraft.target_user_ids}
+                    placeholder="User IDs，用逗号分隔"
+                    onChange={(event) => setPolicyDraft((current) => ({ ...current, target_user_ids: event.target.value }))}
+                  />
+                ) : null}
+                {policyDraft.target_scope === "balance_threshold" ? (
+                  <Input
+                    value={policyDraft.target_balance_below}
+                    placeholder="余额阈值"
+                    onChange={(event) => setPolicyDraft((current) => ({ ...current, target_balance_below: event.target.value }))}
+                  />
+                ) : null}
+                <label className="credit-switch-row">
+                  <Switch
+                    checked={policyDraft.enabled}
+                    onChange={(checked) => setPolicyDraft((current) => ({ ...current, enabled: checked }))}
+                  />
+                  <span>启用策略</span>
+                </label>
+              </div>
+              <Space wrap>
+                <AntButton icon={<Eye size={15} />} loading={policyBusy === "preview"} onClick={() => void previewPolicy()}>
+                  预览影响
+                </AntButton>
+                <AntButton type="primary" icon={<Save size={15} />} loading={policyBusy === "save"} onClick={() => void savePolicy()}>
+                  保存策略
+                </AntButton>
+                <AntButton onClick={() => { setPolicyDraft(defaultPolicyDraft()); setPolicyPreview(null); }}>
+                  清空
+                </AntButton>
+              </Space>
+              {policyPreview ? (
+                <div className="credit-preview-box credit-policy-preview">
+                  <div>
+                    <strong>{policyPreview.affected_count ?? policyPreview.items?.length ?? 0}</strong>
+                    <span>预计用户</span>
+                  </div>
+                  <div>
+                    <strong>{formatMoney(policyPreview.total_amount)}</strong>
+                    <span>预计充值</span>
+                  </div>
+                  <pre>{formatPayload(policyPreview)}</pre>
+                </div>
+              ) : null}
+            </section>
+          </div>
+        ) : null}
+
+        {activeTab === "runs" ? (
+          <Table
+            className="credit-table"
+            size="small"
+            rowKey={(run) => run.run_id}
+            loading={loadingRuns}
+            dataSource={runs}
+            pagination={{ pageSize: 20 }}
+            columns={[
+              { title: "Run ID", dataIndex: "run_id", render: (value) => <Typography.Text copyable>{value}</Typography.Text> },
+              { title: "策略", dataIndex: "policy_name", render: (_, run) => run.policy_name || run.policy_id || "-" },
+              { title: "状态", dataIndex: "status", render: (value) => <Tag color={statusTagColor(value)}>{value || "-"}</Tag> },
+              { title: "用户", dataIndex: "affected_count", align: "right" },
+              { title: "金额", dataIndex: "total_amount", align: "right", render: (value) => formatMoney(value) },
+              { title: "开始", dataIndex: "started_at", render: (value) => (value ? formatDate(value) : "-") },
+              { title: "结束", dataIndex: "finished_at", render: (value) => (value ? formatDate(value) : "-") },
+              {
+                title: "",
+                width: 80,
+                render: (_, run) => (
+                  <AntButton size="small" icon={<Eye size={14} />} onClick={() => setSelectedPayload(run as ApiPayload)}>
+                    查看
+                  </AntButton>
+                )
+              }
+            ]}
+          />
+        ) : null}
+
+        {activeTab === "audit" ? (
+          <Table
+            className="credit-table"
+            size="small"
+            rowKey={(item, index) => item.audit_id || item.event_id || `${item.action}-${index}`}
+            loading={loadingAudit}
+            dataSource={auditItems}
+            pagination={{ pageSize: 30 }}
+            columns={[
+              { title: "时间", dataIndex: "created_at", width: 146, render: (value) => (value ? formatDate(value) : "-") },
+              { title: "动作", dataIndex: "action", render: (value) => <Tag>{value}</Tag> },
+              { title: "状态", dataIndex: "status", render: (value) => <Tag color={statusTagColor(value)}>{value || "-"}</Tag> },
+              { title: "用户", dataIndex: "user_id", render: (value) => unknownToText(value) },
+              { title: "金额", dataIndex: "amount", align: "right", render: (value) => formatMoney(value) },
+              { title: "操作人", dataIndex: "actor", render: (value) => value || "-" },
+              { title: "原因", dataIndex: "reason", ellipsis: true, render: (value) => value || "-" },
+              {
+                title: "",
+                width: 80,
+                render: (_, item) => (
+                  <AntButton size="small" icon={<Eye size={14} />} onClick={() => setSelectedPayload(item as ApiPayload)}>
+                    查看
+                  </AntButton>
+                )
+              }
+            ]}
+          />
+        ) : null}
+      </section>
+
+      <Drawer
+        title="用户余额详情"
+        width={620}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+      >
+        {loadingDetail ? (
+          <div className="empty-state">
+            <LoaderCircle className="spin" size={20} aria-hidden="true" />
+            正在加载详情
+          </div>
+        ) : detail ? (
+          <div className="credit-detail-stack">
+            <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="用户" span={2}>{creditUserName(detail.item)}</Descriptions.Item>
+              <Descriptions.Item label="Email" span={2}>{detail.item.email || "-"}</Descriptions.Item>
+              <Descriptions.Item label="User ID">{unknownToText(detail.item.user_id)}</Descriptions.Item>
+              <Descriptions.Item label="状态">{detail.item.status || "-"}</Descriptions.Item>
+              <Descriptions.Item label="分组">{detail.item.group_name || unknownToText(detail.item.group_id)}</Descriptions.Item>
+              <Descriptions.Item label="API Keys">{detail.item.api_keys?.length ?? detail.item.api_key_count ?? 0}</Descriptions.Item>
+              <Descriptions.Item label="余额">{formatMoney(detail.item.balance)}</Descriptions.Item>
+              <Descriptions.Item label="窗口消耗">{formatMoney(detail.item.consumption)}</Descriptions.Item>
+            </Descriptions>
+            <div className="section-heading">API Key 用量</div>
+            <List
+              size="small"
+              dataSource={detail.item.api_keys ?? []}
+              locale={{ emptyText: "暂无 API Key 用量" }}
+              renderItem={(key) => (
+                <List.Item>
+                  <List.Item.Meta
+                    avatar={<KeyOutlined />}
+                    title={key.name || unknownToText(key.key_id)}
+                    description={`Key ${unknownToText(key.key_id)} · ${key.group_name || unknownToText(key.group_id)}`}
+                  />
+                  <strong>{formatMoney(key.usage)}</strong>
+                </List.Item>
+              )}
+            />
+            <div className="section-heading">最近审计</div>
+            <List
+              size="small"
+              dataSource={detail.audit_items}
+              locale={{ emptyText: "暂无审计记录" }}
+              renderItem={(item) => (
+                <List.Item>
+                  <List.Item.Meta
+                    title={<Space><Tag color={statusTagColor(item.status)}>{item.action}</Tag><span>{formatMoney(item.amount)}</span></Space>}
+                    description={`${item.created_at ? formatDate(item.created_at) : "-"} · ${item.reason || "-"}`}
+                  />
+                </List.Item>
+              )}
+            />
+          </div>
+        ) : (
+          <div className="empty-state">暂无详情</div>
+        )}
+      </Drawer>
+
+      <Modal
+        title="记录详情"
+        open={Boolean(selectedPayload)}
+        footer={null}
+        width={760}
+        onCancel={() => setSelectedPayload(null)}
+      >
+        <pre className="drawer-payload">{formatPayload(selectedPayload)}</pre>
+      </Modal>
     </div>
   );
 }
