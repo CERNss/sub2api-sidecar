@@ -25,6 +25,8 @@ CONFIG_ENV_NAMES = (
     "AUTO_ROTATION_COOLDOWN_MINUTES",
     "AUTO_ROTATION_USAGE_WINDOW",
     "AUTO_ROTATION_USAGE_THRESHOLDS_JSON",
+    "CREDIT_CONTROL_RECHARGE_TICK_SECONDS",
+    "NOTIFICATION_SCHEDULER_TICK_SECONDS",
     "SUB2API_GROUP_PLATFORM",
     "SUB2API_ACCOUNT_PROVIDER",
     "SUB2API_ACCOUNT_PLATFORM",
@@ -91,6 +93,10 @@ auto_rotation:
   usage_thresholds:
     - 10
     - 20.5
+credit_control:
+  recharge_tick_seconds: 120
+notifications:
+  scheduler_tick_seconds: 90
 """.lstrip(),
         encoding="utf-8",
     )
@@ -114,6 +120,8 @@ auto_rotation:
     assert settings.auto_rotation.cooldown_minutes == 5
     assert settings.auto_rotation.usage_window.value == "5h"
     assert settings.auto_rotation.usage_thresholds == (10.0, 20.5)
+    assert settings.credit_control.recharge_tick_seconds == 120
+    assert settings.notification_scheduler.tick_seconds == 90
 
     defaults = settings.sub2api_provisioning_defaults
     assert defaults.group_platform == "yaml-group"
@@ -146,12 +154,40 @@ sub2api:
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SUB2API_BASE_URL", "http://env-sub2api.local")
     monkeypatch.setenv("APP_ACCESS_KEY_TTL_HOURS", "18")
+    monkeypatch.setenv("NOTIFICATION_SCHEDULER_TICK_SECONDS", "45")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
 
     settings = Settings.from_env()
 
     assert settings.sub2api_base_url == "http://env-sub2api.local"
     assert settings.app_access_key_ttl_hours == 18
+    assert settings.notification_scheduler.tick_seconds == 45
+
+
+def test_settings_defaults_notification_scheduler_to_enabled(monkeypatch) -> None:
+    _clear_config_env(monkeypatch)
+    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+
+    settings = Settings.from_env()
+
+    assert settings.notification_scheduler.tick_seconds == 60
+
+
+def test_settings_rejects_negative_notification_scheduler_tick(monkeypatch) -> None:
+    _clear_config_env(monkeypatch)
+    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("NOTIFICATION_SCHEDULER_TICK_SECONDS", "-1")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "NOTIFICATION_SCHEDULER_TICK_SECONDS" in str(exc_info.value)
 
 
 def test_settings_normalizes_env_base_path(monkeypatch) -> None:

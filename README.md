@@ -250,6 +250,9 @@ APP_AUTH_PASSWORD=change-me
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
 - `app.base_path` 可选，默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
+- `auto_rotation.enabled=true` 且 `auto_rotation.interval_seconds > 0` 时，后台自动轮换才会启动；已登录管理员可请求 `GET /rotation/auto/scheduler` 确认是否运行。
+- `credit_control.recharge_tick_seconds` 默认 `60`，用于后台执行到期充值策略；设为 `0` 会关闭后台执行。已登录管理员可请求 `GET /api/credit-control/scheduler` 确认是否运行。
+- `notifications.scheduler_tick_seconds` 默认 `60`，用于后台定时评估告警规则；设为 `0` 会关闭后台评估。已登录管理员可请求 `GET /notifications/scheduler` 确认定时器是否启用、是否运行、最近一次 tick 时间和错误。
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
 
 环境变量仍然可以覆盖 `config.yaml` 中的同名旧配置项，方便兼容已有部署和测试环境；新配置建议优先改 `config.yaml`。

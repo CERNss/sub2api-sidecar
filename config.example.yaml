@@ -63,3 +63,10 @@ auto_rotation:
   imbalance_epsilon: 0.0
   # Per-user move requires after_gap < before_gap - improvement_delta to avoid flapping near optimum.
   improvement_delta: 0.0
+
+credit_control:
+  recharge_tick_seconds: 60
+
+notifications:
+  # Set to 0 to disable background alert evaluation.
+  scheduler_tick_seconds: 60

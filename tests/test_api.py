@@ -15,6 +15,8 @@ from app.clients.sub2api import Sub2APIClient
 from app.config import Sub2APIProvisioningDefaults, get_settings
 from app.models.flow import AssignmentMode
 from app.models.rotation import RotationPoolGroup, RotationPoolKind, UserGroupAssignment
+from app.services.credit_scheduler import CreditControlScheduler
+from app.services.rotation_scheduler import AutoRotationScheduler
 
 AUTH_PAYLOAD = {"username": "admin", "password": "test-admin-pass"}
 EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES = [
@@ -1385,6 +1387,48 @@ def test_credit_control_policy_crud_preview_schedule_and_dedup(client) -> None:
     assert main.get_flow_store().get_credit_policy(policy_id) is None
 
 
+def test_credit_control_scheduler_status_requires_auth(client) -> None:
+    response = client.get("/api/credit-control/scheduler")
+    assert response.status_code == 401
+
+
+def test_credit_control_scheduler_status_reports_disabled_scheduler(client) -> None:
+    login(client)
+
+    response = client.get("/api/credit-control/scheduler")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is False
+    assert payload["running"] is False
+    assert payload["tick_seconds"] == 0
+    assert payload["tick_count"] == 0
+
+
+def test_credit_control_scheduler_runs_startup_tick_and_reports_snapshot() -> None:
+    class _FakeCreditService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def tick(self):
+            self.calls += 1
+            return []
+
+    service = _FakeCreditService()
+    scheduler = CreditControlScheduler(service, tick_seconds=60)
+
+    scheduler.start()
+    snapshot = scheduler.snapshot()
+    scheduler.stop()
+
+    assert service.calls == 1
+    assert snapshot.enabled is True
+    assert snapshot.tick_seconds == 60
+    assert snapshot.tick_count == 1
+    assert snapshot.last_tick_started_at is not None
+    assert snapshot.last_tick_error is None
+
+
 def test_credit_control_recurring_policy_round_trips_dashboard_schedule(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
@@ -1587,6 +1631,41 @@ def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch)
     assert completed_flow.user_id is None
     assert completed_flow.group_id == "11"
     assert completed_flow.assignment_mode == AssignmentMode.managed_pool
+
+
+def test_auto_rotation_scheduler_status_requires_auth(client) -> None:
+    response = client.get("/rotation/auto/scheduler")
+    assert response.status_code == 401
+
+
+def test_auto_rotation_scheduler_status_reports_disabled_scheduler(client) -> None:
+    login(client)
+
+    response = client.get("/rotation/auto/scheduler")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is False
+    assert payload["running"] is False
+    assert payload["interval_seconds"] == 0
+    assert payload["tick_count"] == 0
+
+
+def test_auto_rotation_scheduler_reports_tick_errors() -> None:
+    class _FakeRotationService:
+        def run_auto_rotation(self, trigger_type):
+            raise RuntimeError(f"boom: {trigger_type.value}")
+
+    scheduler = AutoRotationScheduler(_FakeRotationService(), interval_seconds=60)
+
+    scheduler._tick_once()
+    snapshot = scheduler.snapshot()
+
+    assert snapshot.enabled is True
+    assert snapshot.interval_seconds == 60
+    assert snapshot.tick_count == 0
+    assert snapshot.last_tick_started_at is not None
+    assert "boom: automatic_interval" in (snapshot.last_tick_error or "")
 
 
 def test_manual_rotation_success_skip_and_failure(client) -> None:

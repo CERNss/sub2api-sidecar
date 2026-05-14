@@ -44,6 +44,7 @@ from app.models.schemas import (
     AutoRotationRunRequest,
     AutoRotationRunResponse,
     AutoRotationRunsEnvelope,
+    AutoRotationSchedulerStatusResponse,
     AuthSessionResponse,
     CreditControlAdjustmentEnvelope,
     CreditControlAdjustmentItemResponse,
@@ -57,6 +58,7 @@ from app.models.schemas import (
     CreditControlPolicyResponse,
     CreditControlRunResponse,
     CreditControlRunsEnvelope,
+    CreditControlSchedulerStatusResponse,
     CreditControlUserDetailEnvelope,
     CreditControlUserResponse,
     CreditControlUsersEnvelope,
@@ -69,6 +71,7 @@ from app.models.schemas import (
     NotificationDeliveryRecordResponse,
     NotificationEvaluateRequest,
     NotificationEvaluateResponse,
+    NotificationSchedulerStatusResponse,
     NotificationRuleStateResponse,
     NotificationTestRequest,
     NotificationTestResponse,
@@ -118,9 +121,7 @@ UI_DIST_DIR = APP_DIR / "static" / "ui"
 UI_INDEX_FILE = UI_DIST_DIR / "index.html"
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    import os
-
+async def lifespan(app_instance: FastAPI):
     get_settings()
     get_flow_store()
     get_auth_manager()
@@ -128,24 +129,28 @@ async def lifespan(_: FastAPI):
     rotation_scheduler: AutoRotationScheduler | None = None
     notification_scheduler: NotificationScheduler | None = None
     credit_scheduler: CreditControlScheduler | None = None
+    app_instance.state.auto_rotation_scheduler = None
+    app_instance.state.credit_control_scheduler = None
+    app_instance.state.notification_scheduler = None
     if settings.auto_rotation.enabled and settings.auto_rotation.interval_seconds > 0:
         rotation_scheduler = AutoRotationScheduler(
             rotation_service=get_rotation_service(),
             interval_seconds=settings.auto_rotation.interval_seconds,
         )
+        app_instance.state.auto_rotation_scheduler = rotation_scheduler
         rotation_scheduler.start()
-    notification_tick = int(os.environ.get("NOTIFICATION_SCHEDULER_TICK_SECONDS", "0") or "0")
-    if notification_tick > 0:
-        notification_scheduler = NotificationScheduler(
-            notification_service=get_notification_service(),
-            tick_seconds=notification_tick,
-        )
-        notification_scheduler.start()
+    notification_scheduler = NotificationScheduler(
+        notification_service=get_notification_service(),
+        tick_seconds=settings.notification_scheduler.tick_seconds,
+    )
+    app_instance.state.notification_scheduler = notification_scheduler
+    notification_scheduler.start()
     if settings.credit_control.recharge_tick_seconds > 0:
         credit_scheduler = CreditControlScheduler(
             credit_service=get_credit_control_service(),
             tick_seconds=settings.credit_control.recharge_tick_seconds,
         )
+        app_instance.state.credit_control_scheduler = credit_scheduler
         credit_scheduler.start()
     try:
         yield
@@ -1206,6 +1211,24 @@ def credit_control_runs(
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
+@app.get("/api/credit-control/scheduler")
+def credit_control_scheduler_status(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    scheduler = getattr(app.state, "credit_control_scheduler", None)
+    if scheduler is None:
+        settings = get_settings()
+        response = CreditControlSchedulerStatusResponse(
+            enabled=settings.credit_control.recharge_tick_seconds > 0,
+            running=False,
+            tick_seconds=settings.credit_control.recharge_tick_seconds,
+            tick_count=0,
+        )
+    else:
+        response = CreditControlSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
 @app.get("/api/credit-control/audit")
 def credit_control_audit(
     user_id: str | None = None,
@@ -1604,6 +1627,25 @@ def rotation_auto_runs(
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
+@app.get("/rotation/auto/scheduler")
+def rotation_auto_scheduler_status(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    scheduler = getattr(app.state, "auto_rotation_scheduler", None)
+    if scheduler is None:
+        settings = get_settings()
+        response = AutoRotationSchedulerStatusResponse(
+            enabled=settings.auto_rotation.enabled
+            and settings.auto_rotation.interval_seconds > 0,
+            running=False,
+            interval_seconds=settings.auto_rotation.interval_seconds,
+            tick_count=0,
+        )
+    else:
+        response = AutoRotationSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
 @app.get("/rotation/auto/runs/{run_id}")
 def rotation_auto_run_detail(
     run_id: str,
@@ -1634,6 +1676,24 @@ def rotation_auto_run_rollback(
 def notifications_config_get(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
     settings = get_notification_service().load_config()
     return JSONResponse(status_code=200, content=redact_settings(settings))
+
+
+@app.get("/notifications/scheduler")
+def notifications_scheduler_status(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    scheduler = getattr(app.state, "notification_scheduler", None)
+    if scheduler is None:
+        settings = get_settings()
+        response = NotificationSchedulerStatusResponse(
+            enabled=settings.notification_scheduler.tick_seconds > 0,
+            running=False,
+            tick_seconds=settings.notification_scheduler.tick_seconds,
+            tick_count=0,
+        )
+    else:
+        response = NotificationSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
 @app.put("/notifications/config")

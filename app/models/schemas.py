@@ -363,6 +363,20 @@ class CreditControlRunsEnvelope(BaseModel):
     total: int
 
 
+class CreditControlSchedulerStatusResponse(BaseModel):
+    success: bool = True
+    enabled: bool
+    running: bool
+    tick_seconds: int
+    tick_count: int
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
+    last_tick_error: str | None = None
+    last_run_count: int = 0
+    last_affected_count: int = 0
+    last_failure_count: int = 0
+
+
 class CreditControlAuditEnvelope(BaseModel):
     success: bool = True
     items: list[CreditControlAuditResponse]
@@ -500,6 +514,23 @@ class AutoRotationRunsEnvelope(BaseModel):
     total: int
 
 
+class AutoRotationSchedulerStatusResponse(BaseModel):
+    success: bool = True
+    enabled: bool
+    running: bool
+    interval_seconds: int
+    tick_count: int
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
+    last_tick_error: str | None = None
+    last_run_id: str | None = None
+    last_status: str | None = None
+    last_moved_count: int = 0
+    last_planned_count: int = 0
+    last_skipped_count: int = 0
+    last_failed_count: int = 0
+
+
 class NotificationTestRequest(BaseModel):
     rule_id: str = Field(..., min_length=1)
 
@@ -518,6 +549,19 @@ class NotificationTestResponse(BaseModel):
     rule_id: str
     rule_name: str
     outcomes: list[NotificationDeliveryOutcomeResponse]
+
+
+class NotificationSchedulerStatusResponse(BaseModel):
+    success: bool = True
+    enabled: bool
+    running: bool
+    tick_seconds: int
+    tick_count: int
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
+    last_tick_error: str | None = None
+    last_outcome_count: int = 0
+    last_delivery_count: int = 0
 
 
 class NotificationEvaluateRequest(BaseModel):

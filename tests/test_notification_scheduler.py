@@ -26,6 +26,7 @@ from app.services.notification_collector import (
     sub2api_registry,
 )
 from app.services.notification_evaluator import evaluate_rule
+from app.services.notification_scheduler import NotificationScheduler
 
 
 AUTH_PAYLOAD = {"username": "admin", "password": "test-admin-pass"}
@@ -383,6 +384,30 @@ def test_tick_respects_read_interval(client) -> None:
     assert outcomes == []
 
 
+def test_notification_scheduler_runs_startup_tick_and_reports_snapshot() -> None:
+    class _FakeService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def tick(self, *, now=None):
+            self.calls += 1
+            return []
+
+    service = _FakeService()
+    scheduler = NotificationScheduler(service, tick_seconds=60)
+
+    scheduler.start()
+    snapshot = scheduler.snapshot()
+    scheduler.stop()
+
+    assert service.calls == 1
+    assert snapshot.enabled is True
+    assert snapshot.tick_seconds == 60
+    assert snapshot.tick_count == 1
+    assert snapshot.last_tick_started_at is not None
+    assert snapshot.last_tick_error is None
+
+
 def test_evaluate_once_returns_no_data_when_collector_has_no_data(client) -> None:
     login(client)
     settings = _settings([_rule(threshold="10", for_minutes=0)])
@@ -397,6 +422,24 @@ def test_evaluate_once_returns_no_data_when_collector_has_no_data(client) -> Non
 
 
 # --- POST /notifications/evaluate ---
+
+
+def test_scheduler_status_endpoint_requires_auth(client) -> None:
+    response = client.get("/notifications/scheduler")
+    assert response.status_code == 401
+
+
+def test_scheduler_status_endpoint_reports_disabled_scheduler(client) -> None:
+    login(client)
+
+    response = client.get("/notifications/scheduler")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is False
+    assert payload["running"] is False
+    assert payload["tick_seconds"] == 0
+    assert payload["tick_count"] == 0
 
 
 def test_evaluate_endpoint_requires_auth(client) -> None:

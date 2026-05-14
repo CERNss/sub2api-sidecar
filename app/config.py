@@ -101,6 +101,11 @@ class CreditControlSettings:
 
 
 @dataclass(frozen=True)
+class NotificationSchedulerSettings:
+    tick_seconds: int = 60
+
+
+@dataclass(frozen=True)
 class Settings:
     sub2api_base_url: str
     sub2api_admin_api_key: str
@@ -111,6 +116,7 @@ class Settings:
     assignment_mode: ProvisioningAssignmentMode = ProvisioningAssignmentMode.dedicated
     auto_rotation: AutoRotationSettings = AutoRotationSettings()
     credit_control: CreditControlSettings = CreditControlSettings()
+    notification_scheduler: NotificationSchedulerSettings = NotificationSchedulerSettings()
     app_auth_username: str = "admin"
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
@@ -278,6 +284,14 @@ class Settings:
                 default=60,
             ),
         )
+        values["notification_scheduler"] = NotificationSchedulerSettings(
+            tick_seconds=_int_setting(
+                config,
+                "NOTIFICATION_SCHEDULER_TICK_SECONDS",
+                ("notifications", "scheduler_tick_seconds"),
+                default=60,
+            ),
+        )
 
         if values["auto_rotation"].interval_seconds < 0:
             raise ConfigurationError("AUTO_ROTATION_INTERVAL_SECONDS must be >= 0")
@@ -289,6 +303,8 @@ class Settings:
             raise ConfigurationError("AUTO_ROTATION_IMPROVEMENT_DELTA must be >= 0")
         if values["credit_control"].recharge_tick_seconds < 0:
             raise ConfigurationError("CREDIT_CONTROL_RECHARGE_TICK_SECONDS must be >= 0")
+        if values["notification_scheduler"].tick_seconds < 0:
+            raise ConfigurationError("NOTIFICATION_SCHEDULER_TICK_SECONDS must be >= 0")
         if values["sub2api_provisioning_defaults"].account_concurrency <= 0:
             raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
 
