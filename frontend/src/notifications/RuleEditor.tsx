@@ -1,11 +1,12 @@
-import { Popconfirm, Select, Tag } from "antd";
-import { Copy, Download, LoaderCircle, Plus, Send, Trash2 } from "lucide-react";
+import { Popconfirm, Popover, Select, Tag } from "antd";
+import { Copy, Download, Info, LoaderCircle, Plus, Send, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { downloadJson, makeRuleExport, makeRuleTemplate, makeRuleTemplateJson, toJsonFileSlug } from "./ruleExport";
 import {
   NotificationDeliveryOutcome,
   NotificationRule,
   NotificationRuleOperator,
+  NotificationSignal,
   NotificationSettings,
   NotificationSeverity,
   NotificationTestResult,
@@ -161,25 +162,27 @@ export function RuleEditor({
                   key={rule.id}
                   className={`notif-rule-card ${active ? "expanded" : ""}`}
                 >
-                  <button
-                    className="notif-rule-card-trigger"
-                    type="button"
-                    aria-current={active ? "true" : undefined}
-                    onClick={() => onSelectRule(rule.id)}
-                  >
-                    <span className="notif-list-text">
-                      <strong>{rule.name || signal?.label || "未命名规则"}</strong>
-                      <small>
-                        {operatorLabel(rule.operator)} {rule.threshold}
-                        {rule.thresholdUnit ? ` ${rule.thresholdUnit}` : ""} · 每 {rule.readIntervalMinutes} 分钟 · {targetCount} 个接收器
-                      </small>
-                    </span>
+                  <div className="notif-rule-card-trigger" aria-current={active ? "true" : undefined}>
+                    <button
+                      className="notif-rule-card-main"
+                      type="button"
+                      onClick={() => onSelectRule(rule.id)}
+                    >
+                      <span className="notif-list-text">
+                        <strong>{rule.name || signal?.label || "未命名规则"}</strong>
+                        <small>
+                          {operatorLabel(rule.operator)} {rule.threshold}
+                          {rule.thresholdUnit ? ` ${rule.thresholdUnit}` : ""} · 每 {rule.readIntervalMinutes} 分钟 · {targetCount} 个接收器
+                        </small>
+                      </span>
+                    </button>
                     <span className="notif-rule-card-meta">
+                      <RuleInfoButton rule={rule} signal={signal} />
                       <Tag color={rule.enabled ? severityColor(rule.severity) : "default"}>
                         {rule.enabled ? severityLabel(rule.severity) : "停用"}
                       </Tag>
                     </span>
-                  </button>
+                  </div>
                 </article>
               );
             })}
@@ -190,8 +193,10 @@ export function RuleEditor({
           <div className="notif-form notif-rule-form">
             <header className="notif-rule-head">
               <div>
-                <h4>{selected.name || selectedSignal?.label || "告警规则"}</h4>
-                <p>{selectedSignal?.description ?? "选择信号类型后配置阈值。"}</p>
+                <div className="notif-rule-title-row">
+                  <h4>{selected.name || selectedSignal?.label || "告警规则"}</h4>
+                  <RuleInfoButton rule={selected} signal={selectedSignal ?? undefined} />
+                </div>
                 <div className="notif-rule-meta">
                   <Tag color={severityColor(selected.severity)}>{severityLabel(selected.severity)}</Tag>
                   <span>{selectedTargets.length} 个接收器</span>
@@ -476,5 +481,76 @@ export function RuleEditor({
         </div>
       </div>
     </section>
+  );
+}
+
+function RuleInfoButton({
+  rule,
+  signal
+}: {
+  rule: NotificationRule;
+  signal?: NotificationSignal;
+}) {
+  return (
+    <Popover
+      trigger="click"
+      placement="rightTop"
+      content={<RuleInfoPopup rule={rule} signal={signal} />}
+    >
+      <button
+        className="notif-rule-info-button"
+        type="button"
+        aria-label={`${rule.name || signal?.label || "规则"}说明`}
+      >
+        <Info size={14} aria-hidden="true" />
+      </button>
+    </Popover>
+  );
+}
+
+function RuleInfoPopup({
+  rule,
+  signal
+}: {
+  rule: NotificationRule;
+  signal?: NotificationSignal;
+}) {
+  const threshold = `${operatorLabel(rule.operator)} ${rule.threshold || "-"}${rule.thresholdUnit ? ` ${rule.thresholdUnit}` : ""}`;
+  return (
+    <div className="notif-rule-info-popup">
+      <div className="notif-rule-info-head">
+        <strong>{rule.name || signal?.label || "告警规则"}</strong>
+        <Tag color={rule.enabled ? severityColor(rule.severity) : "default"}>
+          {rule.enabled ? severityLabel(rule.severity) : "停用"}
+        </Tag>
+      </div>
+      <p>{signal?.description ?? "当前信号没有内置说明。"}</p>
+      <dl>
+        <div>
+          <dt>信号</dt>
+          <dd>{signal?.label ?? rule.signalKey}</dd>
+        </div>
+        <div>
+          <dt>来源</dt>
+          <dd>{signal?.source ?? "-"}</dd>
+        </div>
+        <div>
+          <dt>触发</dt>
+          <dd>{threshold}</dd>
+        </div>
+        <div>
+          <dt>持续</dt>
+          <dd>{rule.forMinutes > 0 ? `${rule.forMinutes} 分钟` : "立即触发"}</dd>
+        </div>
+        <div>
+          <dt>检查</dt>
+          <dd>每 {rule.readIntervalMinutes} 分钟</dd>
+        </div>
+        <div>
+          <dt>冷却</dt>
+          <dd>{rule.cooldownMinutes} 分钟</dd>
+        </div>
+      </dl>
+    </div>
   );
 }

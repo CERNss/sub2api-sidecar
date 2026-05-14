@@ -303,6 +303,14 @@ The React UI SHALL let operators configure which operational signals are evaluat
 - **THEN** the UI allows the rule to send recovery notifications
 - **THEN** the UI allows the rule to include a data snapshot in the outbound payload
 
+#### Scenario: Operator monitors sustained capacity saturation
+- **GIVEN** upstream account capacity fields expose current usage and total capacity
+- **WHEN** the operator creates an account or group capacity saturation alert
+- **THEN** the rule threshold represents how many accounts or groups are currently full
+- **THEN** the rule sustained-for minutes represents how long that full-count condition must remain true before firing
+- **THEN** account saturation counts accounts whose current capacity is greater than or equal to total capacity
+- **THEN** group saturation counts groups whose grouped account current capacity is greater than or equal to grouped account total capacity
+
 #### Scenario: Notification configuration persists locally
 - **GIVEN** the operator edits webhook receivers or rules
 - **WHEN** the operator saves the settings
@@ -403,4 +411,3 @@ The system SHALL expose an authenticated API for evaluating a single rule once a
 - **WHEN** the operator calls `POST /notifications/evaluate` with an id that does not match any saved rule
 - **THEN** the system returns a client error response
 - **THEN** the system does not perform any collector or delivery work
-

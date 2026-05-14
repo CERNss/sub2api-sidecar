@@ -89,8 +89,10 @@ class _FakeSub2APIClient:
                 "availability_status": "disabled",
                 "is_available": False,
                 "current_concurrency": 4,
-                "concurrency": 5,
+                "concurrency": 4,
                 "quota_remaining": 40,
+                "group_ids": ["g1"],
+                "group_names": ["Group One"],
                 "raw": {"type": "apikey", "expires_at": "2026-12-31"},
             },
             {
@@ -102,6 +104,8 @@ class _FakeSub2APIClient:
                 "current_concurrency": 1,
                 "concurrency": 10,
                 "quota_remaining": 12,
+                "group_ids": ["g1"],
+                "group_names": ["Group One"],
                 "raw": {"type": "oauth"},
             },
             {
@@ -112,6 +116,8 @@ class _FakeSub2APIClient:
                 "current_concurrency": 0,
                 "concurrency": 5,
                 "quota_remaining": 80,
+                "group_ids": ["g2"],
+                "group_names": ["Group Two"],
                 "raw": {"type": "oauth"},
             },
         ]
@@ -152,10 +158,51 @@ def test_sub2api_collectors_account_signals() -> None:
     assert collectors.account_invalid(_rule()).value == 1
     assert collectors.account_rate_limited(_rule()).value == 1
     assert collectors.account_reauth_needed(_rule()).value == 1
-    assert collectors.account_capacity_high(_rule()).value == 80
+    assert collectors.account_capacity_high(_rule()).value == 100
+    assert collectors.account_capacity_full(_rule()).value == 1
+    assert collectors.group_capacity_full(_rule()).value == 0
     assert collectors.account_quota_low(_rule()).value == 12
     assert collectors.platform_key_health(_rule()).value == 1
     assert collectors.platform_key_expiry(_rule()).value >= 0
+
+
+def test_sub2api_collectors_group_capacity_full_counts_grouped_capacity() -> None:
+    class _FullGroupClient(_FakeSub2APIClient):
+        def list_openai_accounts(self):
+            return [
+                {
+                    "id": "acct-1",
+                    "name": "A",
+                    "current_concurrency": 4,
+                    "concurrency": 4,
+                    "group_ids": ["g1"],
+                    "group_names": ["Group One"],
+                },
+                {
+                    "id": "acct-2",
+                    "name": "B",
+                    "current_concurrency": 10,
+                    "concurrency": 10,
+                    "group_ids": ["g1"],
+                    "group_names": ["Group One"],
+                },
+                {
+                    "id": "acct-3",
+                    "name": "C",
+                    "current_concurrency": 0,
+                    "concurrency": 5,
+                    "group_ids": ["g2"],
+                    "group_names": ["Group Two"],
+                },
+            ]
+
+    sample = Sub2APINotificationCollectors(_FullGroupClient()).group_capacity_full(_rule())
+
+    assert sample.value == 1
+    assert sample.snapshot is not None
+    assert sample.snapshot["full_groups"][0]["id"] == "g1"
+    assert sample.snapshot["full_groups"][0]["current_capacity"] == 14
+    assert sample.snapshot["full_groups"][0]["capacity"] == 14
 
 
 def test_sub2api_collectors_usage_and_balance_signals() -> None:

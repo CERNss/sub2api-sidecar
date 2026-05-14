@@ -29,6 +29,8 @@ KNOWN_SIGNAL_KEYS: tuple[str, ...] = (
     "account_quota_low",
     "account_reauth_needed",
     "account_capacity_high",
+    "account_capacity_full",
+    "group_capacity_full",
 )
 
 UNIMPLEMENTED_REASON = (
@@ -78,6 +80,8 @@ def sub2api_registry(client: Sub2APIClient) -> CollectorRegistry:
     registry.register("account_rate_limited", collectors.account_rate_limited)
     registry.register("account_reauth_needed", collectors.account_reauth_needed)
     registry.register("account_capacity_high", collectors.account_capacity_high)
+    registry.register("account_capacity_full", collectors.account_capacity_full)
+    registry.register("group_capacity_full", collectors.group_capacity_full)
     registry.register("account_quota_low", collectors.account_quota_low)
     registry.register("platform_key_health", collectors.platform_key_health)
     registry.register("platform_key_quota", collectors.platform_key_quota)
@@ -141,9 +145,9 @@ class Sub2APINotificationCollectors:
         accounts = self._accounts()
         percentages: list[float] = []
         for account in accounts:
-            used = _number(account, "current_concurrency", "raw.current_concurrency")
-            limit = _number(account, "concurrency", "raw.concurrency")
-            if used is not None and limit and limit > 0:
+            capacity = _account_capacity(account)
+            if capacity is not None:
+                used, limit = capacity
                 percentages.append(used / limit * 100)
         if not percentages:
             raise CollectorNoData("account capacity fields are missing from account data")
@@ -153,6 +157,64 @@ class Sub2APINotificationCollectors:
                 "max_capacity_percent": max(percentages),
                 "account_count": len(accounts),
             },
+        )
+
+    def account_capacity_full(self, _: NotificationRule) -> CollectorSample | None:
+        accounts = self._accounts()
+        measurable: list[tuple[dict, float, float]] = []
+        full: list[tuple[dict, float, float]] = []
+        for account in accounts:
+            capacity = _account_capacity(account)
+            if capacity is None:
+                continue
+            used, limit = capacity
+            measurable.append((account, used, limit))
+            if _capacity_is_full(used, limit):
+                full.append((account, used, limit))
+        if not measurable:
+            raise CollectorNoData("account capacity fields are missing from account data")
+        return _capacity_count_sample(full, len(measurable), "full_accounts")
+
+    def group_capacity_full(self, _: NotificationRule) -> CollectorSample | None:
+        groups: dict[str, dict] = {}
+        for account in self._accounts():
+            capacity = _account_capacity(account)
+            if capacity is None:
+                continue
+            used, limit = capacity
+            for raw_group_id in account.get("group_ids") or []:
+                group_key = _id_key(raw_group_id)
+                if not group_key:
+                    continue
+                group = groups.setdefault(
+                    group_key,
+                    {
+                        "id": raw_group_id,
+                        "name": _group_name_for_account(account, raw_group_id),
+                        "current_capacity": 0.0,
+                        "capacity": 0.0,
+                        "account_count": 0,
+                    },
+                )
+                group["current_capacity"] += used
+                group["capacity"] += limit
+                group["account_count"] += 1
+        measurable = [
+            group
+            for group in groups.values()
+            if _number(group, "capacity") is not None and _number(group, "capacity") > 0
+        ]
+        if not measurable:
+            raise CollectorNoData("group capacity fields are missing from grouped account data")
+        full = [
+            group
+            for group in measurable
+            if _capacity_is_full(group["current_capacity"], group["capacity"])
+        ]
+        return _capacity_count_sample(
+            [(group, group["current_capacity"], group["capacity"]) for group in full],
+            len(measurable),
+            "full_groups",
         )
 
     def account_quota_low(self, _: NotificationRule) -> CollectorSample | None:
@@ -330,6 +392,21 @@ def _count_sample(matches: list[dict], source: list[dict], key: str) -> Collecto
     )
 
 
+def _capacity_count_sample(
+    matches: list[tuple[dict, float, float]],
+    measurable_count: int,
+    key: str,
+) -> CollectorSample:
+    return CollectorSample(
+        value=float(len(matches)),
+        snapshot={
+            key: [_capacity_snapshot(item, used, limit) for item, used, limit in matches[:10]],
+            "matched_count": len(matches),
+            "total_count": measurable_count,
+        },
+    )
+
+
 def _entity_snapshot(item: dict) -> dict:
     return {
         "id": item.get("id"),
@@ -337,6 +414,20 @@ def _entity_snapshot(item: dict) -> dict:
         "status": item.get("status") or item.get("availability_status"),
         "reason": item.get("availability_reason") or item.get("last_error"),
     }
+
+
+def _capacity_snapshot(item: dict, used: float, limit: float) -> dict:
+    snapshot = _entity_snapshot(item)
+    snapshot.update(
+        {
+            "current_capacity": used,
+            "capacity": limit,
+            "capacity_percent": used / limit * 100 if limit > 0 else None,
+        }
+    )
+    if "account_count" in item:
+        snapshot["account_count"] = item["account_count"]
+    return snapshot
 
 
 def _status_key(value: object) -> str:
@@ -368,6 +459,58 @@ def _number(payload: object, *paths: str) -> float | None:
             except ValueError:
                 continue
     return None
+
+
+def _account_capacity(account: dict) -> tuple[float, float] | None:
+    used = _number(
+        account,
+        "current_concurrency",
+        "current_capacity",
+        "active_concurrency",
+        "used_concurrency",
+        "raw.current_concurrency",
+        "raw.current_capacity",
+        "raw.active_concurrency",
+        "raw.used_concurrency",
+        "raw.usage.current_concurrency",
+    )
+    limit = _number(
+        account,
+        "concurrency",
+        "capacity",
+        "account_capacity",
+        "max_concurrency",
+        "raw.concurrency",
+        "raw.capacity",
+        "raw.account_capacity",
+        "raw.max_concurrency",
+        "raw.limits.concurrency",
+    )
+    if used is None or limit is None or limit <= 0:
+        return None
+    return used, limit
+
+
+def _capacity_is_full(used: float, limit: float) -> bool:
+    return limit > 0 and used >= limit
+
+
+def _id_key(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _group_name_for_account(account: dict, raw_group_id: object) -> str:
+    group_ids = account.get("group_ids") or []
+    group_names = account.get("group_names") or []
+    target_key = _id_key(raw_group_id)
+    for index, group_id in enumerate(group_ids):
+        if _id_key(group_id) == target_key and index < len(group_names):
+            name = group_names[index]
+            if name:
+                return str(name)
+    return target_key
 
 
 def _date_value(payload: object, *paths: str) -> date | None:
