@@ -20,6 +20,11 @@ from app.models.notification import (
     NotificationRuleState,
     NotificationSettings,
 )
+from app.models.operational_data import (
+    OperationalDataSnapshot,
+    OperationalDataSourceStatus,
+    OperationalMetricSample,
+)
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
     OrchestrationRunRecord,
@@ -574,6 +579,125 @@ class SQLiteFlowStore(FlowStore):
             connection.commit()
         return state
 
+    def save_operational_metric_samples(
+        self, samples: list[OperationalMetricSample]
+    ) -> list[OperationalMetricSample]:
+        if not samples:
+            return samples
+        with self._connect() as connection:
+            for sample in samples:
+                connection.execute(
+                    """
+                    INSERT INTO operational_metric_samples (
+                        metric_key, observed_at, collected_at, value, payload
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sample.metric_key,
+                        sample.observed_at.isoformat(),
+                        sample.collected_at.isoformat(),
+                        sample.value,
+                        sample.model_dump_json(),
+                    ),
+                )
+            connection.commit()
+        return samples
+
+    def get_latest_operational_metric_sample(
+        self, metric_key: str
+    ) -> OperationalMetricSample | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM operational_metric_samples
+            WHERE metric_key = ?
+            ORDER BY observed_at DESC, collected_at DESC, sample_id DESC
+            LIMIT 1
+            """,
+            (metric_key,),
+            OperationalMetricSample,
+        )
+
+    def save_operational_data_snapshot(
+        self, snapshot: OperationalDataSnapshot
+    ) -> OperationalDataSnapshot:
+        payload = snapshot.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO operational_data_snapshots (
+                    source_key, observed_at, collected_at, payload
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    snapshot.source_key,
+                    snapshot.observed_at.isoformat(),
+                    snapshot.collected_at.isoformat(),
+                    payload,
+                ),
+            )
+            connection.commit()
+        return snapshot
+
+    def get_latest_operational_data_snapshot(
+        self, source_key: str
+    ) -> OperationalDataSnapshot | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM operational_data_snapshots
+            WHERE source_key = ?
+            ORDER BY observed_at DESC, collected_at DESC, snapshot_id DESC
+            LIMIT 1
+            """,
+            (source_key,),
+            OperationalDataSnapshot,
+        )
+
+    def save_operational_data_source_status(
+        self, status: OperationalDataSourceStatus
+    ) -> OperationalDataSourceStatus:
+        payload = status.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO operational_data_source_statuses (
+                    source_key, status, started_at, finished_at, error_message,
+                    item_count, payload, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    status = excluded.status,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    error_message = excluded.error_message,
+                    item_count = excluded.item_count,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    status.source_key,
+                    status.status,
+                    status.started_at.isoformat(),
+                    status.finished_at.isoformat() if status.finished_at else None,
+                    status.error_message,
+                    status.item_count,
+                    payload,
+                    status.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return status
+
+    def list_operational_data_source_statuses(
+        self,
+    ) -> list[OperationalDataSourceStatus]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM operational_data_source_statuses
+            ORDER BY source_key ASC
+            """,
+            (),
+            OperationalDataSourceStatus,
+        )
+
     def save_credit_policy(self, policy: CreditRechargePolicy) -> CreditRechargePolicy:
         payload = policy.model_dump_json()
         with self._connect() as connection:
@@ -821,7 +945,6 @@ class SQLiteFlowStore(FlowStore):
                 )
                 """
             )
-            self._migrate_rotation_pool_groups_schema(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS provision_events (
@@ -971,6 +1094,55 @@ class SQLiteFlowStore(FlowStore):
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS operational_metric_samples (
+                    sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_key TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    collected_at TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_operational_metric_samples_latest
+                ON operational_metric_samples(metric_key, observed_at DESC, collected_at DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operational_data_snapshots (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_key TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    collected_at TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_operational_data_snapshots_latest
+                ON operational_data_snapshots(source_key, observed_at DESC, collected_at DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operational_data_source_statuses (
+                    source_key TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    error_message TEXT,
+                    item_count INTEGER,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS credit_recharge_policies (
                     policy_id TEXT PRIMARY KEY,
                     enabled INTEGER NOT NULL,
@@ -1051,64 +1223,6 @@ class SQLiteFlowStore(FlowStore):
         connection.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
         )
-
-    def _migrate_rotation_pool_groups_schema(self, connection: sqlite3.Connection) -> None:
-        rows = connection.execute("PRAGMA table_info(rotation_pool_groups)").fetchall()
-        columns = {row["name"] for row in rows}
-        primary_key_columns = {row["name"] for row in rows if row["pk"]}
-        if "pool_kind" in columns and primary_key_columns == {"pool_kind", "group_id_key"}:
-            return
-
-        connection.execute("ALTER TABLE rotation_pool_groups RENAME TO rotation_pool_groups_legacy")
-        connection.execute(
-            """
-            CREATE TABLE rotation_pool_groups (
-                pool_kind TEXT NOT NULL DEFAULT 'rotation',
-                group_id_key TEXT NOT NULL,
-                priority INTEGER NOT NULL,
-                group_name TEXT NOT NULL,
-                is_exclusive INTEGER NOT NULL,
-                payload TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (pool_kind, group_id_key)
-            )
-            """
-        )
-        legacy_rows = connection.execute(
-            """
-            SELECT group_id_key, priority, group_name, is_exclusive, payload, created_at, updated_at
-            FROM rotation_pool_groups_legacy
-            """
-        ).fetchall()
-        for row in legacy_rows:
-            group = RotationPoolGroup.model_validate_json(row["payload"])
-            group.pool_kind = RotationPoolKind.rotation
-            connection.execute(
-                """
-                INSERT INTO rotation_pool_groups (
-                    pool_kind,
-                    group_id_key,
-                    priority,
-                    group_name,
-                    is_exclusive,
-                    payload,
-                    created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    RotationPoolKind.rotation.value,
-                    row["group_id_key"],
-                    row["priority"],
-                    row["group_name"],
-                    row["is_exclusive"],
-                    group.model_dump_json(),
-                    row["created_at"],
-                    row["updated_at"],
-                ),
-            )
-        connection.execute("DROP TABLE rotation_pool_groups_legacy")
 
     def _load_single_flow(self, query: str, params: tuple[Any, ...]) -> ProvisionFlow | None:
         return self._load_single_model(query, params, ProvisionFlow)

@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import ACCESS_KEY_COOKIE_NAME, AuthSession, EphemeralAdminAuthManager
@@ -72,6 +73,7 @@ from app.models.schemas import (
     NotificationEvaluateRequest,
     NotificationEvaluateResponse,
     NotificationSchedulerStatusResponse,
+    OperationalDataSourceStatusResponse,
     NotificationRuleStateResponse,
     NotificationTestRequest,
     NotificationTestResponse,
@@ -103,10 +105,9 @@ from app.services.notification import (
     NotificationService,
     NotificationTestError,
     redact_settings,
-    reject_removed_keys,
 )
-from app.services.notification_collector import sub2api_registry
 from app.services.notification_delivery import NotificationDeliveryService
+from app.services.operational_data import OperationalDataCollector
 from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
 from app.services.rotation import RotationExecutionResult, RotationService
@@ -141,7 +142,11 @@ async def lifespan(app_instance: FastAPI):
         rotation_scheduler.start()
     notification_scheduler = NotificationScheduler(
         notification_service=get_notification_service(),
-        tick_seconds=settings.notification_scheduler.tick_seconds,
+        collect_interval_seconds=(
+            settings.operational_data.collect_interval_seconds
+            if settings.operational_data.enabled
+            else 0
+        ),
     )
     app_instance.state.notification_scheduler = notification_scheduler
     notification_scheduler.start()
@@ -216,7 +221,6 @@ def get_provisioning_service() -> ProvisioningService:
     return ProvisioningService(
         flow_store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
-        group_name_prefix=settings.group_name_prefix,
         openai_oauth_redirect_uri=settings.openai_oauth_redirect_uri,
         assignment_mode=settings.assignment_mode,
     )
@@ -224,10 +228,16 @@ def get_provisioning_service() -> ProvisioningService:
 
 @lru_cache(maxsize=1)
 def get_notification_service() -> NotificationService:
+    settings = get_settings()
+    store = get_flow_store()
     return NotificationService(
-        store=get_flow_store(),
-        delivery=NotificationDeliveryService(store=get_flow_store()),
-        collectors=sub2api_registry(get_sub2api_client()),
+        store=store,
+        delivery=NotificationDeliveryService(store=store),
+        operational_data_collector=OperationalDataCollector(
+            client=get_sub2api_client(),
+            store=store,
+        ),
+        expiration=settings.operational_data.expiration,
     )
 
 
@@ -1683,16 +1693,36 @@ def notifications_scheduler_status(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     scheduler = getattr(app.state, "notification_scheduler", None)
+    settings = get_settings()
     if scheduler is None:
-        settings = get_settings()
+        interval_seconds = (
+            settings.operational_data.collect_interval_seconds
+            if settings.operational_data.enabled
+            else 0
+        )
         response = NotificationSchedulerStatusResponse(
-            enabled=settings.notification_scheduler.tick_seconds > 0,
+            enabled=interval_seconds > 0,
             running=False,
-            tick_seconds=settings.notification_scheduler.tick_seconds,
+            collect_interval_seconds=interval_seconds,
+            expiration=settings.operational_data.expiration,
             tick_count=0,
+            source_statuses=[
+                OperationalDataSourceStatusResponse(**status.model_dump())
+                for status in get_flow_store().list_operational_data_source_statuses()
+            ],
         )
     else:
-        response = NotificationSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+        snapshot = scheduler.snapshot()
+        response = NotificationSchedulerStatusResponse(
+            **{
+                **snapshot.__dict__,
+                "expiration": settings.operational_data.expiration,
+                "source_statuses": [
+                    OperationalDataSourceStatusResponse(**status.model_dump())
+                    for status in snapshot.source_statuses or []
+                ],
+            }
+        )
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
@@ -1702,8 +1732,10 @@ async def notifications_config_put(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     raw = await request.json()
-    reject_removed_keys(raw)
-    payload = NotificationSettings.model_validate(raw)
+    try:
+        payload = NotificationSettings.model_validate(raw)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     settings = get_notification_service().save_config(payload)
     return JSONResponse(status_code=200, content=redact_settings(settings))
 

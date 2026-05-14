@@ -206,7 +206,7 @@ class FakeRotationSub2API:
         path = urlparse(url).path
         if method == "GET" and path == "/api/v1/admin/groups/all":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.groups})
-        if method == "GET" and path in {"/api/v1/admin/users/all", "/api/v1/admin/users"}:
+        if method == "GET" and path == "/api/v1/admin/users":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
         if method == "GET" and path.startswith("/api/v1/admin/users/") and path.endswith("/usage"):
             user_id = int(path.split("/")[5])
@@ -240,18 +240,18 @@ class FakeRotationSub2API:
             return FakeResponse(404, {"message": "user not found"})
         if method == "GET" and path == "/api/v1/admin/accounts":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.accounts})
-        if method == "POST" and path in {"/admin/groups", "/api/v1/admin/groups", "/api/admin/groups"}:
+        if method == "POST" and path == "/api/v1/admin/groups":
             self.create_group_calls += 1
             return FakeResponse(
                 200,
                 {"code": 0, "message": "success", "data": {"id": 999, "name": json["name"]}},
             )
-        if method == "POST" and path in {"/api/v1/admin/users", "/api/admin/users"}:
+        if method == "POST" and path == "/api/v1/admin/users":
             return FakeResponse(
                 200,
                 {"code": 0, "message": "success", "data": {"id": 101, "email": json["email"]}},
             )
-        if method == "PUT" and path in {"/api/v1/admin/users/101", "/api/admin/users/101/groups"}:
+        if method == "PUT" and path == "/api/v1/admin/users/101":
             self.set_user_group_calls.append(
                 {
                     "user_id": 101,
@@ -260,11 +260,7 @@ class FakeRotationSub2API:
                 }
             )
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
-        if method == "POST" and path in {
-            "/api/v1/admin/openai/generate-auth-url",
-            "/api/v1/admin/openai/oauth/url",
-            "/api/admin/openai/oauth/url",
-        }:
+        if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
             upstream_state = f"upstream-{json['state']}"
             return FakeResponse(
                 200,
@@ -280,11 +276,7 @@ class FakeRotationSub2API:
                     },
                 },
             )
-        if method == "POST" and path in {
-            "/api/v1/admin/openai/exchange-code",
-            "/api/v1/admin/openai/oauth/exchange",
-            "/api/admin/openai/oauth/exchange",
-        }:
+        if method == "POST" and path == "/api/v1/admin/openai/exchange-code":
             assert json["session_id"] == f"session-{json['state'].removeprefix('upstream-')}"
             return FakeResponse(
                 200,
@@ -298,11 +290,7 @@ class FakeRotationSub2API:
                     },
                 },
             )
-        if method == "POST" and path in {
-            "/api/v1/admin/accounts",
-            "/api/v1/admin/openai/accounts",
-            "/api/admin/openai/accounts",
-        }:
+        if method == "POST" and path == "/api/v1/admin/accounts":
             assert json["platform"] == "openai"
             assert json["type"] == "oauth"
             assert json["credentials"]["access_token"] == "token-123"
@@ -327,8 +315,6 @@ class FakeRotationSub2API:
         if method == "POST" and path in {
             "/api/v1/admin/groups/11/accounts",
             "/api/v1/admin/groups/22/accounts",
-            "/api/admin/groups/11/accounts",
-            "/api/admin/groups/22/accounts",
         }:
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "POST" and path == "/api/v1/admin/users/101/replace-group":
@@ -436,14 +422,11 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
         }
         assert json["require_oauth_only"] is False
         return FakeResponse(200, {"id": "g-1", "name": json["name"]})
-    if method == "POST" and path == "/api/admin/users":
+    if method == "POST" and path == "/api/v1/admin/users":
         return FakeResponse(200, {"id": "u-1", "email": json["email"]})
-    if method == "PUT" and path == "/api/admin/users/u-1/groups":
+    if method == "PUT" and path == "/api/v1/admin/users/u-1/groups":
         return FakeResponse(200, {"success": True})
-    if method == "POST" and path in {
-        "/api/v1/admin/openai/generate-auth-url",
-        "/api/admin/openai/oauth/url",
-    }:
+    if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
         assert "redirect_uri" not in json
         upstream_state = f"upstream-{json['state']}"
         return FakeResponse(
@@ -457,10 +440,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
                 "session_id": f"session-{json['state']}",
             },
         )
-    if method == "POST" and path in {
-        "/api/v1/admin/openai/exchange-code",
-        "/api/admin/openai/oauth/exchange",
-    }:
+    if method == "POST" and path == "/api/v1/admin/openai/exchange-code":
         assert "redirect_uri" not in json
         assert json["session_id"] == f"session-{json['state'].removeprefix('upstream-')}"
         return FakeResponse(
@@ -471,7 +451,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
                 "provider_user_id": "provider-1",
             },
         )
-    if method == "POST" and path in {"/api/v1/admin/accounts", "/api/admin/openai/accounts"}:
+    if method == "POST" and path == "/api/v1/admin/accounts":
         assert json["platform"] == "openai"
         assert json["type"] == "oauth"
         assert "email" not in json
@@ -495,7 +475,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
                 "name": json["name"],
             },
         )
-    if method == "POST" and path == "/api/admin/groups/g-1/accounts":
+    if method == "POST" and path == "/api/v1/admin/groups/g-1/accounts":
         return FakeResponse(200, {"success": True, "account_id": json["account_id"]})
     return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
 
@@ -560,29 +540,6 @@ def test_sub2api_client_create_group_uses_upstream_group_form_payload() -> None:
         "haiku_mapped_model": "gpt-5.4-mini",
         "exact_model_mappings": {},
     }
-
-
-def test_sub2api_client_create_group_falls_back_to_legacy_endpoint() -> None:
-    calls: list[str] = []
-
-    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
-        path = urlparse(url).path
-        calls.append(path)
-        if path == "/api/v1/admin/groups":
-            return FakeResponse(404, {"detail": "not found"})
-        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": "g-1"}})
-
-    client = Sub2APIClient(
-        base_url="https://sub2api.example.com",
-        admin_api_key="admin-key",
-        provisioning_defaults=Sub2APIProvisioningDefaults(),
-    )
-
-    with patch.object(requests.Session, "request", new=fake_request):
-        result = client.create_group("provision-user-example-com")
-
-    assert result["id"] == "g-1"
-    assert calls == ["/api/v1/admin/groups", "/api/admin/groups"]
 
 
 def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:

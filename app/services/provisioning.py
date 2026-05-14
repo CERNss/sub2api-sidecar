@@ -34,13 +34,11 @@ class ProvisioningService:
         self,
         flow_store: SQLiteFlowStore,
         sub2api_client: Sub2APIClient,
-        group_name_prefix: str,
         openai_oauth_redirect_uri: str,
         assignment_mode: ProvisioningAssignmentMode,
     ) -> None:
         self.flow_store = flow_store
         self.sub2api_client = sub2api_client
-        self.group_name_prefix = group_name_prefix
         self.openai_oauth_redirect_uri = openai_oauth_redirect_uri
         self.assignment_mode = assignment_mode
 

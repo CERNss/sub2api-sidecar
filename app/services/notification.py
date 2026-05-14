@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.errors import ProvisioningError
 from app.models.notification import (
-    REMOVED_ROOT_KEYS,
-    REMOVED_RULE_KEYS,
-    REMOVED_WEBHOOK_KEYS,
     CollectorSample,
     NotificationDeliveryTrigger,
     NotificationMessage,
@@ -23,7 +20,7 @@ from app.models.notification import (
     RuleDecision,
     WebhookProvider,
 )
-from app.services.notification_collector import CollectorRegistry, default_registry
+from app.models.operational_data import OperationalMetricSample
 from app.services.notification_delivery import (
     DeliveryOutcome,
     NotificationDeliveryService,
@@ -31,6 +28,10 @@ from app.services.notification_delivery import (
 from app.services.notification_evaluator import (
     evaluate_rule,
     select_sendable_receivers,
+)
+from app.services.operational_data import (
+    OperationalDataCollectionResult,
+    OperationalDataCollector,
 )
 from app.stores.sqlite import SQLiteFlowStore
 
@@ -60,11 +61,14 @@ class NotificationService:
         self,
         store: SQLiteFlowStore,
         delivery: NotificationDeliveryService,
-        collectors: CollectorRegistry | None = None,
+        operational_data_collector: OperationalDataCollector | None = None,
+        expiration: int | None = None,
     ) -> None:
         self.store = store
         self.delivery = delivery
-        self.collectors = collectors or default_registry()
+        self.operational_data_collector = operational_data_collector
+        self.expiration = expiration
+        self.last_collection_result: OperationalDataCollectionResult | None = None
 
     def load_config(self) -> NotificationSettings:
         stored = self.store.get_notification_settings()
@@ -100,11 +104,14 @@ class NotificationService:
         rule = next((rule for rule in config.rules if rule.id == rule_id), None)
         if rule is None:
             raise NotificationTestError(f"No rule found with id={rule_id}")
-        return self._evaluate(rule, config, now=now, persist=persist)
+        moment = now or datetime.now(timezone.utc)
+        self.refresh_samples(now=moment)
+        return self._evaluate(rule, config, now=moment, persist=persist)
 
     def tick(self, *, now: datetime | None = None) -> list[RuleEvaluationOutcome]:
         config = self.load_config()
         moment = now or datetime.now(timezone.utc)
+        self.refresh_samples(now=moment)
         outcomes: list[RuleEvaluationOutcome] = []
         for rule in config.rules:
             if not rule.enabled:
@@ -113,6 +120,11 @@ class NotificationService:
                 continue
             outcomes.append(self._evaluate(rule, config, now=moment, persist=True))
         return outcomes
+
+    def refresh_samples(self, *, now: datetime | None = None) -> None:
+        if self.operational_data_collector is None:
+            return
+        self.last_collection_result = self.operational_data_collector.collect(now=now)
 
     def _should_evaluate_now(self, rule: NotificationRule, now: datetime) -> bool:
         prior = self.store.get_notification_rule_state(rule.id)
@@ -132,7 +144,7 @@ class NotificationService:
         persist: bool,
     ) -> RuleEvaluationOutcome:
         moment = now or datetime.now(timezone.utc)
-        sample, reason = self.collectors.collect(rule)
+        sample, reason = self._sample_for_rule(rule, now=moment)
         prior_state = self.store.get_notification_rule_state(rule.id)
         decision = evaluate_rule(
             rule,
@@ -159,6 +171,28 @@ class NotificationService:
             deliveries = [self.delivery.deliver(receiver, message) for receiver in sendable]
 
         return RuleEvaluationOutcome(rule=rule, decision=decision, deliveries=deliveries)
+
+    def _sample_for_rule(
+        self, rule: NotificationRule, *, now: datetime
+    ) -> tuple[CollectorSample | None, str | None]:
+        sample_record = self.store.get_latest_operational_metric_sample(rule.signal_key)
+        if sample_record is None:
+            return None, f"no local sample found for signal '{rule.signal_key}'"
+        if self._sample_is_expired(sample_record, now=now):
+            return None, (
+                f"latest local sample for signal '{rule.signal_key}' is expired "
+                f"(observed_at={sample_record.observed_at.isoformat()})"
+            )
+        return sample_record.collector_sample(), None
+
+    def _sample_is_expired(
+        self, sample: OperationalMetricSample, *, now: datetime
+    ) -> bool:
+        if self.expiration is None:
+            return False
+        observed_at = _ensure_aware(sample.observed_at)
+        moment = _ensure_aware(now)
+        return moment - observed_at > timedelta(seconds=self.expiration)
 
     def _summary_for(self, decision: RuleDecision, rule: NotificationRule) -> str:
         if decision.action == NotificationRuleAction.recover:
@@ -242,38 +276,6 @@ class NotificationService:
         return settings.model_copy(update={"webhooks": webhooks})
 
 
-def reject_removed_keys(payload: Any) -> None:
-    """Raise NotificationConfigError if the inbound payload contains any field that was
-    removed by the `simplify-alert-center` change. Persisted documents may still carry
-    those keys (we drop them on load); but inbound API writes must come from a
-    compatible client.
-    """
-    if not isinstance(payload, dict):
-        raise NotificationConfigError("Notification settings payload must be an object")
-    bad_root = [key for key in payload if key in REMOVED_ROOT_KEYS]
-    if bad_root:
-        raise NotificationConfigError(
-            f"Unsupported field(s): {', '.join(sorted(bad_root))}. "
-            "Upgrade the dashboard client; the alert center no longer accepts this field."
-        )
-    for webhook in payload.get("webhooks", []) or []:
-        if not isinstance(webhook, dict):
-            continue
-        bad = [key for key in webhook if key in REMOVED_WEBHOOK_KEYS]
-        if bad:
-            raise NotificationConfigError(
-                f"Unsupported webhook field(s): {', '.join(sorted(bad))}."
-            )
-    for rule in payload.get("rules", []) or []:
-        if not isinstance(rule, dict):
-            continue
-        bad = [key for key in rule if key in REMOVED_RULE_KEYS]
-        if bad:
-            raise NotificationConfigError(
-                f"Unsupported rule field(s): {', '.join(sorted(bad))}."
-            )
-
-
 def _default_receiver() -> NotificationWebhook:
     return NotificationWebhook(
         id=DEFAULT_RECEIVER_ID,
@@ -315,11 +317,16 @@ def _rule_payload_template(rule: NotificationRule) -> dict[str, Any]:
     }
 
 
+def _ensure_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 __all__ = [
     "NotificationConfigError",
     "NotificationService",
     "NotificationTestError",
     "RuleEvaluationOutcome",
     "redact_settings",
-    "reject_removed_keys",
 ]

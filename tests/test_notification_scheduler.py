@@ -18,6 +18,11 @@ from app.models.notification import (
     NotificationWebhook,
     WebhookProvider,
 )
+from app.models.operational_data import OperationalDataSourceStatus, OperationalMetricSample
+from app.services.operational_data import (
+    OperationalDataCollectionResult,
+    OperationalDataCollector,
+)
 from app.services.notification_collector import (
     CollectorRegistry,
     KNOWN_SIGNAL_KEYS,
@@ -40,6 +45,7 @@ def login(client) -> None:
 def _rule(
     *,
     rule_id: str = "r1",
+    signal_key: str = "account_invalid",
     threshold: str = "10",
     operator: NotificationOperator = NotificationOperator.gte,
     for_minutes: int = 0,
@@ -51,7 +57,7 @@ def _rule(
     return NotificationRule(
         id=rule_id,
         name=rule_id,
-        signalKey="account_invalid",
+        signalKey=signal_key,
         severity=NotificationSeverity.warning,
         operator=operator,
         threshold=threshold,
@@ -77,6 +83,58 @@ def _settings(rules: list[NotificationRule]) -> NotificationSettings:
             )
         ],
         rules=rules,
+    )
+
+
+class _FakeOperationalDataCollector:
+    def __init__(
+        self,
+        samples: list[OperationalMetricSample] | None = None,
+    ) -> None:
+        self.samples = samples or []
+        self.calls = 0
+
+    def collect(self, *, now=None) -> OperationalDataCollectionResult:
+        self.calls += 1
+        moment = now or datetime.now(timezone.utc)
+        main.get_flow_store().save_operational_metric_samples(self.samples)
+        status = OperationalDataSourceStatus(
+            source_key="accounts",
+            status="succeeded",
+            started_at=moment,
+            finished_at=moment,
+            item_count=3,
+            updated_at=moment,
+        )
+        main.get_flow_store().save_operational_data_source_status(status)
+        return OperationalDataCollectionResult(
+            samples=self.samples,
+            source_statuses=[status],
+            started_at=moment,
+            finished_at=moment,
+        )
+
+
+def _install_fake_pipeline(
+    samples: list[OperationalMetricSample] | None = None,
+) -> _FakeOperationalDataCollector:
+    collector = _FakeOperationalDataCollector(samples)
+    main.get_notification_service().operational_data_collector = collector
+    return collector
+
+
+def _metric_sample(
+    metric_key: str = "account_invalid",
+    value: float = 20,
+    *,
+    observed_at: datetime | None = None,
+) -> OperationalMetricSample:
+    moment = observed_at or datetime.now(timezone.utc)
+    return OperationalMetricSample(
+        metric_key=metric_key,
+        value=value,
+        observed_at=moment,
+        collected_at=moment,
     )
 
 
@@ -128,6 +186,9 @@ class _FakeSub2APIClient:
             {"id": "u1", "email": "a@example.com", "balance": 10},
             {"id": "u2", "email": "b@example.com", "balance": 3},
         ]
+
+    def list_groups(self, platform=None):
+        return [{"id": "g1", "name": "Group One", "status": "active"}]
 
     def get_usage_stats(self, *, user_id, start_date, end_date, timezone_name):
         if str(start_date) == "2026-05-10":
@@ -239,6 +300,88 @@ def test_collector_registry_swallows_collector_exceptions() -> None:
     assert "raised" in reason
 
 
+# --- Notification pipeline collector ---
+
+
+def test_operational_data_collector_collects_sources_in_order_and_persists_samples(client) -> None:
+    class _RecordingClient(_FakeSub2APIClient):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def list_openai_accounts(self):
+            self.calls.append("accounts")
+            return super().list_openai_accounts()
+
+        def list_groups(self, platform=None):
+            self.calls.append(f"groups:{platform}")
+            return super().list_groups(platform=platform)
+
+        def list_users(self):
+            self.calls.append("users")
+            return super().list_users()
+
+        def get_usage_stats(self, *, user_id, start_date, end_date, timezone_name):
+            self.calls.append(f"usage:{start_date}")
+            return super().get_usage_stats(
+                user_id=user_id,
+                start_date=start_date,
+                end_date=end_date,
+                timezone_name=timezone_name,
+            )
+
+    api_client = _RecordingClient()
+    collector = OperationalDataCollector(
+        client=api_client,
+        store=main.get_flow_store(),
+    )
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+    result = collector.collect(now=now)
+
+    assert api_client.calls == [
+        "accounts",
+        "groups:openai",
+        "users",
+        "usage:2026-05-10",
+        "usage:2026-05-09",
+    ]
+    assert result.error_message is None
+    assert result.sampled_signal_count > 1
+    assert {status.source_key for status in result.source_statuses} == {
+        "accounts",
+        "groups",
+        "users",
+        "usage_current_day",
+        "usage_previous_day",
+    }
+    latest = main.get_flow_store().get_latest_operational_metric_sample("account_invalid")
+    assert latest is not None
+    assert latest.value == 1
+    snapshot = main.get_flow_store().get_latest_operational_data_snapshot("accounts")
+    assert snapshot is not None
+    assert isinstance(snapshot.payload, list)
+
+
+def test_operational_data_collector_records_source_failures(client) -> None:
+    class _FailingGroupsClient(_FakeSub2APIClient):
+        def list_groups(self, platform=None):
+            raise RuntimeError("groups unavailable")
+
+    collector = OperationalDataCollector(
+        client=_FailingGroupsClient(),
+        store=main.get_flow_store(),
+    )
+
+    result = collector.collect(now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc))
+
+    statuses = {status.source_key: status for status in result.source_statuses}
+    assert statuses["groups"].status == "failed"
+    assert statuses["groups"].error_message is not None
+    assert "groups unavailable" in statuses["groups"].error_message
+    assert result.error_message is not None
+    assert main.get_flow_store().get_latest_operational_metric_sample("account_invalid")
+
+
 # --- Evaluator ---
 
 
@@ -322,7 +465,7 @@ def test_tick_dispatches_fire_to_sendable_receiver(client) -> None:
     main.get_flow_store().save_notification_settings(settings)
 
     service = main.get_notification_service()
-    service.collectors.register("account_invalid", lambda rule: CollectorSample(value=99))
+    collector = _install_fake_pipeline([_metric_sample(value=99)])
 
     sent: list[dict[str, Any]] = []
 
@@ -338,6 +481,7 @@ def test_tick_dispatches_fire_to_sendable_receiver(client) -> None:
         outcomes = service.tick()
 
     assert len(outcomes) == 1
+    assert collector.calls == 1
     assert outcomes[0].decision.action == NotificationRuleAction.fire
     assert sent and sent[0]["url"] == "https://hooks.example.com/incoming"
 
@@ -354,17 +498,12 @@ def test_tick_skips_disabled_rules(client) -> None:
     main.get_flow_store().save_notification_settings(settings)
 
     service = main.get_notification_service()
-    called = {"count": 0}
-
-    def collector(rule):
-        called["count"] += 1
-        return CollectorSample(value=99)
-
-    service.collectors.register("account_invalid", collector)
+    collector = _install_fake_pipeline([_metric_sample(value=99)])
     outcomes = service.tick()
 
     assert outcomes == []
-    assert called["count"] == 0
+    assert collector.calls == 1
+    assert main.get_flow_store().get_notification_rule_state("r1") is None
 
 
 def test_tick_respects_read_interval(client) -> None:
@@ -373,7 +512,7 @@ def test_tick_respects_read_interval(client) -> None:
     main.get_flow_store().save_notification_settings(settings)
 
     service = main.get_notification_service()
-    service.collectors.register("account_invalid", lambda rule: CollectorSample(value=1))
+    collector = _install_fake_pipeline([_metric_sample(value=1)])
 
     now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
     service.tick(now=now)
@@ -382,6 +521,33 @@ def test_tick_respects_read_interval(client) -> None:
         outcomes = service.tick(now=now + timedelta(minutes=3))
 
     assert outcomes == []
+    assert collector.calls == 2
+
+
+def test_tick_refreshes_samples_once_for_multiple_rules(client) -> None:
+    login(client)
+    settings = _settings(
+        [
+            _rule(rule_id="r1", threshold="10", for_minutes=0, read_interval_minutes=1),
+            _rule(rule_id="r2", threshold="10", for_minutes=0, read_interval_minutes=1),
+        ]
+    )
+    main.get_flow_store().save_notification_settings(settings)
+    collector = _install_fake_pipeline([_metric_sample(value=99)])
+
+    class _OkResp:
+        status_code = 200
+        text = "ok"
+
+    def fake_request(self, method, url, data=None, headers=None, timeout=None):
+        return _OkResp()
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        outcomes = main.get_notification_service().tick()
+
+    assert collector.calls == 1
+    assert [outcome.rule.id for outcome in outcomes] == ["r1", "r2"]
+    assert all(outcome.decision.action == NotificationRuleAction.fire for outcome in outcomes)
 
 
 def test_notification_scheduler_runs_startup_tick_and_reports_snapshot() -> None:
@@ -394,7 +560,7 @@ def test_notification_scheduler_runs_startup_tick_and_reports_snapshot() -> None
             return []
 
     service = _FakeService()
-    scheduler = NotificationScheduler(service, tick_seconds=60)
+    scheduler = NotificationScheduler(service, collect_interval_seconds=60)
 
     scheduler.start()
     snapshot = scheduler.snapshot()
@@ -402,7 +568,7 @@ def test_notification_scheduler_runs_startup_tick_and_reports_snapshot() -> None
 
     assert service.calls == 1
     assert snapshot.enabled is True
-    assert snapshot.tick_seconds == 60
+    assert snapshot.collect_interval_seconds == 60
     assert snapshot.tick_count == 1
     assert snapshot.last_tick_started_at is not None
     assert snapshot.last_tick_error is None
@@ -412,13 +578,60 @@ def test_evaluate_once_returns_no_data_when_collector_has_no_data(client) -> Non
     login(client)
     settings = _settings([_rule(threshold="10", for_minutes=0)])
     main.get_flow_store().save_notification_settings(settings)
-    main.get_notification_service().collectors.register("account_invalid", lambda rule: None)
+    _install_fake_pipeline([])
 
     outcome = main.get_notification_service().evaluate_once("r1")
 
     assert outcome.decision.action == NotificationRuleAction.no_data
-    assert "returned no data" in outcome.decision.next_state.last_error
+    assert "no local sample found" in outcome.decision.next_state.last_error
     assert outcome.deliveries == []
+
+
+def test_evaluate_once_does_not_expire_samples_when_expiration_unset(client) -> None:
+    login(client)
+    settings = _settings([_rule(threshold="10", for_minutes=0, target_ids=())])
+    main.get_flow_store().save_notification_settings(settings)
+    service = main.get_notification_service()
+    service.expiration = None
+    _install_fake_pipeline(
+        [
+            _metric_sample(
+                value=20,
+                observed_at=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc),
+            )
+        ]
+    )
+
+    outcome = service.evaluate_once(
+        "r1",
+        now=datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert outcome.decision.action == NotificationRuleAction.fire
+
+
+def test_evaluate_once_returns_no_data_when_sample_is_expired(client) -> None:
+    login(client)
+    settings = _settings([_rule(threshold="10", for_minutes=0)])
+    main.get_flow_store().save_notification_settings(settings)
+    service = main.get_notification_service()
+    service.expiration = 180
+    _install_fake_pipeline(
+        [
+            _metric_sample(
+                value=20,
+                observed_at=datetime(2026, 5, 10, 11, 0, tzinfo=timezone.utc),
+            )
+        ]
+    )
+
+    outcome = service.evaluate_once(
+        "r1",
+        now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert outcome.decision.action == NotificationRuleAction.no_data
+    assert "expired" in outcome.decision.next_state.last_error
 
 
 # --- POST /notifications/evaluate ---
@@ -438,8 +651,10 @@ def test_scheduler_status_endpoint_reports_disabled_scheduler(client) -> None:
     payload = response.json()
     assert payload["enabled"] is False
     assert payload["running"] is False
-    assert payload["tick_seconds"] == 0
+    assert payload["collect_interval_seconds"] == 0
+    assert payload["expiration"] is None
     assert payload["tick_count"] == 0
+    assert payload["source_statuses"] == []
 
 
 def test_evaluate_endpoint_requires_auth(client) -> None:
@@ -458,9 +673,7 @@ def test_evaluate_endpoint_returns_decision_and_state(client) -> None:
     login(client)
     settings = _settings([_rule(threshold="10", for_minutes=0)])
     main.get_flow_store().save_notification_settings(settings)
-    main.get_notification_service().collectors.register(
-        "account_invalid", lambda rule: CollectorSample(value=20)
-    )
+    _install_fake_pipeline([_metric_sample(value=20)])
 
     sent: list[dict[str, Any]] = []
 

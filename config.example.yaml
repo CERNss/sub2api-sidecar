@@ -48,9 +48,6 @@ sub2api:
         description: 服务不可用 - 暂停 30 分钟
 
 provisioning:
-  # Dedicated provisioning now uses the raw email as the Sub2API group name.
-  # This legacy prefix setting is kept for config compatibility.
-  group_name_prefix: openai-oauth-
   assignment_mode: dedicated
 
 auto_rotation:
@@ -67,6 +64,7 @@ auto_rotation:
 credit_control:
   recharge_tick_seconds: 60
 
-notifications:
-  # Set to 0 to disable background alert evaluation.
-  scheduler_tick_seconds: 60
+operational_data:
+  enabled: true
+  collect_interval_seconds: 60
+  # expiration: 180

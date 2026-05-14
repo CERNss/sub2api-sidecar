@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
@@ -25,75 +25,23 @@ class Sub2APIAuthError(Sub2APIError):
 
 
 class Sub2APIClient:
-    """
-    Thin admin API wrapper.
+    """Thin admin API wrapper for the Sub2API admin API paths used by sidecar."""
 
-    IMPORTANT:
-    The exact Sub2API admin endpoints and some OAuth payload field names may differ between deployments.
-    Keep any future adjustments inside this client so controllers/services remain stable.
-    """
-
-    CREATE_GROUP_PATHS = ("/api/v1/admin/groups", "/api/admin/groups", "/admin/groups")
-    UPDATE_API_KEY_GROUP_PATHS = ("/api/v1/admin/api-keys/{key_id}",)
-    REPLACE_EXCLUSIVE_GROUP_PATHS = (
-        "/api/v1/admin/users/{user_id}/replace-group",
-        "/api/admin/users/{user_id}/replace-group",
-        "/admin/users/{user_id}/replace-group",
-    )
-    LIST_GROUPS_PATHS = (
-        "/api/v1/admin/groups/all",
-        "/api/v1/admin/groups",
-        "/api/admin/groups/all",
-        "/api/admin/groups",
-        "/admin/groups/all",
-        "/admin/groups",
-    )
-    LIST_USERS_PATHS = (
-        "/api/v1/admin/users",
-        "/api/v1/admin/users/all",
-        "/api/admin/users",
-        "/api/admin/users/all",
-        "/admin/users",
-        "/admin/users/all",
-    )
-    LIST_OPENAI_ACCOUNTS_PATHS = (
-        "/api/v1/admin/accounts",
-        "/api/v1/admin/accounts/all",
-        "/api/admin/accounts",
-        "/admin/accounts",
-        "/api/v1/admin/openai/accounts",
-        "/api/v1/admin/openai/accounts/all",
-        "/api/admin/openai/accounts",
-        "/admin/openai/accounts",
-    )
-    USER_API_KEYS_PATHS = ("/api/v1/admin/users/{user_id}/api-keys",)
-    USER_USAGE_PATHS = ("/api/v1/admin/users/{user_id}/usage",)
-    UPDATE_USER_BALANCE_PATHS = ("/api/v1/admin/users/{user_id}/balance",)
-    USAGE_STATS_PATHS = ("/api/v1/admin/usage/stats",)
-    GENERATE_OPENAI_AUTH_URL_PATHS = (
-        "/api/v1/admin/openai/generate-auth-url",
-        "/api/v1/admin/openai/oauth/url",
-        "/api/admin/openai/oauth/url",
-        "/admin/openai/oauth/url",
-    )
-    EXCHANGE_OPENAI_CODE_PATHS = (
-        "/api/v1/admin/openai/exchange-code",
-        "/api/v1/admin/openai/oauth/exchange",
-        "/api/admin/openai/oauth/exchange",
-        "/admin/openai/oauth/exchange",
-    )
-    CREATE_OPENAI_ACCOUNT_PATHS = (
-        "/api/v1/admin/accounts",
-        "/api/v1/admin/openai/accounts",
-        "/api/admin/openai/accounts",
-        "/admin/openai/accounts",
-    )
-    BIND_ACCOUNT_TO_GROUP_PATHS = (
-        "/api/v1/admin/groups/{group_id}/accounts",
-        "/api/admin/groups/{group_id}/accounts",
-        "/admin/groups/{group_id}/accounts",
-    )
-    CURRENT_USER_PATHS = ("/api/v1/auth/me", "/api/auth/me", "/auth/me")
+    CURRENT_USER_PATH = "/api/v1/auth/me"
+    CREATE_GROUP_PATH = "/api/v1/admin/groups"
+    UPDATE_API_KEY_GROUP_PATH = "/api/v1/admin/api-keys/{key_id}"
+    REPLACE_EXCLUSIVE_GROUP_PATH = "/api/v1/admin/users/{user_id}/replace-group"
+    LIST_GROUPS_PATH = "/api/v1/admin/groups/all"
+    LIST_USERS_PATH = "/api/v1/admin/users"
+    LIST_OPENAI_ACCOUNTS_PATH = "/api/v1/admin/accounts"
+    USER_API_KEYS_PATH = "/api/v1/admin/users/{user_id}/api-keys"
+    USER_USAGE_PATH = "/api/v1/admin/users/{user_id}/usage"
+    UPDATE_USER_BALANCE_PATH = "/api/v1/admin/users/{user_id}/balance"
+    USAGE_STATS_PATH = "/api/v1/admin/usage/stats"
+    GENERATE_OPENAI_AUTH_URL_PATH = "/api/v1/admin/openai/generate-auth-url"
+    EXCHANGE_OPENAI_CODE_PATH = "/api/v1/admin/openai/exchange-code"
+    CREATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts"
+    BIND_ACCOUNT_TO_GROUP_PATH = "/api/v1/admin/groups/{group_id}/accounts"
 
     def __init__(
         self,
@@ -119,9 +67,9 @@ class Sub2APIClient:
         if not token:
             raise Sub2APIAuthError("Sub2API token is required", status_code=401)
 
-        data = self._request_candidates_without_admin_key(
+        data = self._request_without_admin_key(
             "GET",
-            self.CURRENT_USER_PATHS,
+            self.CURRENT_USER_PATH,
             headers={"Authorization": f"Bearer {token}"},
         )
         profile = self._unwrap_data(data)
@@ -136,18 +84,7 @@ class Sub2APIClient:
 
     def create_group(self, name: str) -> dict[str, Any]:
         payload = self._build_group_payload(name)
-        try:
-            data = self._request_candidates("POST", self.CREATE_GROUP_PATHS, json=payload)
-        except Sub2APIError as exc:
-            existing = self._find_group_by_name(name)
-            if existing is None or not self._may_reuse_existing_group(exc):
-                raise
-            logger.warning("Reusing existing Sub2API group after create failure: %s", name)
-            return {
-                "id": self._extract_id(existing, "id", "group_id"),
-                "name": str(existing.get("name") or existing.get("group_name") or name),
-                "raw": existing,
-            }
+        data = self._request("POST", self.CREATE_GROUP_PATH, json=payload)
         body = self._unwrap_data(data)
         group_id = self._extract_id(
             body,
@@ -162,10 +99,8 @@ class Sub2APIClient:
 
     def update_api_key_group(self, *, key_id: Any, group_id: Any) -> dict[str, Any]:
         payload = {"group_id": group_id}
-        path_candidates = tuple(
-            path.format(key_id=key_id) for path in self.UPDATE_API_KEY_GROUP_PATHS
-        )
-        data = self._request_candidates("PUT", path_candidates, json=payload)
+        path = self.UPDATE_API_KEY_GROUP_PATH.format(key_id=key_id)
+        data = self._request("PUT", path, json=payload)
         return {"key_id": key_id, "group_id": group_id, "raw": data}
 
     def replace_exclusive_user_group(
@@ -176,10 +111,8 @@ class Sub2APIClient:
         new_group_id: Any,
     ) -> dict[str, Any]:
         payload = {"old_group_id": old_group_id, "new_group_id": new_group_id}
-        path_candidates = tuple(
-            path.format(user_id=user_id) for path in self.REPLACE_EXCLUSIVE_GROUP_PATHS
-        )
-        data = self._request_candidates("POST", path_candidates, json=payload)
+        path = self.REPLACE_EXCLUSIVE_GROUP_PATH.format(user_id=user_id)
+        data = self._request("POST", path, json=payload)
         body = self._unwrap_data(data)
         migrated_keys = self._extract_value(
             body,
@@ -196,53 +129,33 @@ class Sub2APIClient:
         }
 
     def list_groups(self, platform: str | None = None) -> list[dict[str, Any]]:
-        last_error: Sub2APIError | None = None
         params = {"platform": platform} if platform else None
-        for path in self.LIST_GROUPS_PATHS:
-            try:
-                data = self._request("GET", path, params=params)
-                return self._parse_group_list(data)
-            except Sub2APIError as exc:
-                last_error = exc
-                if exc.status_code == 404:
-                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
-                    continue
-                raise
-        raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
+        data = self._request("GET", self.LIST_GROUPS_PATH, params=params)
+        return self._parse_group_list(data)
 
     def list_users(self, email: str | None = None) -> list[dict[str, Any]]:
-        last_error: Sub2APIError | None = None
         params: dict[str, Any] = {"page": 1, "page_size": 1000}
         if email:
             params["email"] = email
-        for path in self.LIST_USERS_PATHS:
-            try:
-                data = self._request("GET", path, params=params)
-                users = self._parse_user_list(data)
-                if email:
-                    needle = email.lower()
-                    users = [
-                        user
-                        for user in users
-                        if needle in str(user.get("email") or "").lower()
-                        or needle in str(user.get("username") or "").lower()
-                        or needle in str(user.get("display_name") or "").lower()
-                        or needle in str(user.get("name") or "").lower()
-                    ]
-                return users
-            except Sub2APIError as exc:
-                last_error = exc
-                if exc.status_code == 404:
-                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
-                    continue
-                raise
-        raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
+        data = self._request("GET", self.LIST_USERS_PATH, params=params)
+        users = self._parse_user_list(data)
+        if email:
+            needle = email.lower()
+            users = [
+                user
+                for user in users
+                if needle in str(user.get("email") or "").lower()
+                or needle in str(user.get("username") or "").lower()
+                or needle in str(user.get("display_name") or "").lower()
+                or needle in str(user.get("name") or "").lower()
+            ]
+        return users
 
     def get_user_api_keys(self, user_id: Any, page_size: int = 1000) -> dict[str, Any]:
-        path_candidates = tuple(path.format(user_id=user_id) for path in self.USER_API_KEYS_PATHS)
-        data = self._request_candidates(
+        path = self.USER_API_KEYS_PATH.format(user_id=user_id)
+        data = self._request(
             "GET",
-            path_candidates,
+            path,
             params={"page": 1, "page_size": page_size},
         )
         envelope = self._unwrap_data(data)
@@ -256,8 +169,8 @@ class Sub2APIClient:
         return {"items": items, "total": total, "raw": data}
 
     def get_user_usage(self, user_id: Any, period: str) -> dict[str, Any]:
-        path_candidates = tuple(path.format(user_id=user_id) for path in self.USER_USAGE_PATHS)
-        data = self._request_candidates("GET", path_candidates, params={"period": period})
+        path = self.USER_USAGE_PATH.format(user_id=user_id)
+        data = self._request("GET", path, params={"period": period})
         body = self._unwrap_data(data)
         if not isinstance(body, dict):
             raise Sub2APIError("Sub2API user usage response is not an object")
@@ -276,10 +189,8 @@ class Sub2APIClient:
             "operation": operation,
             "notes": notes or "",
         }
-        path_candidates = tuple(
-            path.format(user_id=user_id) for path in self.UPDATE_USER_BALANCE_PATHS
-        )
-        data = self._request_candidates("POST", path_candidates, json=payload)
+        path = self.UPDATE_USER_BALANCE_PATH.format(user_id=user_id)
+        data = self._request("POST", path, json=payload)
         body = self._unwrap_data(data)
         user_body = body if isinstance(body, dict) else data
         return {
@@ -296,26 +207,8 @@ class Sub2APIClient:
         }
 
     def list_openai_accounts(self) -> list[dict[str, Any]]:
-        last_error: Sub2APIError | None = None
-        for path in self.LIST_OPENAI_ACCOUNTS_PATHS:
-            try:
-                data = self._request("GET", path)
-                return self._parse_account_list(data)
-            except Sub2APIError as exc:
-                last_error = exc
-                if exc.status_code in {404, 405}:
-                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
-                    continue
-                logger.warning("Sub2API account list path failed, trying next candidate: %s", path)
-                continue
-            except ValueError as exc:
-                last_error = Sub2APIError(str(exc))
-                logger.warning("Sub2API account list response could not be parsed: %s", path)
-                continue
-        logger.warning("No Sub2API account list path succeeded; returning empty account list")
-        if last_error:
-            logger.debug("Last account list error: %s", last_error)
-        return []
+        data = self._request("GET", self.LIST_OPENAI_ACCOUNTS_PATH)
+        return self._parse_account_list(data)
 
     def get_usage_stats(
         self,
@@ -331,7 +224,7 @@ class Sub2APIClient:
             "end_date": end_date.isoformat(),
             "timezone": timezone_name,
         }
-        data = self._request_candidates("GET", self.USAGE_STATS_PATHS, params=params)
+        data = self._request("GET", self.USAGE_STATS_PATH, params=params)
         body = self._unwrap_data(data)
         if not isinstance(body, dict):
             raise Sub2APIError("Sub2API usage stats response is not an object")
@@ -355,7 +248,7 @@ class Sub2APIClient:
             params["end_date"] = end_date.isoformat()
         if timezone_name is not None:
             params["timezone"] = timezone_name
-        data = self._request_candidates("GET", self.USAGE_STATS_PATHS, params=params)
+        data = self._request("GET", self.USAGE_STATS_PATH, params=params)
         body = self._unwrap_data(data)
         if not isinstance(body, dict):
             raise Sub2APIError("Sub2API account usage stats response is not an object")
@@ -365,9 +258,7 @@ class Sub2APIClient:
         payload = {
             "state": state,
         }
-        data = self._request_candidates(
-            "POST", self.GENERATE_OPENAI_AUTH_URL_PATHS, json=payload
-        )
+        data = self._request("POST", self.GENERATE_OPENAI_AUTH_URL_PATH, json=payload)
         body = self._unwrap_data(data)
         auth_url = self._extract_value(
             body,
@@ -422,9 +313,7 @@ class Sub2APIClient:
         }
         if session_id:
             payload["session_id"] = session_id
-        data = self._request_candidates(
-            "POST", self.EXCHANGE_OPENAI_CODE_PATHS, json=payload
-        )
+        data = self._request("POST", self.EXCHANGE_OPENAI_CODE_PATH, json=payload)
         body = self._unwrap_data(data)
         return {"exchange": body if isinstance(body, dict) else data, "raw": data}
 
@@ -439,9 +328,7 @@ class Sub2APIClient:
             oauth_payload=oauth_payload,
             group_id=group_id,
         )
-        data = self._request_candidates(
-            "POST", self.CREATE_OPENAI_ACCOUNT_PATHS, json=payload
-        )
+        data = self._request("POST", self.CREATE_OPENAI_ACCOUNT_PATH, json=payload)
         body = self._unwrap_data(data)
         account_id = self._extract_id(
             body,
@@ -456,33 +343,9 @@ class Sub2APIClient:
 
     def bind_account_to_group(self, account_id: Any, group_id: Any) -> dict[str, Any]:
         payload = {"account_id": account_id, "account_ids": [account_id]}
-        path_candidates = tuple(
-            path.format(group_id=group_id) for path in self.BIND_ACCOUNT_TO_GROUP_PATHS
-        )
-        data = self._request_candidates("POST", path_candidates, json=payload)
+        path = self.BIND_ACCOUNT_TO_GROUP_PATH.format(group_id=group_id)
+        data = self._request("POST", path, json=payload)
         return {"account_id": account_id, "group_id": group_id, "raw": data}
-
-    def _find_group_by_name(self, name: str) -> dict[str, Any] | None:
-        try:
-            for group in self.list_groups(platform=self.provisioning_defaults.group_platform):
-                if str(group.get("name") or "").lower() == name.lower():
-                    return group
-        except Exception as exc:
-            logger.warning("Could not look up existing Sub2API group by name=%s: %s", name, exc)
-        return None
-
-    def _may_reuse_existing_group(self, exc: Sub2APIError) -> bool:
-        message = str(exc).lower()
-        return exc.status_code in {409, 422, 500} or any(
-            marker in message
-            for marker in (
-                "duplicate",
-                "already exists",
-                "exists",
-                "unique",
-                "internal error",
-            )
-        )
 
     def _build_group_payload(self, name: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1232,47 +1095,6 @@ class Sub2APIClient:
         if value is None:
             return False
         return bool(value)
-
-    def _request_candidates(
-        self,
-        method: str,
-        paths: Iterable[str],
-        *,
-        json: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        last_error: Sub2APIError | None = None
-        for path in paths:
-            try:
-                return self._request(method, path, json=json, params=params)
-            except Sub2APIError as exc:
-                last_error = exc
-                if exc.status_code == 404:
-                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
-                    continue
-                raise
-
-        raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
-
-    def _request_candidates_without_admin_key(
-        self,
-        method: str,
-        paths: Iterable[str],
-        *,
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        last_error: Sub2APIError | None = None
-        for path in paths:
-            try:
-                return self._request_without_admin_key(method, path, headers=headers)
-            except Sub2APIError as exc:
-                last_error = exc
-                if exc.status_code == 404:
-                    logger.warning("Sub2API path not found, trying next candidate: %s", path)
-                    continue
-                raise
-
-        raise last_error or Sub2APIError("No candidate Sub2API path succeeded")
 
     def _request(
         self,

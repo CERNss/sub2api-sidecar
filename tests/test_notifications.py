@@ -235,7 +235,7 @@ def test_notification_config_rejects_unknown_target_id(client) -> None:
     assert "unknown receiver ids" in response.json()["detail"]
 
 
-def test_notification_config_rejects_legacy_policy_block(client) -> None:
+def test_notification_config_rejects_unknown_root_fields(client) -> None:
     login(client)
     body = {
         "webhooks": [_webhook_body()],
@@ -247,7 +247,7 @@ def test_notification_config_rejects_legacy_policy_block(client) -> None:
     assert "policy" in response.json()["detail"]
 
 
-def test_notification_config_rejects_legacy_rule_fields(client) -> None:
+def test_notification_config_rejects_unknown_rule_fields(client) -> None:
     login(client)
     body = {
         "webhooks": [_webhook_body()],
@@ -258,7 +258,7 @@ def test_notification_config_rejects_legacy_rule_fields(client) -> None:
     assert "recoveryThreshold" in response.json()["detail"]
 
 
-def test_notification_config_rejects_legacy_webhook_fields(client) -> None:
+def test_notification_config_rejects_unknown_webhook_fields(client) -> None:
     login(client)
     body = {
         "webhooks": [_webhook_body(mentionOnFailure=True)],
@@ -269,58 +269,26 @@ def test_notification_config_rejects_legacy_webhook_fields(client) -> None:
     assert "mentionOnFailure" in response.json()["detail"]
 
 
-def test_notification_config_tolerates_legacy_persisted_keys_on_read(client) -> None:
-    """A document saved before the simplify-alert-center change still loads;
-    removed keys are dropped silently."""
+def test_notification_config_receiver_only_returns_empty_rules(client) -> None:
     login(client)
-    legacy_raw = {
-        "webhooks": [_webhook_body(secret="kept", mentionOnFailure=True)],
-        "rules": [
-            _rule_body(
-                recoveryThreshold="0",
-                warningThreshold="1",
-                aggregation="sum",
-                evaluationWindowMinutes=10,
+    settings = NotificationSettings(
+        webhooks=[
+            NotificationWebhook(
+                id="ops",
+                name="Ops",
+                enabled=True,
+                provider=WebhookProvider.generic,
+                url="https://hooks.example.com/incoming",
             )
-        ],
-        "policy": {"groupBy": "severity", "quietHoursEnabled": True},
-    }
-    # Use model_validate (which respects extra="ignore") to simulate hydrating from store.
-    settings = NotificationSettings.model_validate(legacy_raw)
+        ]
+    )
     main.get_flow_store().save_notification_settings(settings)
 
     response = client.get("/notifications/config")
     assert response.status_code == 200
     payload = response.json()
-    assert "policy" not in payload
-    assert "mentionOnFailure" not in payload["webhooks"][0]
-    assert "recoveryThreshold" not in payload["rules"][0]
-    assert "aggregation" not in payload["rules"][0]
-    assert payload["webhooks"][0]["secret"] == "[redacted]"
-
-
-def test_notification_legacy_receiver_only_returns_empty_rules(client) -> None:
-    """Previously the system synthesised default rules for legacy receiver-only docs.
-    After simplify-alert-center we return the saved shape without injecting rules."""
-    login(client)
-    legacy = NotificationSettings(
-        webhooks=[
-            NotificationWebhook(
-                id="legacy",
-                name="Legacy",
-                enabled=True,
-                provider=WebhookProvider.generic,
-                url="https://legacy.example.com/hook",
-            )
-        ]
-    )
-    main.get_flow_store().save_notification_settings(legacy)
-
-    response = client.get("/notifications/config")
-    assert response.status_code == 200
-    payload = response.json()
     assert len(payload["webhooks"]) == 1
-    assert payload["webhooks"][0]["id"] == "legacy"
+    assert payload["webhooks"][0]["id"] == "ops"
     assert payload["rules"] == []
 
 

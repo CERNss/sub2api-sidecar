@@ -101,8 +101,10 @@ class CreditControlSettings:
 
 
 @dataclass(frozen=True)
-class NotificationSchedulerSettings:
-    tick_seconds: int = 60
+class OperationalDataSettings:
+    enabled: bool = True
+    collect_interval_seconds: int = 60
+    expiration: int | None = None
 
 
 @dataclass(frozen=True)
@@ -116,12 +118,11 @@ class Settings:
     assignment_mode: ProvisioningAssignmentMode = ProvisioningAssignmentMode.dedicated
     auto_rotation: AutoRotationSettings = AutoRotationSettings()
     credit_control: CreditControlSettings = CreditControlSettings()
-    notification_scheduler: NotificationSchedulerSettings = NotificationSchedulerSettings()
+    operational_data: OperationalDataSettings = OperationalDataSettings()
     app_auth_username: str = "admin"
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
     sqlite_db_path: str = "data/sub2api-sidecar.db"
-    group_name_prefix: str = "openai-oauth-"
     request_timeout_seconds: int = 30
 
     @classmethod
@@ -164,12 +165,6 @@ class Settings:
             "SQLITE_DB_PATH",
             ("storage", "sqlite_db_path"),
             default="data/sub2api-sidecar.db",
-        )
-        values["group_name_prefix"] = _string_setting(
-            config,
-            "GROUP_NAME_PREFIX",
-            ("provisioning", "group_name_prefix"),
-            default="openai-oauth-",
         )
         values["app_auth_username"] = _string_setting(
             config,
@@ -284,14 +279,7 @@ class Settings:
                 default=60,
             ),
         )
-        values["notification_scheduler"] = NotificationSchedulerSettings(
-            tick_seconds=_int_setting(
-                config,
-                "NOTIFICATION_SCHEDULER_TICK_SECONDS",
-                ("notifications", "scheduler_tick_seconds"),
-                default=60,
-            ),
-        )
+        values["operational_data"] = _operational_data_setting(config)
 
         if values["auto_rotation"].interval_seconds < 0:
             raise ConfigurationError("AUTO_ROTATION_INTERVAL_SECONDS must be >= 0")
@@ -303,8 +291,24 @@ class Settings:
             raise ConfigurationError("AUTO_ROTATION_IMPROVEMENT_DELTA must be >= 0")
         if values["credit_control"].recharge_tick_seconds < 0:
             raise ConfigurationError("CREDIT_CONTROL_RECHARGE_TICK_SECONDS must be >= 0")
-        if values["notification_scheduler"].tick_seconds < 0:
-            raise ConfigurationError("NOTIFICATION_SCHEDULER_TICK_SECONDS must be >= 0")
+        if values["operational_data"].collect_interval_seconds < 0:
+            raise ConfigurationError(
+                "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS must be >= 0"
+            )
+        if (
+            values["operational_data"].enabled
+            and values["operational_data"].collect_interval_seconds <= 0
+        ):
+            raise ConfigurationError(
+                "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS must be greater than zero when operational data collection is enabled"
+            )
+        if (
+            values["operational_data"].expiration is not None
+            and values["operational_data"].expiration <= 0
+        ):
+            raise ConfigurationError(
+                "OPERATIONAL_DATA_EXPIRATION must be greater than zero"
+            )
         if values["sub2api_provisioning_defaults"].account_concurrency <= 0:
             raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
 
@@ -475,6 +479,43 @@ def _base_path_setting(config: Mapping[str, Any]) -> str:
         default="",
     )
     return _normalize_base_path(raw_value or "")
+
+
+def _operational_data_setting(config: Mapping[str, Any]) -> OperationalDataSettings:
+    return OperationalDataSettings(
+        enabled=_bool_setting(
+            config,
+            "OPERATIONAL_DATA_ENABLED",
+            ("operational_data", "enabled"),
+            default=True,
+        ),
+        collect_interval_seconds=_int_setting(
+            config,
+            "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS",
+            ("operational_data", "collect_interval_seconds"),
+            default=60,
+        ),
+        expiration=_optional_int_setting(
+            config,
+            "OPERATIONAL_DATA_EXPIRATION",
+            ("operational_data", "expiration"),
+        ),
+    )
+
+
+def _optional_int_setting(
+    config: Mapping[str, Any],
+    env_name: str,
+    config_path: tuple[str, ...],
+) -> int | None:
+    env_value = _env_string(env_name)
+    if env_value is not None:
+        return _parse_int_value(env_value, source=env_name)
+
+    raw_value = _config_value(config, config_path)
+    if raw_value is None or raw_value == "":
+        return None
+    return _parse_int_value(raw_value, source=_config_label(config_path))
 
 
 def _normalize_base_path(raw_value: str) -> str:

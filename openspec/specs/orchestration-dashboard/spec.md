@@ -155,7 +155,7 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **THEN** the dashboard does not mutate flow records, retry failed flows, or complete OAuth unless the operator uses the existing paste-back completion form
 
 ### Requirement: Persist webhook alert configuration server-side
-The system SHALL expose authenticated APIs that read and write the webhook alert center configuration document to durable local storage. The configuration document contains only `webhooks` and `rules`; legacy `policy` blocks and per-field properties removed by this change are tolerated on read and rejected on write.
+The system SHALL expose authenticated APIs that read and write the webhook alert center configuration document to durable local storage. The configuration document contains only `webhooks` and `rules`; any unsupported top-level, rule, or webhook field is rejected on write and is not part of the persisted runtime contract.
 
 #### Scenario: Operator reads notification configuration
 - **GIVEN** the operator has a valid admin session
@@ -181,13 +181,6 @@ The system SHALL expose authenticated APIs that read and write the webhook alert
 - **THEN** the system rejects the request with a `422` client error response
 - **THEN** the error message names the unsupported field
 - **THEN** the system does not persist the document
-
-#### Scenario: Legacy persisted document is tolerated on read
-- **GIVEN** an existing saved document contains the now-removed `policy` block or any removed rule/webhook fields
-- **WHEN** the system loads the document
-- **THEN** the system drops the removed keys silently
-- **THEN** the system returns the surviving `webhooks` and `rules`
-- **THEN** the system synthesizes default rules only when no rules were saved
 
 #### Scenario: Unauthenticated callers cannot read or write configuration
 - **GIVEN** a caller has no valid admin session, access-key header, or bearer token
@@ -316,7 +309,6 @@ The React UI SHALL let operators configure which operational signals are evaluat
 - **WHEN** the operator saves the settings
 - **THEN** the current configuration is persisted in browser local storage
 - **THEN** re-opening the dashboard restores the saved configuration when it is valid
-- **THEN** older locally saved configurations containing removed fields are tolerated by silently dropping those fields
 
 #### Scenario: Empty rule list shows onboarding state
 - **GIVEN** the operator opens the notification settings view

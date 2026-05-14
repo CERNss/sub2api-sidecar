@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event, Thread
 
+from app.models.operational_data import OperationalDataSourceStatus
 from app.services.notification import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -14,19 +15,26 @@ logger = logging.getLogger(__name__)
 class NotificationSchedulerSnapshot:
     enabled: bool
     running: bool
-    tick_seconds: int
+    collect_interval_seconds: int
     tick_count: int
     last_tick_started_at: datetime | None = None
     last_tick_finished_at: datetime | None = None
     last_tick_error: str | None = None
     last_outcome_count: int = 0
     last_delivery_count: int = 0
+    last_sampling_started_at: datetime | None = None
+    last_sampling_finished_at: datetime | None = None
+    last_sampling_error: str | None = None
+    sampled_signal_count: int = 0
+    source_statuses: list[OperationalDataSourceStatus] | None = None
 
 
 class NotificationScheduler:
-    def __init__(self, notification_service: NotificationService, tick_seconds: int) -> None:
+    def __init__(
+        self, notification_service: NotificationService, collect_interval_seconds: int
+    ) -> None:
         self.notification_service = notification_service
-        self.tick_seconds = tick_seconds
+        self.collect_interval_seconds = collect_interval_seconds
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._tick_count = 0
@@ -37,8 +45,11 @@ class NotificationScheduler:
         self._last_delivery_count = 0
 
     def start(self) -> None:
-        if self.tick_seconds <= 0:
-            logger.info("Notification scheduler disabled | tick_seconds=%s", self.tick_seconds)
+        if self.collect_interval_seconds <= 0:
+            logger.info(
+                "Notification scheduler disabled | collect_interval_seconds=%s",
+                self.collect_interval_seconds,
+            )
             return
         if self._thread is not None:
             return
@@ -46,7 +57,10 @@ class NotificationScheduler:
             target=self._run, name="notification-scheduler", daemon=True
         )
         self._thread.start()
-        logger.info("Notification scheduler started | tick_seconds=%s", self.tick_seconds)
+        logger.info(
+            "Notification scheduler started | collect_interval_seconds=%s",
+            self.collect_interval_seconds,
+        )
         self._tick_once()
 
     def stop(self) -> None:
@@ -61,20 +75,30 @@ class NotificationScheduler:
         return self._thread is not None and self._thread.is_alive()
 
     def snapshot(self) -> NotificationSchedulerSnapshot:
+        collection = getattr(self.notification_service, "last_collection_result", None)
+        store = getattr(self.notification_service, "store", None)
+        source_statuses = collection.source_statuses if collection else None
+        if source_statuses is None and store is not None:
+            source_statuses = store.list_operational_data_source_statuses()
         return NotificationSchedulerSnapshot(
-            enabled=self.tick_seconds > 0,
+            enabled=self.collect_interval_seconds > 0,
             running=self.is_running,
-            tick_seconds=self.tick_seconds,
+            collect_interval_seconds=self.collect_interval_seconds,
             tick_count=self._tick_count,
             last_tick_started_at=self._last_tick_started_at,
             last_tick_finished_at=self._last_tick_finished_at,
             last_tick_error=self._last_tick_error,
             last_outcome_count=self._last_outcome_count,
             last_delivery_count=self._last_delivery_count,
+            last_sampling_started_at=collection.started_at if collection else None,
+            last_sampling_finished_at=collection.finished_at if collection else None,
+            last_sampling_error=collection.error_message if collection else None,
+            sampled_signal_count=collection.sampled_signal_count if collection else 0,
+            source_statuses=source_statuses or [],
         )
 
     def _run(self) -> None:
-        while not self._stop_event.wait(self.tick_seconds):
+        while not self._stop_event.wait(self.collect_interval_seconds):
             self._tick_once()
 
     def _tick_once(self) -> None:

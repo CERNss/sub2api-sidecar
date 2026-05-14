@@ -551,17 +551,33 @@ class NotificationTestResponse(BaseModel):
     outcomes: list[NotificationDeliveryOutcomeResponse]
 
 
+class OperationalDataSourceStatusResponse(BaseModel):
+    source_key: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_message: str | None = None
+    item_count: int | None = None
+    updated_at: datetime | None = None
+
+
 class NotificationSchedulerStatusResponse(BaseModel):
     success: bool = True
     enabled: bool
     running: bool
-    tick_seconds: int
+    collect_interval_seconds: int
+    expiration: int | None = None
     tick_count: int
     last_tick_started_at: datetime | None = None
     last_tick_finished_at: datetime | None = None
     last_tick_error: str | None = None
     last_outcome_count: int = 0
     last_delivery_count: int = 0
+    last_sampling_started_at: datetime | None = None
+    last_sampling_finished_at: datetime | None = None
+    last_sampling_error: str | None = None
+    sampled_signal_count: int = 0
+    source_statuses: list[OperationalDataSourceStatusResponse] = Field(default_factory=list)
 
 
 class NotificationEvaluateRequest(BaseModel):

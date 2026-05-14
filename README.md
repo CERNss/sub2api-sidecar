@@ -252,10 +252,10 @@ APP_AUTH_PASSWORD=change-me
 - `app.base_path` 可选，默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
 - `auto_rotation.enabled=true` 且 `auto_rotation.interval_seconds > 0` 时，后台自动轮换才会启动；已登录管理员可请求 `GET /rotation/auto/scheduler` 确认是否运行。
 - `credit_control.recharge_tick_seconds` 默认 `60`，用于后台执行到期充值策略；设为 `0` 会关闭后台执行。已登录管理员可请求 `GET /api/credit-control/scheduler` 确认是否运行。
-- `notifications.scheduler_tick_seconds` 默认 `60`，用于后台定时评估告警规则；设为 `0` 会关闭后台评估。已登录管理员可请求 `GET /notifications/scheduler` 确认定时器是否启用、是否运行、最近一次 tick 时间和错误。
+- `operational_data.enabled=true` 且 `operational_data.collect_interval_seconds > 0` 时，后台运行态数据采集才会启动；默认每 `60` 秒按顺序拉取 Sub2API accounts、groups、users、当天 usage、昨天 usage，先落 SQLite raw snapshots 和派生 metrics，再由告警、自动编排等功能读取本地数据。`operational_data.expiration` 可选，单位为秒；不设置表示本地数据永不过期，设置为正整数时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。已登录管理员可请求 `GET /notifications/scheduler` 查看采样状态、每个数据源状态、最近一次 tick 时间和错误。
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
 
-环境变量仍然可以覆盖 `config.yaml` 中的同名旧配置项，方便兼容已有部署和测试环境；新配置建议优先改 `config.yaml`。
+环境变量可以覆盖 `config.yaml` 中的同名配置项；新部署建议优先改 `config.yaml`。
 
 ### Nginx Proxy Manager 子路径部署
 
@@ -527,13 +527,13 @@ curl -X POST 'http://127.0.0.1:8000/provision/oauth/complete' \
 
 ## Sub2API 对接说明
 
-考虑到不同 Sub2API 部署的接口路径和字段名可能略有差异，所有不确定部分都集中封装在：
+Sub2API 管理接口集中封装在：
 
 - `app/clients/sub2api.py`
 
 如果你的真实 Sub2API 返回结构不同，优先调整：
 
-- 各方法的 `*_PATHS` 候选路径
+- 各方法的路径常量
 - 请求 payload 字段
 - `_extract_id()` / `_extract_value()` 的解析逻辑
 

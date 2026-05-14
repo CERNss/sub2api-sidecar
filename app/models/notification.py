@@ -50,7 +50,7 @@ DEFAULT_WEBHOOK_PAYLOAD_FIELDS: tuple[str, ...] = (
 
 
 class NotificationWebhook(BaseModel):
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     id: str
     name: str = ""
@@ -66,7 +66,7 @@ class NotificationWebhook(BaseModel):
 
 
 class NotificationRule(BaseModel):
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     id: str
     name: str = ""
@@ -85,9 +85,7 @@ class NotificationRule(BaseModel):
 
 
 class NotificationSettings(BaseModel):
-    """Persisted shape. `extra='ignore'` tolerates legacy keys when hydrating from storage."""
-
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     webhooks: list[NotificationWebhook] = Field(default_factory=list)
     rules: list[NotificationRule] = Field(default_factory=list)
@@ -171,21 +169,3 @@ class RuleDecision(BaseModel):
     reason: str = ""
     sample: CollectorSample | None = None
     next_state: NotificationRuleState
-
-
-# Keys that were part of the alert-center model before the `simplify-alert-center`
-# change. They are accepted (silently dropped) when loading legacy persisted state but
-# rejected on inbound API requests so stale clients fail loudly.
-REMOVED_ROOT_KEYS: frozenset[str] = frozenset({"policy"})
-REMOVED_WEBHOOK_KEYS: frozenset[str] = frozenset({"mentionOnFailure", "mention_on_failure"})
-REMOVED_RULE_KEYS: frozenset[str] = frozenset(
-    {
-        "recoveryThreshold",
-        "recovery_threshold",
-        "warningThreshold",
-        "warning_threshold",
-        "aggregation",
-        "evaluationWindowMinutes",
-        "evaluation_window_minutes",
-    }
-)

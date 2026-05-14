@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionEventStatus, ProvisionEventType, ProvisionFlow
+from app.models.operational_data import (
+    OperationalDataSnapshot,
+    OperationalDataSourceStatus,
+    OperationalMetricSample,
+)
 from app.models.rotation import RotationEvent, RotationPoolGroup, RotationResultStatus, RotationTrigger, UserGroupAssignment
 from app.stores.sqlite import SQLiteFlowStore
 
@@ -164,3 +169,103 @@ def test_sqlite_store_persists_rotation_pool_assignments_and_events(tmp_path: Pa
     assert assignment.current_group_id == 11
     assert len(events) == 1
     assert events[0].target_group_id == 22
+
+
+def test_sqlite_store_persists_latest_operational_metric_sample(tmp_path: Path) -> None:
+    db_path = tmp_path / "operational-samples.db"
+    store = SQLiteFlowStore(str(db_path))
+    older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    newer = older + timedelta(minutes=1)
+
+    store.save_operational_metric_samples(
+        [
+            OperationalMetricSample(
+                metric_key="account_invalid",
+                value=1,
+                observed_at=older,
+                collected_at=older,
+                snapshot={"version": "older"},
+            ),
+            OperationalMetricSample(
+                metric_key="account_invalid",
+                value=2,
+                observed_at=newer,
+                collected_at=newer,
+                snapshot={"version": "newer"},
+            ),
+            OperationalMetricSample(
+                metric_key="user_balance_low",
+                value=9,
+                observed_at=older,
+                collected_at=older,
+            ),
+        ]
+    )
+
+    latest = store.get_latest_operational_metric_sample("account_invalid")
+
+    assert latest is not None
+    assert latest.value == 2
+    assert latest.snapshot == {"version": "newer"}
+
+
+def test_sqlite_store_persists_latest_operational_data_snapshot(tmp_path: Path) -> None:
+    db_path = tmp_path / "operational-snapshots.db"
+    store = SQLiteFlowStore(str(db_path))
+    older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    newer = older + timedelta(minutes=1)
+
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key="accounts",
+            observed_at=older,
+            collected_at=older,
+            payload=[{"id": "older"}],
+        )
+    )
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key="accounts",
+            observed_at=newer,
+            collected_at=newer,
+            payload=[{"id": "newer"}],
+        )
+    )
+
+    snapshot = store.get_latest_operational_data_snapshot("accounts")
+
+    assert snapshot is not None
+    assert snapshot.payload == [{"id": "newer"}]
+
+
+def test_sqlite_store_upserts_operational_source_status(tmp_path: Path) -> None:
+    db_path = tmp_path / "operational-statuses.db"
+    store = SQLiteFlowStore(str(db_path))
+    started_at = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+    store.save_operational_data_source_status(
+        OperationalDataSourceStatus(
+            source_key="accounts",
+            status="failed",
+            started_at=started_at,
+            finished_at=started_at,
+            error_message="timeout",
+        )
+    )
+    store.save_operational_data_source_status(
+        OperationalDataSourceStatus(
+            source_key="accounts",
+            status="succeeded",
+            started_at=started_at + timedelta(minutes=1),
+            finished_at=started_at + timedelta(minutes=1),
+            item_count=3,
+        )
+    )
+
+    statuses = store.list_operational_data_source_statuses()
+
+    assert len(statuses) == 1
+    assert statuses[0].source_key == "accounts"
+    assert statuses[0].status == "succeeded"
+    assert statuses[0].error_message is None
+    assert statuses[0].item_count == 3
