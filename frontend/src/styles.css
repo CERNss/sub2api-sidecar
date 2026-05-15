@@ -88,6 +88,7 @@ pre {
 }
 
 .operational-status-dot {
+  position: relative;
   width: 11px;
   height: 11px;
   flex: 0 0 auto;
@@ -95,14 +96,65 @@ pre {
   box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.18);
 }
 
+.operational-status-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  transform: scale(1);
+  pointer-events: none;
+}
+
 .operational-status-dot.running {
   background: #16a34a;
   box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18);
+  animation: status-dot-breathe 2.4s ease-in-out infinite;
+}
+
+.operational-status-dot.running::after {
+  background: rgba(22, 163, 74, 0.2);
+  animation: status-dot-halo 2.4s ease-in-out infinite;
 }
 
 .operational-status-dot.stopped {
   background: #dc2626;
   box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.16);
+  animation: status-dot-breathe 2.4s ease-in-out infinite;
+}
+
+.operational-status-dot.stopped::after {
+  background: rgba(220, 38, 38, 0.2);
+  animation: status-dot-halo 2.4s ease-in-out infinite;
+}
+
+@keyframes status-dot-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.88);
+  }
+}
+
+@keyframes status-dot-halo {
+  0% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .operational-status-dot,
+  .operational-status-dot::after {
+    animation: none;
+  }
 }
 
 .global-settings-button {
@@ -954,17 +1006,20 @@ pre {
   grid-area: webhooks;
   display: grid;
   min-width: 0;
-}
-
-.notif-summary-area > .notif-summary {
-  height: 100%;
+  align-self: stretch;
 }
 
 .notif-summary-area {
   grid-area: summary;
-  display: grid;
-  gap: 12px;
-  align-content: start;
+  min-width: 0;
+  display: flex;
+  align-self: stretch;
+  align-items: stretch;
+}
+
+.notif-summary-area > .notif-summary {
+  width: 100%;
+  min-height: 100%;
 }
 
 .notif-rules-area {
@@ -2947,6 +3002,7 @@ pre {
 
 .run-record-title-line,
 .run-record-meta-line,
+.run-record-sync-line,
 .run-record-counts,
 .run-record-actions {
   min-width: 0;
@@ -2971,6 +3027,28 @@ pre {
   flex-wrap: wrap;
   color: #64748b;
   font-size: 12px;
+}
+
+.run-record-sync-line {
+  gap: 6px;
+  flex-wrap: wrap;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.run-record-sync-line span {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.run-record-sync-line strong {
+  min-width: 0;
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .run-record-counts {

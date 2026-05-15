@@ -993,6 +993,35 @@ function runCounts(run: AutoRotationRunPayload) {
   };
 }
 
+function runSyncSummary(run: AutoRotationRunPayload) {
+  const synced = run.synced ?? {};
+  return {
+    seen: synced.seen ?? 0,
+    synced: synced.synced ?? 0,
+    newUserCandidates: synced.new_user_candidates ?? 0,
+    skippedWithoutCurrentGroup: synced.skipped_without_current_group ?? 0,
+    skippedOutsideScheduleRange: synced.skipped_outside_schedule_range ?? 0,
+    skippedOutsidePool: synced.skipped_outside_pool ?? 0
+  };
+}
+
+function emptyRunHint(run: AutoRotationRunPayload): string | null {
+  if (run.status !== "empty") {
+    return null;
+  }
+  const sync = runSyncSummary(run);
+  if (sync.seen === 0) {
+    return "本轮 operational data 没有同步到用户快照";
+  }
+  if (sync.synced === 0 && sync.newUserCandidates === 0) {
+    return "本轮没有用户落在 Landing 池或轮转池范围内";
+  }
+  if (sync.synced > 0 || sync.newUserCandidates > 0) {
+    return "本轮有候选输入，但没有满足迁移条件的用户";
+  }
+  return "本轮没有可执行动作";
+}
+
 function idValue(value: unknown): string {
   if (value === null || value === undefined) {
     return "";
@@ -4824,6 +4853,8 @@ function RunRecordsPanel({
           <div className="run-record-list" role="list">
             {records.map((run) => {
               const counts = runCounts(run);
+              const sync = runSyncSummary(run);
+              const hint = emptyRunHint(run);
               const canRollback =
                 run.run_kind !== "manual" && !run.dry_run && counts.moved > 0 && !run.rollback_status;
               const runKey = run.run_id ?? `${run.created_at ?? "record"}-${run.tag ?? run.status ?? "unknown"}`;
@@ -4846,6 +4877,14 @@ function RunRecordsPanel({
                       <span>Run {run.run_id?.slice(0, 8) ?? "-"}</span>
                       {run.window ? <span>{run.window}</span> : null}
                     </div>
+                    {run.run_kind !== "manual" ? (
+                      <div className="run-record-sync-line">
+                        <span>用户 {sync.seen}</span>
+                        <span>池内 {sync.synced}</span>
+                        <span>新候选 {sync.newUserCandidates}</span>
+                        {hint ? <strong>{hint}</strong> : null}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="run-record-counts" aria-label="执行结果">
                     <span><strong>{counts.moved}</strong> 迁移</span>
@@ -4900,6 +4939,25 @@ function RunRecordsPanel({
               <Descriptions.Item label="回滚状态">{selectedRecord.rollback_status ?? "-"}</Descriptions.Item>
               <Descriptions.Item label="回滚原因">{selectedRecord.rollback_reason ?? "-"}</Descriptions.Item>
             </Descriptions>
+            {selectedRecord.run_kind !== "manual" ? (
+              <Descriptions bordered size="small" column={3}>
+                <Descriptions.Item label="同步用户">{runSyncSummary(selectedRecord).seen}</Descriptions.Item>
+                <Descriptions.Item label="池内用户">{runSyncSummary(selectedRecord).synced}</Descriptions.Item>
+                <Descriptions.Item label="新候选">{runSyncSummary(selectedRecord).newUserCandidates}</Descriptions.Item>
+                <Descriptions.Item label="无当前分组">
+                  {runSyncSummary(selectedRecord).skippedWithoutCurrentGroup}
+                </Descriptions.Item>
+                <Descriptions.Item label="不在接入范围">
+                  {runSyncSummary(selectedRecord).skippedOutsideScheduleRange}
+                </Descriptions.Item>
+                <Descriptions.Item label="不在池内">
+                  {runSyncSummary(selectedRecord).skippedOutsidePool}
+                </Descriptions.Item>
+                <Descriptions.Item label="空运行原因" span={3}>
+                  {emptyRunHint(selectedRecord) ?? "-"}
+                </Descriptions.Item>
+              </Descriptions>
+            ) : null}
             <div className="run-record-summary">
               {(() => {
                 const counts = runCounts(selectedRecord);
