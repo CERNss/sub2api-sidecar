@@ -35,9 +35,10 @@ class Sub2APIClient:
     LIST_USERS_PATH = "/api/v1/admin/users"
     LIST_OPENAI_ACCOUNTS_PATH = "/api/v1/admin/accounts"
     USER_API_KEYS_PATH = "/api/v1/admin/users/{user_id}/api-keys"
-    USER_USAGE_PATH = "/api/v1/admin/users/{user_id}/usage"
     UPDATE_USER_BALANCE_PATH = "/api/v1/admin/users/{user_id}/balance"
+    USAGE_LIST_PATH = "/api/v1/admin/usage"
     USAGE_STATS_PATH = "/api/v1/admin/usage/stats"
+    DASHBOARD_USERS_RANKING_PATH = "/api/v1/admin/dashboard/users-ranking"
     GENERATE_OPENAI_AUTH_URL_PATH = "/api/v1/admin/openai/generate-auth-url"
     EXCHANGE_OPENAI_CODE_PATH = "/api/v1/admin/openai/exchange-code"
     CREATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts"
@@ -168,14 +169,6 @@ class Sub2APIClient:
             total = int(envelope.get("total", len(items)) or len(items))
         return {"items": items, "total": total, "raw": data}
 
-    def get_user_usage(self, user_id: Any, period: str) -> dict[str, Any]:
-        path = self.USER_USAGE_PATH.format(user_id=user_id)
-        data = self._request("GET", path, params={"period": period})
-        body = self._unwrap_data(data)
-        if not isinstance(body, dict):
-            raise Sub2APIError("Sub2API user usage response is not an object")
-        return body
-
     def update_user_balance(
         self,
         *,
@@ -228,6 +221,91 @@ class Sub2APIClient:
         body = self._unwrap_data(data)
         if not isinstance(body, dict):
             raise Sub2APIError("Sub2API usage stats response is not an object")
+        return body
+
+    def list_usage_logs(
+        self,
+        *,
+        user_id: Any | None = None,
+        start_date: date,
+        end_date: date,
+        timezone_name: str,
+        page_size: int = 1000,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "timezone": timezone_name,
+            "page_size": page_size,
+            "sort_by": "created_at",
+            "sort_order": "desc",
+        }
+        if user_id not in (None, ""):
+            params["user_id"] = user_id
+        items: list[dict[str, Any]] = []
+        page = 1
+        total: int | None = None
+        pages: int | None = None
+        last_raw: dict[str, Any] | None = None
+        while True:
+            data = self._request(
+                "GET",
+                self.USAGE_LIST_PATH,
+                params={**params, "page": page},
+            )
+            last_raw = data
+            body = self._unwrap_data(data)
+            if isinstance(body, dict):
+                raw_items = body.get("items", [])
+                if not isinstance(raw_items, list):
+                    raise Sub2APIError("Sub2API usage list items response is not a list")
+                if isinstance(body.get("total"), int):
+                    total = body["total"]
+                if isinstance(body.get("pages"), int):
+                    pages = body["pages"]
+            elif isinstance(body, list):
+                raw_items = body
+            else:
+                raise Sub2APIError("Sub2API usage list response is not an object")
+
+            page_items = [item for item in raw_items if isinstance(item, dict)]
+            items.extend(page_items)
+            if not page_items:
+                break
+            if pages is not None and page >= pages:
+                break
+            if total is not None and len(items) >= total:
+                break
+            page += 1
+
+        return {
+            "items": items,
+            "total": total if total is not None else len(items),
+            "page_size": page_size,
+            "raw": last_raw or {},
+        }
+
+    def get_user_spending_ranking(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        timezone_name: str,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        data = self._request(
+            "GET",
+            self.DASHBOARD_USERS_RANKING_PATH,
+            params={
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "timezone": timezone_name,
+                "limit": limit,
+            },
+        )
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API user spending ranking response is not an object")
         return body
 
     def get_account_usage_stats(

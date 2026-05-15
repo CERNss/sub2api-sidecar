@@ -174,6 +174,21 @@ class NotificationService:
         persist: bool,
     ) -> RuleEvaluationOutcome:
         moment = now or datetime.now(timezone.utc)
+        if not rule.enabled:
+            state = self.store.get_notification_rule_state(rule.id)
+            if state is None:
+                state = NotificationRuleState(rule_id=rule.id)
+            else:
+                state = state.model_copy()
+            state.last_error = "rule is disabled"
+            decision = RuleDecision(
+                action=NotificationRuleAction.hold,
+                reason="rule is disabled",
+                sample=None,
+                next_state=state,
+            )
+            return RuleEvaluationOutcome(rule=rule, decision=decision, deliveries=[])
+
         sample, reason = self._sample_for_rule(rule, now=moment)
         prior_state = self.store.get_notification_rule_state(rule.id)
         decision = evaluate_rule(

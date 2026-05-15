@@ -1288,29 +1288,37 @@ class RotationService:
         api_keys = api_keys_response["items"]
         has_api_keys = api_keys_response["total"] > 0
         usage_window = self._window_enum()
-        usage_value = 0.0
-
-        if has_api_keys and usage_window in {
-            AutoRotationUsageWindow.window_5h,
-            AutoRotationUsageWindow.window_1d,
-            AutoRotationUsageWindow.window_7d,
-        }:
-            field_name = {
-                AutoRotationUsageWindow.window_5h: "usage_5h",
-                AutoRotationUsageWindow.window_1d: "usage_1d",
-                AutoRotationUsageWindow.window_7d: "usage_7d",
-            }[usage_window]
-            usage_value = sum(float(item.get(field_name) or 0.0) for item in api_keys)
-        elif has_api_keys and usage_window == AutoRotationUsageWindow.window_30d:
-            stats = self._user_usage_snapshot(user_id, usage_window)
-            usage_value = float(stats.get("total_actual_cost") or 0.0)
+        usage_stats = self._user_usage_snapshot(user_id, usage_window)
+        usage_value = self._usage_value_from_stats(usage_stats)
 
         return {
             "usage_window": usage_window,
-            "usage_value": usage_value,
+            "usage_value": float(usage_value or 0.0),
+            "usage_source": "user_usage" if usage_value is not None else "missing",
             "has_api_keys": has_api_keys,
             "api_key_count": api_keys_response["total"],
         }
+
+    def _usage_value_from_stats(self, stats: dict[str, Any]) -> float | None:
+        for key in (
+            "total_actual_cost",
+            "total_cost",
+            "actual_cost",
+            "cost",
+            "usage",
+            "amount",
+        ):
+            value = stats.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    continue
+        return None
 
     def _latest_groups_snapshot(self) -> list[dict[str, Any]]:
         payload = self._latest_operational_payload(SOURCE_GROUPS, default=[])

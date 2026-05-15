@@ -220,14 +220,6 @@ class FakeRotationSub2API:
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.groups})
         if method == "GET" and path == "/api/v1/admin/users":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
-        if method == "GET" and path.startswith("/api/v1/admin/users/") and path.endswith("/usage"):
-            user_id = int(path.split("/")[5])
-            period = (params or {}).get("period", "1d")
-            cost = {101: {"5h": 1.5, "1d": 2.5, "7d": 6.0, "30d": 20.0}, 202: {"5h": 0.2, "1d": 0.5, "7d": 1.2, "30d": 4.0}}.get(user_id, {})
-            return FakeResponse(
-                200,
-                {"code": 0, "message": "success", "data": {"total_cost": cost.get(period, 0)}},
-            )
         if method == "POST" and path.startswith("/api/v1/admin/users/") and path.endswith("/balance"):
             user_id = int(path.split("/")[5])
             self.balance_calls.append(
@@ -1961,7 +1953,8 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     assert backend.replace_calls[0]["old_group_id"] == 22
     assert backend.replace_calls[0]["new_group_id"] == "11"
     assert payload["moved"][0]["usage_window"] == "5h"
-    assert payload["moved"][0]["usage_value"] == 8.0
+    assert payload["moved"][0]["usage_value"] == 1.5
+    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
     assert payload["moved"][0]["metadata"]["decision_type"] == "usage_balancing"
     assert "usage_loads_before" in payload["moved"][0]["metadata"]
     assert len(payload["skipped"]) == 1
@@ -1973,6 +1966,76 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     assert run["status"] == "moved"
     assert len(run["moved"]) == 1
     assert run["moved"][0]["user_id"] == 101
+
+
+def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 0.0, "usage_1d": 0.0, "usage_7d": 0.0}]
+    backend.user_api_keys[202] = [{"id": 2, "usage_5h": 0.0, "usage_1d": 0.0, "usage_7d": 0.0}]
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=202,
+                email="idle@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["moved"]) == 1
+    assert payload["moved"][0]["user_id"] == 101
+    assert payload["moved"][0]["usage_value"] == 1.5
+    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 22, "new_group_id": "11"}
+    ]
 
 
 def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -> None:

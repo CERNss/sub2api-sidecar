@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -70,7 +70,9 @@ class OperationalDataCollector:
 
     def collect(self, *, now: datetime | None = None) -> OperationalDataCollectionResult:
         started_at = now or datetime.now(timezone.utc)
-        local_today = started_at.astimezone(ZoneInfo(self.timezone_name)).date()
+        local_zone = ZoneInfo(self.timezone_name)
+        local_now = started_at.astimezone(local_zone)
+        local_today = local_now.date()
         errors: list[str] = []
 
         accounts, accounts_status = self._fetch_source(
@@ -90,7 +92,7 @@ class OperationalDataCollector:
         )
         user_usage, user_usage_status = self._fetch_source(
             SOURCE_USER_USAGE,
-            lambda: self._fetch_user_usage(users),
+            lambda: self._fetch_user_usage(users, local_now=local_now),
             item_count=_mapping_item_count,
         )
         user_api_keys, user_api_keys_status = self._fetch_source(
@@ -213,9 +215,19 @@ class OperationalDataCollector:
     def _fetch_user_usage(
         self,
         users: list[dict[str, Any]] | None,
+        *,
+        local_now: datetime,
     ) -> dict[str, dict[str, Any]]:
         if not users:
             return {}
+        today_start_date, today_end_date = _user_usage_date_range("1d", local_now)
+        recent_logs = self.client.list_usage_logs(
+            start_date=today_start_date,
+            end_date=today_end_date,
+            timezone_name=self.timezone_name,
+        )
+        recent_logs_by_user_id = _usage_logs_by_user_id(recent_logs)
+        rankings_by_window = self._fetch_user_usage_rankings(local_now=local_now)
         result: dict[str, dict[str, Any]] = {}
         for user in users:
             user_id = user.get("id")
@@ -224,7 +236,22 @@ class OperationalDataCollector:
             usage_by_window: dict[str, Any] = {}
             for window in USER_USAGE_WINDOWS:
                 try:
-                    usage_by_window[window] = self.client.get_user_usage(user_id, window)
+                    if window == "5h":
+                        usage_by_window[window] = _aggregate_usage_logs(
+                            recent_logs_by_user_id.get(str(user_id), []),
+                            user_id=user_id,
+                            window=window,
+                            local_now=local_now,
+                        )
+                    else:
+                        usage_by_window[window] = rankings_by_window.get(window, {}).get(
+                            str(user_id),
+                            _empty_user_usage_stats(
+                                user_id=user_id,
+                                window=window,
+                                local_now=local_now,
+                            ),
+                        )
                 except Exception as exc:
                     logger.warning(
                         "Operational user usage fetch failed | user_id=%s window=%s error=%s",
@@ -234,6 +261,28 @@ class OperationalDataCollector:
                     )
                     usage_by_window[window] = {"error": str(exc)}
             result[str(user_id)] = usage_by_window
+        return result
+
+    def _fetch_user_usage_rankings(
+        self,
+        *,
+        local_now: datetime,
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        result: dict[str, dict[str, dict[str, Any]]] = {}
+        for window in ("1d", "7d", "30d"):
+            start_date, end_date = _user_usage_date_range(window, local_now)
+            ranking = self.client.get_user_spending_ranking(
+                start_date=start_date,
+                end_date=end_date,
+                timezone_name=self.timezone_name,
+            )
+            result[window] = _ranking_usage_by_user_id(
+                ranking,
+                window=window,
+                start_date=start_date,
+                end_date=end_date,
+                local_now=local_now,
+            )
         return result
 
     def _fetch_user_api_keys(
@@ -379,6 +428,176 @@ def _mapping_item_count(value: Any) -> int:
     if isinstance(value, dict):
         return len(value)
     return 0
+
+
+def _user_usage_date_range(window: str, local_now: datetime) -> tuple[date, date]:
+    local_day = local_now.date()
+    if window == "5h":
+        return (local_now - timedelta(hours=5)).date(), local_day
+    if window == "1d":
+        return local_day, local_day
+    if window == "7d":
+        return local_day - timedelta(days=6), local_day
+    if window == "30d":
+        return local_day - timedelta(days=29), local_day
+    raise ValueError(f"Unsupported user usage window: {window}")
+
+
+def _usage_logs_by_user_id(logs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in logs.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        user_id = item.get("user_id")
+        if user_id in (None, ""):
+            user = item.get("user")
+            if isinstance(user, dict):
+                user_id = user.get("id") or user.get("user_id")
+        if user_id in (None, ""):
+            continue
+        grouped.setdefault(str(user_id), []).append(item)
+    return grouped
+
+
+def _ranking_usage_by_user_id(
+    ranking: dict[str, Any],
+    *,
+    window: str,
+    start_date: date,
+    end_date: date,
+    local_now: datetime,
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    rows = ranking.get("ranking", [])
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        user_id = row.get("user_id")
+        if user_id in (None, ""):
+            continue
+        result[str(user_id)] = {
+            "user_id": user_id,
+            "email": row.get("email"),
+            "window": window,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "window_started_at": _user_usage_window_start(window, local_now).isoformat(),
+            "window_finished_at": local_now.isoformat(),
+            "total_requests": int(_number(row, "requests") or 0),
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cache_tokens": 0,
+            "total_tokens": int(_number(row, "tokens") or 0),
+            "total_cost": _number(row, "actual_cost") or 0.0,
+            "total_actual_cost": _number(row, "actual_cost") or 0.0,
+            "source": "dashboard_users_ranking",
+        }
+    return result
+
+
+def _empty_user_usage_stats(
+    *,
+    user_id: Any,
+    window: str,
+    local_now: datetime,
+) -> dict[str, Any]:
+    start_date, end_date = _user_usage_date_range(window, local_now)
+    return {
+        "user_id": user_id,
+        "window": window,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "window_started_at": _user_usage_window_start(window, local_now).isoformat(),
+        "window_finished_at": local_now.isoformat(),
+        "total_requests": 0,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_cache_tokens": 0,
+        "total_tokens": 0,
+        "total_cost": 0.0,
+        "total_actual_cost": 0.0,
+        "source": "dashboard_users_ranking",
+    }
+
+
+def _aggregate_usage_logs(
+    logs: list[dict[str, Any]],
+    *,
+    user_id: Any,
+    window: str,
+    local_now: datetime,
+) -> dict[str, Any]:
+    window_started_at = _user_usage_window_start(window, local_now)
+    window_finished_at = local_now
+    start_date, end_date = _user_usage_date_range(window, local_now)
+    items = [item for item in logs if isinstance(item, dict)]
+    included: list[dict[str, Any]] = []
+    for item in items:
+        created_at = _usage_log_created_at(item, local_now.tzinfo)
+        if created_at is not None and window_started_at <= created_at <= window_finished_at:
+            included.append(item)
+    total_cost = sum(_number(item, "total_cost") or 0.0 for item in included)
+    total_actual_cost = sum(_number(item, "actual_cost", "total_actual_cost") or 0.0 for item in included)
+    total_input_tokens = sum(int(_number(item, "input_tokens") or 0) for item in included)
+    total_output_tokens = sum(int(_number(item, "output_tokens") or 0) for item in included)
+    total_cache_tokens = sum(
+        int(_number(item, "cache_creation_tokens") or 0)
+        + int(_number(item, "cache_read_tokens") or 0)
+        + int(_number(item, "cache_creation_5m_tokens") or 0)
+        + int(_number(item, "cache_creation_1h_tokens") or 0)
+        for item in included
+    )
+    duration_values = [_number(item, "duration_ms") for item in included]
+    present_durations = [value for value in duration_values if value is not None]
+    return {
+        "user_id": user_id,
+        "window": window,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "window_started_at": window_started_at.isoformat(),
+        "window_finished_at": window_finished_at.isoformat(),
+        "total_requests": len(included),
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_cache_tokens": total_cache_tokens,
+        "total_tokens": total_input_tokens + total_output_tokens + total_cache_tokens,
+        "total_cost": total_cost,
+        "total_actual_cost": total_actual_cost,
+        "average_duration_ms": (
+            sum(present_durations) / len(present_durations) if present_durations else 0.0
+        ),
+        "source_item_count": len(items),
+    }
+
+
+def _user_usage_window_start(window: str, local_now: datetime) -> datetime:
+    if window == "5h":
+        return local_now - timedelta(hours=5)
+    local_day = local_now.date()
+    if window == "1d":
+        start_day = local_day
+    elif window == "7d":
+        start_day = local_day - timedelta(days=6)
+    elif window == "30d":
+        start_day = local_day - timedelta(days=29)
+    else:
+        raise ValueError(f"Unsupported user usage window: {window}")
+    return datetime.combine(start_day, datetime.min.time(), tzinfo=local_now.tzinfo)
+
+
+def _usage_log_created_at(item: dict[str, Any], local_tz: tzinfo | None) -> datetime | None:
+    raw = item.get("created_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=local_tz or timezone.utc)
+    return parsed.astimezone(local_tz or timezone.utc)
 
 
 def _account_invalid_sample(accounts: list[dict[str, Any]]) -> CollectorSample:

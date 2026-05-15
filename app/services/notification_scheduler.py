@@ -69,7 +69,6 @@ class NotificationScheduler:
             "Notification scheduler started | cadence_seconds=%s",
             self.cadence_seconds,
         )
-        self._tick_once()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -107,7 +106,7 @@ class NotificationScheduler:
         )
 
     def _run(self) -> None:
-        last_tick_at = time.monotonic()
+        last_tick_at = 0.0
         while not self._stop_event.is_set():
             next_tick_at = last_tick_at + self._cadence_seconds()
             wait_seconds = min(1.0, max(0.0, next_tick_at - time.monotonic()))

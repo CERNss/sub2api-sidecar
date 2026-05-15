@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -199,8 +201,44 @@ class _FakeSub2APIClient:
             {"id": "u2", "email": "b@example.com", "balance": 3},
         ]
 
-    def get_user_usage(self, user_id, period):
-        return {"total_cost": 1.0, "period": period}
+    def list_usage_logs(
+        self,
+        *,
+        user_id=None,
+        start_date,
+        end_date,
+        timezone_name,
+        page_size=1000,
+    ):
+        tz = ZoneInfo(timezone_name)
+        return {
+            "items": [
+                {
+                    "id": "log-u1",
+                    "user_id": "u1",
+                    "created_at": datetime(2026, 5, 10, 19, 30, tzinfo=tz).isoformat(),
+                    "total_cost": 1.25,
+                    "actual_cost": 1.5,
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                },
+                {
+                    "id": "old-log-u1",
+                    "user_id": "u1",
+                    "created_at": datetime(2026, 5, 10, 11, 0, tzinfo=tz).isoformat(),
+                    "total_cost": 99,
+                    "actual_cost": 99,
+                },
+                {
+                    "id": "log-u2",
+                    "user_id": "u2",
+                    "created_at": datetime(2026, 5, 10, 18, 0, tzinfo=tz).isoformat(),
+                    "total_cost": 0.5,
+                    "actual_cost": 0.75,
+                },
+            ],
+            "total": 3,
+        }
 
     def get_user_api_keys(self, user_id):
         return {
@@ -222,6 +260,34 @@ class _FakeSub2APIClient:
         if str(start_date) == "2026-05-10":
             return {"total_actual_cost": 200, "daily_limit_usd": 250}
         return {"total_actual_cost": 100, "daily_limit_usd": 250}
+
+    def get_user_spending_ranking(
+        self,
+        *,
+        start_date,
+        end_date,
+        timezone_name,
+        limit=1000,
+    ):
+        return {
+            "ranking": [
+                {
+                    "user_id": "u1",
+                    "email": "a@example.com",
+                    "actual_cost": 200 if str(start_date) == "2026-05-10" else 100,
+                    "requests": 20,
+                    "tokens": 300,
+                },
+                {
+                    "user_id": "u2",
+                    "email": "b@example.com",
+                    "actual_cost": 50,
+                    "requests": 5,
+                    "tokens": 75,
+                },
+            ],
+            "total_actual_cost": 250,
+        }
 
 
 # --- Collector registry ---
@@ -348,21 +414,51 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
             self.calls.append("users")
             return super().list_users()
 
-        def get_user_usage(self, user_id, period):
-            self.calls.append(f"user_usage:{user_id}:{period}")
-            return super().get_user_usage(user_id, period)
+        def list_usage_logs(
+            self,
+            *,
+            user_id=None,
+            start_date,
+            end_date,
+            timezone_name,
+            page_size=1000,
+        ):
+            self.calls.append(f"usage_logs:{user_id}:{start_date}:{end_date}")
+            return super().list_usage_logs(
+                user_id=user_id,
+                start_date=start_date,
+                end_date=end_date,
+                timezone_name=timezone_name,
+                page_size=page_size,
+            )
 
         def get_user_api_keys(self, user_id):
             self.calls.append(f"user_api_keys:{user_id}")
             return super().get_user_api_keys(user_id)
 
         def get_usage_stats(self, *, user_id, start_date, end_date, timezone_name):
-            self.calls.append(f"usage:{start_date}")
+            self.calls.append(f"usage:{user_id}:{start_date}:{end_date}")
             return super().get_usage_stats(
                 user_id=user_id,
                 start_date=start_date,
                 end_date=end_date,
                 timezone_name=timezone_name,
+            )
+
+        def get_user_spending_ranking(
+            self,
+            *,
+            start_date,
+            end_date,
+            timezone_name,
+            limit=1000,
+        ):
+            self.calls.append(f"user_ranking:{start_date}:{end_date}")
+            return super().get_user_spending_ranking(
+                start_date=start_date,
+                end_date=end_date,
+                timezone_name=timezone_name,
+                limit=limit,
             )
 
     api_client = _RecordingClient()
@@ -378,18 +474,14 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "accounts",
         "groups:openai",
         "users",
-        "user_usage:u1:5h",
-        "user_usage:u1:1d",
-        "user_usage:u1:7d",
-        "user_usage:u1:30d",
-        "user_usage:u2:5h",
-        "user_usage:u2:1d",
-        "user_usage:u2:7d",
-        "user_usage:u2:30d",
+        "usage_logs:None:2026-05-10:2026-05-10",
+        "user_ranking:2026-05-10:2026-05-10",
+        "user_ranking:2026-05-04:2026-05-10",
+        "user_ranking:2026-04-11:2026-05-10",
         "user_api_keys:u1",
         "user_api_keys:u2",
-        "usage:2026-05-10",
-        "usage:2026-05-09",
+        "usage::2026-05-10:2026-05-10",
+        "usage::2026-05-09:2026-05-09",
     ]
     assert result.error_message is None
     assert result.sampled_signal_count > 1
@@ -408,6 +500,11 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
     snapshot = main.get_flow_store().get_latest_operational_data_snapshot("accounts")
     assert snapshot is not None
     assert isinstance(snapshot.payload, list)
+    usage_snapshot = main.get_flow_store().get_latest_operational_data_snapshot("user_usage")
+    assert usage_snapshot is not None
+    assert usage_snapshot.payload["u1"]["5h"]["total_actual_cost"] == 1.5
+    assert usage_snapshot.payload["u1"]["1d"]["total_actual_cost"] == 200
+    assert usage_snapshot.payload["u2"]["5h"]["total_actual_cost"] == 0.75
 
 
 def test_operational_data_collector_records_source_failures(client) -> None:
@@ -607,6 +704,311 @@ def test_tick_respects_read_interval(client) -> None:
     assert collector.calls == 2
 
 
+def test_tick_does_not_alert_for_below_threshold_db_noise(client) -> None:
+    login(client)
+    settings = _settings(
+        [
+            _rule(
+                threshold="10",
+                operator=NotificationOperator.gte,
+                for_minutes=0,
+                read_interval_minutes=1,
+            )
+        ]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    service = main.get_notification_service()
+
+    start = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        outcomes = []
+        for offset, value in enumerate([8.0, 9.4, 9.9]):
+            moment = start + timedelta(minutes=offset)
+            store.save_operational_metric_samples(
+                [_metric_sample(value=value, observed_at=moment)]
+            )
+            outcomes.append(service.tick(now=moment)[0])
+
+    assert [outcome.decision.action for outcome in outcomes] == [
+        NotificationRuleAction.hold,
+        NotificationRuleAction.hold,
+        NotificationRuleAction.hold,
+    ]
+    assert store.list_notification_deliveries() == []
+    state = store.get_notification_rule_state("r1")
+    assert state is not None
+    assert state.is_firing is False
+    assert state.breach_started_at is None
+    assert state.last_value == 9.9
+
+
+def test_tick_does_not_alert_when_value_equals_strict_gt_threshold(client) -> None:
+    login(client)
+    settings = _settings(
+        [
+            _rule(
+                threshold="10",
+                operator=NotificationOperator.gt,
+                for_minutes=0,
+                read_interval_minutes=1,
+            )
+        ]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.save_operational_metric_samples([_metric_sample(value=10, observed_at=now)])
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        outcomes = main.get_notification_service().tick(now=now)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].decision.action == NotificationRuleAction.hold
+    assert store.list_notification_deliveries() == []
+
+
+def test_tick_does_not_alert_when_breach_drops_before_sustained_window(client) -> None:
+    login(client)
+    settings = _settings(
+        [_rule(threshold="10", for_minutes=5, read_interval_minutes=1)]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    service = main.get_notification_service()
+
+    start = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.save_operational_metric_samples([_metric_sample(value=12, observed_at=start)])
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        first = service.tick(now=start)[0]
+        almost_sustained_at = start + timedelta(minutes=4)
+        store.save_operational_metric_samples(
+            [_metric_sample(value=11, observed_at=almost_sustained_at)]
+        )
+        second = service.tick(now=almost_sustained_at)[0]
+        recovered_at = start + timedelta(minutes=5)
+        store.save_operational_metric_samples(
+            [_metric_sample(value=7, observed_at=recovered_at)]
+        )
+        third = service.tick(now=recovered_at)[0]
+
+    assert first.decision.action == NotificationRuleAction.hold
+    assert second.decision.action == NotificationRuleAction.hold
+    assert third.decision.action == NotificationRuleAction.hold
+    assert store.list_notification_deliveries() == []
+    state = store.get_notification_rule_state("r1")
+    assert state is not None
+    assert state.is_firing is False
+    assert state.breach_started_at is None
+    assert state.last_alert_at is None
+
+
+def test_tick_does_not_alert_when_no_sample_or_expired_sample(client) -> None:
+    login(client)
+    settings = _settings([_rule(threshold="10", for_minutes=0, read_interval_minutes=1)])
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    store.save_operational_data_runtime_settings(
+        OperationalDataRuntimeSettings(enabled=True, expiration=180)
+    )
+    service = main.get_notification_service()
+    service.operational_data_collector = None
+
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        missing = service.tick(now=now)[0]
+        old = now - timedelta(minutes=10)
+        store.save_operational_metric_samples(
+            [_metric_sample(value=99, observed_at=old)]
+        )
+        expired = service.tick(now=now + timedelta(minutes=1))[0]
+
+    assert missing.decision.action == NotificationRuleAction.no_data
+    assert expired.decision.action == NotificationRuleAction.no_data
+    assert store.list_notification_deliveries() == []
+
+
+def test_tick_does_not_alert_during_read_interval_even_with_new_noise(client) -> None:
+    login(client)
+    settings = _settings([_rule(threshold="10", read_interval_minutes=10, for_minutes=0)])
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    service = main.get_notification_service()
+
+    start = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.save_operational_metric_samples([_metric_sample(value=1, observed_at=start)])
+    first = service.tick(now=start)[0]
+    store.save_operational_metric_samples(
+        [_metric_sample(value=99, observed_at=start + timedelta(minutes=3))]
+    )
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        skipped = service.tick(now=start + timedelta(minutes=3))
+
+    assert first.decision.action == NotificationRuleAction.hold
+    assert skipped == []
+    assert store.list_notification_deliveries() == []
+    state = store.get_notification_rule_state("r1")
+    assert state is not None
+    assert state.is_firing is False
+    assert state.last_value == 1
+
+
+def test_tick_does_not_send_recovery_when_include_resolved_is_false(client) -> None:
+    login(client)
+    settings = _settings(
+        [
+            _rule(
+                threshold="10",
+                include_resolved=False,
+                for_minutes=0,
+                read_interval_minutes=1,
+            )
+        ]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.upsert_notification_rule_state(
+        NotificationRuleState(
+            rule_id="r1",
+            is_firing=True,
+            breach_started_at=now - timedelta(minutes=30),
+            last_alert_at=now - timedelta(minutes=10),
+        )
+    )
+    store.save_operational_metric_samples([_metric_sample(value=3, observed_at=now)])
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        outcomes = main.get_notification_service().tick(now=now)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].decision.action == NotificationRuleAction.hold
+    assert outcomes[0].deliveries == []
+    assert store.list_notification_deliveries() == []
+    state = store.get_notification_rule_state("r1")
+    assert state is not None
+    assert state.is_firing is False
+
+
+def test_tick_does_not_resend_active_alert_inside_cooldown(client) -> None:
+    login(client)
+    settings = _settings(
+        [_rule(threshold="10", cooldown_minutes=30, for_minutes=0, read_interval_minutes=1)]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.upsert_notification_rule_state(
+        NotificationRuleState(
+            rule_id="r1",
+            is_firing=True,
+            breach_started_at=now - timedelta(minutes=20),
+            last_alert_at=now - timedelta(minutes=5),
+        )
+    )
+    store.save_operational_metric_samples([_metric_sample(value=99, observed_at=now)])
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        outcomes = main.get_notification_service().tick(now=now)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].decision.action == NotificationRuleAction.hold
+    assert "cooldown" in outcomes[0].decision.reason
+    assert outcomes[0].deliveries == []
+    assert store.list_notification_deliveries() == []
+
+
+def test_tick_alerts_after_sustained_window_from_db_samples(client) -> None:
+    login(client)
+    settings = _settings(
+        [_rule(threshold="10", for_minutes=5, read_interval_minutes=1)]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    service = main.get_notification_service()
+    service.operational_data_collector = None
+
+    start = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    fire_at = start + timedelta(minutes=5)
+    store.save_operational_metric_samples([_metric_sample(value=12, observed_at=start)])
+    sent: list[dict[str, Any]] = []
+
+    class _OkResp:
+        status_code = 200
+        text = "ok"
+
+    def fake_request(self, method, url, data=None, headers=None, timeout=None):
+        sent.append({"method": method, "url": url})
+        return _OkResp()
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        first = service.tick(now=start)[0]
+        store.save_operational_metric_samples(
+            [_metric_sample(value=13, observed_at=fire_at)]
+        )
+        second = service.tick(now=fire_at)[0]
+
+    assert first.decision.action == NotificationRuleAction.hold
+    assert first.deliveries == []
+    assert second.decision.action == NotificationRuleAction.fire
+    assert len(second.deliveries) == 1
+    assert second.deliveries[0].status.value == "succeeded"
+    assert sent == [{"method": "POST", "url": "https://hooks.example.com/incoming"}]
+    audit = store.list_notification_deliveries()
+    assert len(audit) == 1
+    assert audit[0].trigger.value == "rule"
+    state = store.get_notification_rule_state("r1")
+    assert state is not None
+    assert state.is_firing is True
+    assert state.last_alert_at == fire_at
+
+
+def test_tick_resends_active_alert_after_cooldown_elapsed(client) -> None:
+    login(client)
+    settings = _settings(
+        [_rule(threshold="10", cooldown_minutes=30, for_minutes=0, read_interval_minutes=1)]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.upsert_notification_rule_state(
+        NotificationRuleState(
+            rule_id="r1",
+            is_firing=True,
+            breach_started_at=now - timedelta(hours=1),
+            last_alert_at=now - timedelta(minutes=31),
+            last_evaluated_at=now - timedelta(minutes=2),
+        )
+    )
+    store.save_operational_metric_samples([_metric_sample(value=99, observed_at=now)])
+    sent: list[dict[str, Any]] = []
+
+    class _OkResp:
+        status_code = 200
+        text = "ok"
+
+    def fake_request(self, method, url, data=None, headers=None, timeout=None):
+        sent.append({"method": method, "url": url})
+        return _OkResp()
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        outcomes = main.get_notification_service().tick(now=now)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].decision.action == NotificationRuleAction.fire
+    assert len(outcomes[0].deliveries) == 1
+    assert outcomes[0].deliveries[0].status.value == "succeeded"
+    assert sent == [{"method": "POST", "url": "https://hooks.example.com/incoming"}]
+    assert len(store.list_notification_deliveries()) == 1
+    state = store.get_notification_rule_state("r1")
+    assert state is not None
+    assert state.last_alert_at == now
+
+
 def test_tick_refreshes_samples_once_for_multiple_rules(client) -> None:
     login(client)
     settings = _settings(
@@ -646,6 +1048,9 @@ def test_notification_scheduler_runs_startup_tick_and_reports_snapshot() -> None
     scheduler = NotificationScheduler(service, cadence_seconds=60)
 
     scheduler.start()
+    deadline = time.monotonic() + 1
+    while service.calls == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
     snapshot = scheduler.snapshot()
     scheduler.stop()
 
@@ -851,3 +1256,27 @@ def test_evaluate_endpoint_returns_decision_and_state(client) -> None:
     assert payload["state"]["is_firing"] is True
     assert payload["deliveries"][0]["status"] == "succeeded"
     assert sent
+
+
+def test_evaluate_endpoint_does_not_alert_disabled_rule_with_breaching_noise(client) -> None:
+    login(client)
+    rule = _rule(threshold="10", for_minutes=0)
+    rule.enabled = False
+    settings = _settings([rule])
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.save_operational_metric_samples([_metric_sample(value=99, observed_at=now)])
+
+    service = main.get_notification_service()
+    service.operational_data_collector = None
+
+    with patch.object(requests.Session, "request", side_effect=AssertionError("should not send")):
+        response = client.post("/notifications/evaluate", json={"rule_id": "r1"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "hold"
+    assert payload["reason"] == "rule is disabled"
+    assert payload["deliveries"] == []
+    assert store.list_notification_deliveries() == []
