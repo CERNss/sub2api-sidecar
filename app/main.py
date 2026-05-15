@@ -40,6 +40,7 @@ from app.models.notification import NotificationSettings
 from app.models.operational_data import (
     CreditControlRuntimeSettings,
     OperationalDataRuntimeSettings,
+    ProvisioningRuntimeSettings,
 )
 from app.models.rotation import AutoRotationUsageWindow, RotationPoolGroup, RotationPoolKind
 from app.models.schemas import (
@@ -100,6 +101,9 @@ from app.models.schemas import (
     ProvisionCompleteRequest,
     ProvisionFlowDetailResponse,
     ProvisionFlowsEnvelope,
+    ProvisioningRuntimeSettingsEnvelope,
+    ProvisioningRuntimeSettingsRequest,
+    ProvisioningRuntimeSettingsResponse,
     ProvisionStartRequest,
     RotationExecutionResponse,
     RotationPoolCandidateResponse,
@@ -219,7 +223,7 @@ def get_provisioning_service() -> ProvisioningService:
         flow_store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
         openai_oauth_redirect_uri=settings.openai_oauth_redirect_uri,
-        assignment_mode=settings.assignment_mode,
+        assignment_mode_provider=lambda: get_provisioning_runtime_settings().assignment_mode,
     )
 
 
@@ -305,6 +309,38 @@ def credit_control_runtime_settings_response(
     return CreditControlRuntimeSettingsEnvelope(
         settings=CreditControlRuntimeSettingsResponse(
             enabled=settings.enabled,
+            updated_at=settings.updated_at,
+        )
+    )
+
+
+def get_provisioning_runtime_settings() -> ProvisioningRuntimeSettings:
+    stored = get_flow_store().get_provisioning_runtime_settings()
+    if stored is not None:
+        return stored
+    return ProvisioningRuntimeSettings()
+
+
+def save_provisioning_runtime_settings(
+    payload: ProvisioningRuntimeSettingsRequest,
+) -> ProvisioningRuntimeSettings:
+    existing = get_flow_store().get_provisioning_runtime_settings()
+    now = datetime.now(timezone.utc)
+    settings = ProvisioningRuntimeSettings(
+        assignment_mode=AssignmentMode(payload.assignment_mode),
+        created_at=existing.created_at if existing else now,
+        updated_at=now,
+    )
+    return get_flow_store().save_provisioning_runtime_settings(settings)
+
+
+def provisioning_runtime_settings_response(
+    settings: ProvisioningRuntimeSettings | None = None,
+) -> ProvisioningRuntimeSettingsEnvelope:
+    settings = settings if settings is not None else get_provisioning_runtime_settings()
+    return ProvisioningRuntimeSettingsEnvelope(
+        settings=ProvisioningRuntimeSettingsResponse(
+            assignment_mode=settings.assignment_mode.value,
             updated_at=settings.updated_at,
         )
     )
@@ -1504,6 +1540,28 @@ def provision_flow_detail(
         events=store.list_provision_events(flow_id),
     )
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/api/provisioning/settings")
+def provisioning_settings_get(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content=provisioning_runtime_settings_response().model_dump(mode="json"),
+    )
+
+
+@app.put("/api/provisioning/settings")
+def provisioning_settings_put(
+    payload: ProvisioningRuntimeSettingsRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    settings = save_provisioning_runtime_settings(payload)
+    return JSONResponse(
+        status_code=200,
+        content=provisioning_runtime_settings_response(settings).model_dump(mode="json"),
+    )
 
 
 @app.post("/provision/start")

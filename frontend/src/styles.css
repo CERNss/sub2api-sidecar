@@ -432,6 +432,32 @@ pre {
   margin-top: 2px;
 }
 
+.provision-runtime-settings {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.provision-runtime-settings > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.provision-runtime-settings span {
+  color: #526174;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.provision-runtime-settings strong {
+  color: #182235;
+  font-size: 15px;
+}
+
 .provision-callback-form {
   padding-top: 22px;
   border-top: 1px solid #e5e7eb;

@@ -3,11 +3,11 @@ from __future__ import annotations
 import logging
 import secrets
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 from app.clients.sub2api import Sub2APIClient
-from app.config import ProvisioningAssignmentMode
 from app.errors import (
     FlowNotFoundError,
     InvalidOAuthCallbackPayloadError,
@@ -35,12 +35,14 @@ class ProvisioningService:
         flow_store: SQLiteFlowStore,
         sub2api_client: Sub2APIClient,
         openai_oauth_redirect_uri: str,
-        assignment_mode: ProvisioningAssignmentMode,
+        assignment_mode_provider: Callable[[], AssignmentMode] | None = None,
     ) -> None:
         self.flow_store = flow_store
         self.sub2api_client = sub2api_client
         self.openai_oauth_redirect_uri = openai_oauth_redirect_uri
-        self.assignment_mode = assignment_mode
+        self.assignment_mode_provider = assignment_mode_provider or (
+            lambda: AssignmentMode.dedicated
+        )
 
     def start_flow(self, email: str) -> ProvisionStartResponse:
         logger.info("Starting provisioning flow for email=%s", email)
@@ -272,7 +274,8 @@ class ProvisioningService:
         return email[:128]
 
     def _resolve_group_assignment(self, email: str) -> tuple[object, AssignmentMode, str]:
-        if self.assignment_mode == ProvisioningAssignmentMode.dedicated:
+        assignment_mode = self.assignment_mode_provider()
+        if assignment_mode == AssignmentMode.dedicated:
             group_name = self._build_group_name(email)
             group = self.sub2api_client.create_group(group_name)
             return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"

@@ -4,7 +4,6 @@ import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ REMOVED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("auto_rotation",),
     ("credit_control",),
     ("operational_data",),
+    ("provisioning",),
     ("auto_rotation", "enabled"),
     ("auto_rotation", "interval_seconds"),
     ("auto_rotation", "cooldown_minutes"),
@@ -35,6 +35,7 @@ REMOVED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("operational_data", "enabled"),
     ("operational_data", "expiration"),
     ("operational_data", "collect_interval_seconds"),
+    ("provisioning", "assignment_mode"),
 )
 
 REMOVED_ENV_NAMES: tuple[str, ...] = (
@@ -50,6 +51,7 @@ REMOVED_ENV_NAMES: tuple[str, ...] = (
     "OPERATIONAL_DATA_ENABLED",
     "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS",
     "OPERATIONAL_DATA_EXPIRATION",
+    "PROVISIONING_ASSIGNMENT_MODE",
 )
 
 
@@ -106,11 +108,6 @@ class Sub2APIProvisioningDefaults:
     account_model_whitelist: tuple[str, ...] = DEFAULT_ACCOUNT_MODEL_WHITELIST
 
 
-class ProvisioningAssignmentMode(str, Enum):
-    dedicated = "dedicated"
-    managed_pool = "managed_pool"
-
-
 @dataclass(frozen=True)
 class Settings:
     sub2api_base_url: str
@@ -119,7 +116,6 @@ class Settings:
     app_base_path: str
     openai_oauth_redirect_uri: str
     sub2api_provisioning_defaults: Sub2APIProvisioningDefaults
-    assignment_mode: ProvisioningAssignmentMode = ProvisioningAssignmentMode.dedicated
     app_auth_username: str = "admin"
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
@@ -238,7 +234,6 @@ class Settings:
             account_temporary_unschedulable_rules=_rules_setting(config),
             account_model_whitelist=_account_model_whitelist_setting(config),
         )
-        values["assignment_mode"] = _assignment_mode_setting(config)
         if values["sub2api_provisioning_defaults"].account_concurrency <= 0:
             raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
 
@@ -542,26 +537,6 @@ def _parse_string_list_payload(payload: Any, *, source: str) -> tuple[str, ...]:
         raise ConfigurationError(f"{source} must contain at least one value")
 
     return tuple(cleaned)
-
-
-def _assignment_mode_setting(config: Mapping[str, Any]) -> ProvisioningAssignmentMode:
-    env_name = "PROVISIONING_ASSIGNMENT_MODE"
-    config_path = ("provisioning", "assignment_mode")
-    raw_value = _env_string(env_name)
-    source = env_name
-    if raw_value is None:
-        raw_value = _config_value(config, config_path)
-        source = _config_label(config_path)
-    if raw_value is None or raw_value == "":
-        raw_value = ProvisioningAssignmentMode.dedicated.value
-        source = env_name
-
-    try:
-        return ProvisioningAssignmentMode(str(raw_value).strip())
-    except ValueError as exc:
-        raise ConfigurationError(
-            f"{source} must be one of: {', '.join(mode.value for mode in ProvisioningAssignmentMode)}"
-        ) from exc
 
 
 @lru_cache(maxsize=1)

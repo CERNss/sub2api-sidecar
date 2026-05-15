@@ -140,6 +140,15 @@ type ProvisionFlowsPayload = ApiPayload & {
   offset: number;
 };
 
+type ProvisioningRuntimeSettings = {
+  assignment_mode: "dedicated" | "managed_pool";
+  updated_at?: string | null;
+};
+
+type ProvisioningRuntimeSettingsPayload = ApiPayload & {
+  settings: ProvisioningRuntimeSettings;
+};
+
 type OrchestrationMode = "replace_group" | "api_key";
 
 type GroupCapacityFallback = {
@@ -4836,8 +4845,11 @@ function ProvisionForm({
   const [callbackUrl, setCallbackUrl] = useState("");
   const [startPayload, setStartPayload] = useState<ProvisionStartPayload | null>(null);
   const [completePayload, setCompletePayload] = useState<ApiPayload | null>(null);
+  const [runtimeSettings, setRuntimeSettings] = useState<ProvisioningRuntimeSettings>({
+    assignment_mode: "dedicated"
+  });
   const [status, setStatus] = useState<StatusState>(emptyStatus);
-  const [busyAction, setBusyAction] = useState<"start" | "complete" | null>(null);
+  const [busyAction, setBusyAction] = useState<"start" | "complete" | "settings" | null>(null);
 
   const oauthUrl = typeof startPayload?.oauth_url === "string" ? startPayload.oauth_url : "";
   const redirectUri =
@@ -4846,6 +4858,50 @@ function ProvisionForm({
       : FIXED_OAUTH_REDIRECT_URI;
   const callbackPlaceholder = `${redirectUri}${redirectUri.includes("?") ? "&" : "?"}code=...&state=...`;
   const visiblePayload = useMemo(() => completePayload ?? startPayload, [completePayload, startPayload]);
+
+  async function loadProvisioningSettings() {
+    try {
+      const payload = await requestJson<ProvisioningRuntimeSettingsPayload>(
+        "/api/provisioning/settings",
+        { method: "GET" },
+        "加载预配设置失败"
+      );
+      setRuntimeSettings(payload.settings);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "加载预配设置失败"), tone: "error" });
+      }
+    }
+  }
+
+  useEffect(() => {
+    void loadProvisioningSettings();
+  }, []);
+
+  async function saveProvisioningSettings(assignmentMode: ProvisioningRuntimeSettings["assignment_mode"]) {
+    setRuntimeSettings((current) => ({ ...current, assignment_mode: assignmentMode }));
+    setBusyAction("settings");
+    setStatus({ message: "正在保存预配模式。", tone: "info" });
+    try {
+      const payload = await requestJson<ProvisioningRuntimeSettingsPayload>(
+        "/api/provisioning/settings",
+        {
+          method: "PUT",
+          body: JSON.stringify({ assignment_mode: assignmentMode })
+        },
+        "保存预配设置失败"
+      );
+      setRuntimeSettings(payload.settings);
+      setStatus({ message: "预配模式已保存。", tone: "success" });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        await loadProvisioningSettings();
+        setStatus({ message: getErrorMessage(error, "保存预配设置失败"), tone: "error" });
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  }
 
   async function startProvision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -4909,6 +4965,21 @@ function ProvisionForm({
   return (
     <div className="workspace">
       <section className="panel form-panel provision-form-panel">
+        <div className="provision-runtime-settings">
+          <div>
+            <span>Assignment Mode</span>
+            <strong>{runtimeSettings.assignment_mode === "managed_pool" ? "Managed Pool" : "Dedicated"}</strong>
+          </div>
+          <AntSegmented
+            value={runtimeSettings.assignment_mode}
+            disabled={busyAction !== null}
+            onChange={(value) => void saveProvisioningSettings(value as ProvisioningRuntimeSettings["assignment_mode"])}
+            options={[
+              { label: "Dedicated", value: "dedicated" },
+              { label: "Managed Pool", value: "managed_pool" }
+            ]}
+          />
+        </div>
         <form className="form-stack" onSubmit={startProvision}>
           <label className="field">
             <span>Email</span>

@@ -18,6 +18,7 @@ from app.models.operational_data import (
     CreditControlRuntimeSettings,
     OperationalDataRuntimeSettings,
     OperationalDataSnapshot,
+    ProvisioningRuntimeSettings,
 )
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
@@ -1677,13 +1678,14 @@ def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> 
     assert runs[0].moved[0]["metadata"]["key_id"] == "key-101"
 
 
-def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch) -> None:
+def test_managed_pool_provisioning_uses_selected_pool_group(client) -> None:
     backend = FakeRotationSub2API()
-    monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "managed_pool")
-    clear_caches()
 
     with TestClient(main.app) as managed_client:
         login(managed_client)
+        main.get_flow_store().save_provisioning_runtime_settings(
+            ProvisioningRuntimeSettings(assignment_mode=AssignmentMode.managed_pool)
+        )
         main.get_flow_store().upsert_rotation_pool_group(
             RotationPoolGroup(
                 group_id=11,
@@ -1718,6 +1720,35 @@ def test_managed_pool_provisioning_uses_selected_pool_group(client, monkeypatch)
     assert completed_flow.user_id is None
     assert completed_flow.group_id == "11"
     assert completed_flow.assignment_mode == AssignmentMode.managed_pool
+
+
+def test_provisioning_settings_api_updates_assignment_mode(client) -> None:
+    login(client)
+
+    initial = client.get("/api/provisioning/settings")
+    saved = client.put(
+        "/api/provisioning/settings",
+        json={"assignment_mode": "managed_pool"},
+    )
+    reloaded = client.get("/api/provisioning/settings")
+
+    assert initial.status_code == 200
+    assert initial.json()["settings"]["assignment_mode"] == "dedicated"
+    assert saved.status_code == 200
+    assert saved.json()["settings"]["assignment_mode"] == "managed_pool"
+    assert reloaded.status_code == 200
+    assert reloaded.json()["settings"]["assignment_mode"] == "managed_pool"
+
+
+def test_provisioning_settings_api_rejects_invalid_assignment_mode(client) -> None:
+    login(client)
+
+    response = client.put(
+        "/api/provisioning/settings",
+        json={"assignment_mode": "surprise_pool"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_auto_rotation_scheduler_status_requires_auth(client) -> None:

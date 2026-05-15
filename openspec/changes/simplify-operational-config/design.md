@@ -60,7 +60,17 @@ Automatic rotation keeps using its existing dynamic orchestration runtime API/UI
 }
 ```
 
-All three are runtime settings, not deployment settings, and none of these documents belongs in `config.yaml`.
+Provisioning assignment mode is persisted in SQLite and edited only through the authenticated provisioning API/UI:
+
+```json
+{
+  "assignment_mode": "dedicated"
+}
+```
+
+New OAuth flows read the current provisioning runtime setting when `POST /provision/start` is called and persist the selected mode on the flow record. Later changes affect new flows only.
+
+All four are runtime settings, not deployment settings, and none of these documents belongs in `config.yaml`.
 
 ### Internal cadence is code-owned
 
@@ -95,6 +105,6 @@ Direct upstream calls remain only for mutating upstream state or for explicit op
 ## Migration Plan
 
 1. Remove `auto_rotation`, `credit_control`, and `operational_data` sections from `config.yaml`, plus their previous environment variables, before deploying.
-2. Start the service with only deployment settings such as app, storage, OpenAI OAuth, Sub2API connection, provisioning defaults, and assignment mode.
-3. Configure operational data enabled/expiration, credit-control enabled, and automatic-rotation business policy through the authenticated runtime UI/API after startup.
+2. Start the service with only deployment settings such as app, storage, OpenAI OAuth, Sub2API connection, and Sub2API provisioning defaults.
+3. Configure provisioning assignment mode, operational data enabled/expiration, credit-control enabled, and automatic-rotation business policy through the authenticated runtime UI/API after startup.
 4. Confirm scheduler status endpoints report running process schedulers and current runtime enabled state.

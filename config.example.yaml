@@ -46,6 +46,3 @@ sub2api:
           - unavailable
           - maintenance
         description: 服务不可用 - 暂停 30 分钟
-
-provisioning:
-  assignment_mode: dedicated

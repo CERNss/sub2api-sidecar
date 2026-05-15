@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.flow import AssignmentMode
+
 
 class OperationalMetricSample(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -59,5 +61,13 @@ class CreditControlRuntimeSettings(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     enabled: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ProvisioningRuntimeSettings(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    assignment_mode: AssignmentMode = AssignmentMode.dedicated
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

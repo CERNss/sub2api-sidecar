@@ -1,10 +1,11 @@
 ## Why
 
-The deployment config still exposes runtime scheduler switches and automatic-rotation tuning fields even though operational data is now the shared source for notifications, credit control, and automatic orchestration. This makes the runtime contract harder to understand, requires process restarts for operator switches, and lets separate modules drift back into their own polling settings.
+The deployment config still exposes runtime scheduler switches, provisioning assignment mode, and automatic-rotation tuning fields even though operational data is now the shared source for notifications, credit control, and automatic orchestration. This makes the runtime contract harder to understand, requires process restarts for operator switches, and lets separate modules drift back into their own polling settings.
 
 ## What Changes
 
-- **BREAKING** Remove deployment-config support for `auto_rotation`, `credit_control`, and `operational_data` runtime sections entirely.
+- **BREAKING** Remove deployment-config support for `auto_rotation`, `credit_control`, `operational_data`, and `provisioning.assignment_mode` runtime settings entirely.
+- Store provisioning runtime settings (`assignment_mode`) in SQLite and expose them through authenticated API/UI.
 - Store operational-data runtime settings (`enabled`, optional `expiration`) in SQLite and expose them through authenticated API/UI.
 - Store credit-control scheduler runtime settings (`enabled`) in SQLite and expose them through authenticated API/UI.
 - Keep automatic-rotation execution enabled state and policy fields on the authenticated dynamic orchestration API/UI.
@@ -24,6 +25,6 @@ The deployment config still exposes runtime scheduler switches and automatic-rot
 
 ## Impact
 
-- Affected code: settings parsing, SQLite runtime settings, FastAPI runtime settings endpoints, scheduler startup/status, notification expiration lookup, credit-control scheduling, rotation runtime defaults, UI settings controls, tests, README, and `config.example.yaml`.
-- Affected config: removed sections include `auto_rotation`, `credit_control`, and `operational_data`; removed env vars include their previous scheduler/policy/runtime equivalents.
+- Affected code: settings parsing, SQLite runtime settings, FastAPI runtime settings endpoints, scheduler startup/status, provisioning assignment lookup, notification expiration lookup, credit-control scheduling, rotation runtime defaults, UI settings controls, tests, README, and `config.example.yaml`.
+- Affected config: removed sections include `auto_rotation`, `credit_control`, `operational_data`, and `provisioning`; removed env vars include their previous scheduler/policy/runtime equivalents.
 - Affected operators: existing `config.yaml` files must remove those sections and configure runtime switches from the authenticated web UI/API.

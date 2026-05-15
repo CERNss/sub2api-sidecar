@@ -11,4 +11,5 @@ The project SHALL include Docker Compose configuration for running the service l
 - **THEN** host port `8000` maps to container port `8000`
 - **THEN** the SQLite data directory persists through a mounted project `data/` directory
 - **THEN** deployment config contains no `auto_rotation`, `credit_control`, or `operational_data` runtime sections
+- **THEN** deployment config contains no `provisioning.assignment_mode` runtime setting
 - **THEN** removed runtime scheduler, switch, expiration, or policy fields in deployment config prevent startup instead of being ignored

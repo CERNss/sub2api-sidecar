@@ -32,6 +32,20 @@ class ProvisionStartRequest(BaseModel):
     email: EmailStr
 
 
+class ProvisioningRuntimeSettingsResponse(BaseModel):
+    assignment_mode: str = "dedicated"
+    updated_at: datetime | None = None
+
+
+class ProvisioningRuntimeSettingsRequest(BaseModel):
+    assignment_mode: str = Field(default="dedicated", pattern="^(dedicated|managed_pool)$")
+
+
+class ProvisioningRuntimeSettingsEnvelope(BaseModel):
+    success: bool = True
+    settings: ProvisioningRuntimeSettingsResponse
+
+
 class ProvisionStartResponse(BaseModel):
     success: bool = True
     flow_id: str

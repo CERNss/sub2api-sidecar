@@ -11,6 +11,7 @@ from app.models.operational_data import (
     OperationalDataSnapshot,
     OperationalDataSourceStatus,
     OperationalMetricSample,
+    ProvisioningRuntimeSettings,
 )
 from app.models.rotation import RotationEvent, RotationPoolGroup, RotationResultStatus, RotationTrigger, UserGroupAssignment
 from app.stores.sqlite import SQLiteFlowStore
@@ -301,12 +302,22 @@ def test_sqlite_store_persists_runtime_settings(tmp_path: Path) -> None:
             updated_at=now,
         )
     )
+    store.save_provisioning_runtime_settings(
+        ProvisioningRuntimeSettings(
+            assignment_mode=AssignmentMode.managed_pool,
+            created_at=now,
+            updated_at=now,
+        )
+    )
 
     operational = store.get_operational_data_runtime_settings()
     credit = store.get_credit_control_runtime_settings()
+    provisioning = store.get_provisioning_runtime_settings()
 
     assert operational is not None
     assert operational.enabled is True
     assert operational.expiration == 180
     assert credit is not None
     assert credit.enabled is False
+    assert provisioning is not None
+    assert provisioning.assignment_mode == AssignmentMode.managed_pool

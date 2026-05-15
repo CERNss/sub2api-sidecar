@@ -26,6 +26,7 @@ from app.models.operational_data import (
     OperationalDataSnapshot,
     OperationalDataSourceStatus,
     OperationalMetricSample,
+    ProvisioningRuntimeSettings,
 )
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
@@ -355,6 +356,21 @@ class SQLiteFlowStore(FlowStore):
         settings: CreditControlRuntimeSettings,
     ) -> CreditControlRuntimeSettings:
         self._save_runtime_settings("credit_control", settings)
+        return settings
+
+    def get_provisioning_runtime_settings(
+        self,
+    ) -> ProvisioningRuntimeSettings | None:
+        return self._load_runtime_settings(
+            "provisioning",
+            ProvisioningRuntimeSettings,
+        )
+
+    def save_provisioning_runtime_settings(
+        self,
+        settings: ProvisioningRuntimeSettings,
+    ) -> ProvisioningRuntimeSettings:
+        self._save_runtime_settings("provisioning", settings)
         return settings
 
     def upsert_user_assignment(self, assignment: UserGroupAssignment) -> UserGroupAssignment:

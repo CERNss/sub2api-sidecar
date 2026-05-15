@@ -87,8 +87,6 @@ sub2api:
           - teapot
           - brew
         description: 茶壶保护 - 暂停 5 分钟
-provisioning:
-  assignment_mode: managed_pool
 """.lstrip(),
         encoding="utf-8",
     )
@@ -105,7 +103,6 @@ provisioning:
     assert settings.app_access_key_ttl_hours == 6
     assert settings.sqlite_db_path == "./data/yaml.db"
     assert settings.request_timeout_seconds == 12
-    assert settings.assignment_mode.value == "managed_pool"
 
     defaults = settings.sub2api_provisioning_defaults
     assert defaults.group_platform == "yaml-group"
@@ -183,6 +180,8 @@ operational_data:
   enabled: true
   expiration: 240
   collect_interval_seconds: 60
+provisioning:
+  assignment_mode: managed_pool
 """.lstrip(),
         encoding="utf-8",
     )
@@ -204,6 +203,8 @@ operational_data:
     assert "operational_data.enabled" in message
     assert "operational_data.expiration" in message
     assert "operational_data.collect_interval_seconds" in message
+    assert "provisioning" in message
+    assert "provisioning.assignment_mode" in message
 
 
 def test_settings_rejects_removed_runtime_env(monkeypatch) -> None:
@@ -215,6 +216,7 @@ def test_settings_rejects_removed_runtime_env(monkeypatch) -> None:
     monkeypatch.setenv("OPERATIONAL_DATA_EXPIRATION", "240")
     monkeypatch.setenv("CREDIT_CONTROL_ENABLED", "false")
     monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
+    monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "managed_pool")
 
     with pytest.raises(Exception) as exc_info:
         Settings.from_env()
@@ -223,6 +225,7 @@ def test_settings_rejects_removed_runtime_env(monkeypatch) -> None:
     assert "AUTO_ROTATION_ENABLED" in message
     assert "CREDIT_CONTROL_ENABLED" in message
     assert "OPERATIONAL_DATA_EXPIRATION" in message
+    assert "PROVISIONING_ASSIGNMENT_MODE" in message
 
 
 def test_settings_normalizes_env_base_path(monkeypatch) -> None:
@@ -285,7 +288,7 @@ def test_settings_parse_sub2api_provisioning_overrides(monkeypatch) -> None:
     assert rules[0].description == "茶壶保护 - 暂停 5 分钟"
 
 
-def test_settings_parse_managed_pool(monkeypatch) -> None:
+def test_settings_rejects_removed_provisioning_assignment_mode_env(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
@@ -293,9 +296,10 @@ def test_settings_parse_managed_pool(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
     monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "managed_pool")
 
-    settings = Settings.from_env()
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
 
-    assert settings.assignment_mode.value == "managed_pool"
+    assert "PROVISIONING_ASSIGNMENT_MODE" in str(exc_info.value)
 
 
 def test_settings_rejects_removed_auto_rotation_env(monkeypatch) -> None:
