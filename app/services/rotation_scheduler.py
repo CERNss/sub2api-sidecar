@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event, Thread
+from typing import Callable
 
 from app.models.rotation import RotationTrigger
 from app.services.rotation import RotationService
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 class AutoRotationSchedulerSnapshot:
     enabled: bool
     running: bool
-    interval_seconds: int
+    cadence_seconds: int
     tick_count: int
     last_tick_started_at: datetime | None = None
     last_tick_finished_at: datetime | None = None
@@ -29,9 +30,15 @@ class AutoRotationSchedulerSnapshot:
 
 
 class AutoRotationScheduler:
-    def __init__(self, rotation_service: RotationService, interval_seconds: int) -> None:
+    def __init__(
+        self,
+        rotation_service: RotationService,
+        cadence_seconds: int,
+        enabled_provider: Callable[[], bool] | None = None,
+    ) -> None:
         self.rotation_service = rotation_service
-        self.interval_seconds = interval_seconds
+        self.cadence_seconds = cadence_seconds
+        self.enabled_provider = enabled_provider or (lambda: True)
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._tick_count = 0
@@ -46,10 +53,10 @@ class AutoRotationScheduler:
         self._last_failed_count = 0
 
     def start(self) -> None:
-        if self.interval_seconds <= 0:
+        if self.cadence_seconds <= 0:
             logger.info(
-                "Auto-rotation scheduler disabled | interval_seconds=%s",
-                self.interval_seconds,
+                "Auto-rotation scheduler disabled | cadence_seconds=%s",
+                self.cadence_seconds,
             )
             return
         if self._thread is not None:
@@ -57,8 +64,8 @@ class AutoRotationScheduler:
         self._thread = Thread(target=self._run, name="auto-rotation-scheduler", daemon=True)
         self._thread.start()
         logger.info(
-            "Auto-rotation scheduler started | interval_seconds=%s",
-            self.interval_seconds,
+            "Auto-rotation scheduler started | cadence_seconds=%s",
+            self.cadence_seconds,
         )
 
     def stop(self) -> None:
@@ -74,9 +81,9 @@ class AutoRotationScheduler:
 
     def snapshot(self) -> AutoRotationSchedulerSnapshot:
         return AutoRotationSchedulerSnapshot(
-            enabled=self.interval_seconds > 0,
+            enabled=self._enabled(),
             running=self.is_running,
-            interval_seconds=self.interval_seconds,
+            cadence_seconds=self.cadence_seconds,
             tick_count=self._tick_count,
             last_tick_started_at=self._last_tick_started_at,
             last_tick_finished_at=self._last_tick_finished_at,
@@ -90,12 +97,16 @@ class AutoRotationScheduler:
         )
 
     def _run(self) -> None:
-        while not self._stop_event.wait(self.interval_seconds):
+        while not self._stop_event.wait(self.cadence_seconds):
             self._tick_once()
 
     def _tick_once(self) -> None:
         try:
             self._last_tick_started_at = datetime.now(timezone.utc)
+            if not self._enabled():
+                self._last_tick_error = None
+                logger.info("Auto-rotation scheduler tick skipped | enabled=false")
+                return
             logger.info("Running interval-based automatic rotation")
             record = self.rotation_service.run_auto_rotation(
                 trigger_type=RotationTrigger.automatic_interval
@@ -122,3 +133,10 @@ class AutoRotationScheduler:
             logger.exception("Interval-based automatic rotation failed")
         finally:
             self._last_tick_finished_at = datetime.now(timezone.utc)
+
+    def _enabled(self) -> bool:
+        try:
+            return bool(self.enabled_provider())
+        except Exception:
+            logger.exception("Auto-rotation scheduler enabled check failed")
+            return False

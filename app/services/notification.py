@@ -62,12 +62,10 @@ class NotificationService:
         store: SQLiteFlowStore,
         delivery: NotificationDeliveryService,
         operational_data_collector: OperationalDataCollector | None = None,
-        expiration: int | None = None,
     ) -> None:
         self.store = store
         self.delivery = delivery
         self.operational_data_collector = operational_data_collector
-        self.expiration = expiration
         self.last_collection_result: OperationalDataCollectionResult | None = None
 
     def load_config(self) -> NotificationSettings:
@@ -124,7 +122,17 @@ class NotificationService:
     def refresh_samples(self, *, now: datetime | None = None) -> None:
         if self.operational_data_collector is None:
             return
+        if not self.operational_data_runtime_settings().enabled:
+            return
         self.last_collection_result = self.operational_data_collector.collect(now=now)
+
+    def operational_data_runtime_settings(self):
+        stored = self.store.get_operational_data_runtime_settings()
+        if stored is not None:
+            return stored
+        from app.models.operational_data import OperationalDataRuntimeSettings
+
+        return OperationalDataRuntimeSettings()
 
     def _should_evaluate_now(self, rule: NotificationRule, now: datetime) -> bool:
         prior = self.store.get_notification_rule_state(rule.id)
@@ -188,11 +196,12 @@ class NotificationService:
     def _sample_is_expired(
         self, sample: OperationalMetricSample, *, now: datetime
     ) -> bool:
-        if self.expiration is None:
+        expiration = self.operational_data_runtime_settings().expiration
+        if expiration is None:
             return False
         observed_at = _ensure_aware(sample.observed_at)
         moment = _ensure_aware(now)
-        return moment - observed_at > timedelta(seconds=self.expiration)
+        return moment - observed_at > timedelta(seconds=expiration)
 
     def _summary_for(self, decision: RuleDecision, rule: NotificationRule) -> str:
         if decision.action == NotificationRuleAction.recover:

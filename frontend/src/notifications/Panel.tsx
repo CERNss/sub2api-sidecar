@@ -8,11 +8,14 @@ import {
   getNotificationApiErrorMessage,
   loadNotificationDeliveries,
   loadNotificationSettings,
+  loadOperationalDataSettings,
+  saveOperationalDataSettings,
   saveNotificationSettings,
   sendNotificationTest
 } from "./api";
 import {
   NotificationDeliveryHistory,
+  OperationalDataRuntimeSettings,
   NotificationRule,
   NotificationSettings,
   NotificationTestResult,
@@ -46,6 +49,12 @@ export function NotificationPanel({ onAuthExpired }: Props) {
   const [deliveryHistory, setDeliveryHistory] =
     useState<NotificationDeliveryHistory>(emptyDeliveryHistory);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [operationalSettings, setOperationalSettings] = useState<OperationalDataRuntimeSettings>({
+    enabled: true,
+    expiration: null
+  });
+  const [operationalExpirationDraft, setOperationalExpirationDraft] = useState("");
+  const [isSavingOperational, setIsSavingOperational] = useState(false);
 
   function applySettings(next: NotificationSettings) {
     setSettings(next);
@@ -63,9 +72,16 @@ export function NotificationPanel({ onAuthExpired }: Props) {
       setIsLoading(true);
       setIsLoadingHistory(true);
       try {
-        const loaded = await loadNotificationSettings();
+        const [loaded, loadedOperational] = await Promise.all([
+          loadNotificationSettings(),
+          loadOperationalDataSettings()
+        ]);
         if (cancelled) return;
         applySettings(loaded);
+        setOperationalSettings(loadedOperational);
+        setOperationalExpirationDraft(
+          loadedOperational.expiration === null ? "" : String(loadedOperational.expiration)
+        );
         setStatus({ message: "已从数据库加载告警配置。", tone: "success" });
         try {
           const history = await loadNotificationDeliveries(50);
@@ -114,6 +130,39 @@ export function NotificationPanel({ onAuthExpired }: Props) {
     } finally {
       setIsLoadingHistory(false);
     }
+  }
+
+  async function saveOperationalRuntimeSettings(next: OperationalDataRuntimeSettings) {
+    setIsSavingOperational(true);
+    setStatus({ message: "正在保存运行态数据设置。", tone: "info" });
+    try {
+      const saved = await saveOperationalDataSettings(next);
+      setOperationalSettings(saved);
+      setOperationalExpirationDraft(saved.expiration === null ? "" : String(saved.expiration));
+      setStatus({ message: "运行态数据设置已保存。", tone: "success" });
+    } catch (error) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({
+          message: getNotificationApiErrorMessage(error, "保存运行态数据设置失败"),
+          tone: "error"
+        });
+      }
+    } finally {
+      setIsSavingOperational(false);
+    }
+  }
+
+  function saveOperationalExpiration() {
+    const raw = operationalExpirationDraft.trim();
+    const expiration = raw === "" ? null : Number(raw);
+    if (expiration !== null && (!Number.isFinite(expiration) || expiration <= 0)) {
+      setStatus({ message: "Expiration 必须为空或正整数秒。", tone: "error" });
+      return;
+    }
+    void saveOperationalRuntimeSettings({
+      ...operationalSettings,
+      expiration: expiration === null ? null : Math.floor(expiration)
+    });
   }
 
   function updateWebhook(id: string, partial: Partial<NotificationWebhook>) {
@@ -329,6 +378,52 @@ export function NotificationPanel({ onAuthExpired }: Props) {
       </div>
 
       <div className="notif-summary-area">
+        <section className="notif-runtime-card">
+          <div className="notif-section-head">
+            <div>
+              <h3>运行态数据</h3>
+              <p>SQLite snapshot source</p>
+            </div>
+            <label className="notif-mini-toggle">
+              <input
+                type="checkbox"
+                checked={operationalSettings.enabled}
+                disabled={isSavingOperational}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setOperationalSettings((current) => ({ ...current, enabled }));
+                  void saveOperationalRuntimeSettings({ ...operationalSettings, enabled });
+                }}
+              />
+              <span>{operationalSettings.enabled ? "启用" : "停用"}</span>
+            </label>
+          </div>
+          <div className="notif-runtime-expiration">
+            <label className="notif-field">
+              <span>Expiration</span>
+              <input
+                value={operationalExpirationDraft}
+                inputMode="numeric"
+                placeholder="不设置"
+                disabled={isSavingOperational}
+                onChange={(event) => setOperationalExpirationDraft(event.target.value)}
+              />
+            </label>
+            <button
+              className="button compact"
+              type="button"
+              disabled={isSavingOperational}
+              onClick={saveOperationalExpiration}
+            >
+              {isSavingOperational ? (
+                <LoaderCircle className="spin" size={16} aria-hidden="true" />
+              ) : (
+                <Save size={16} aria-hidden="true" />
+              )}
+              保存
+            </button>
+          </div>
+        </section>
         <Summary
           settings={settings}
           deliveryHistory={deliveryHistory}

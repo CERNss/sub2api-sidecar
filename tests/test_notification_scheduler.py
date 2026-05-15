@@ -18,7 +18,11 @@ from app.models.notification import (
     NotificationWebhook,
     WebhookProvider,
 )
-from app.models.operational_data import OperationalDataSourceStatus, OperationalMetricSample
+from app.models.operational_data import (
+    OperationalDataRuntimeSettings,
+    OperationalDataSourceStatus,
+    OperationalMetricSample,
+)
 from app.services.operational_data import (
     OperationalDataCollectionResult,
     OperationalDataCollector,
@@ -118,6 +122,13 @@ class _FakeOperationalDataCollector:
 def _install_fake_pipeline(
     samples: list[OperationalMetricSample] | None = None,
 ) -> _FakeOperationalDataCollector:
+    existing = main.get_flow_store().get_operational_data_runtime_settings()
+    main.get_flow_store().save_operational_data_runtime_settings(
+        OperationalDataRuntimeSettings(
+            enabled=True,
+            expiration=existing.expiration if existing else None,
+        )
+    )
     collector = _FakeOperationalDataCollector(samples)
     main.get_notification_service().operational_data_collector = collector
     return collector
@@ -186,6 +197,22 @@ class _FakeSub2APIClient:
             {"id": "u1", "email": "a@example.com", "balance": 10},
             {"id": "u2", "email": "b@example.com", "balance": 3},
         ]
+
+    def get_user_usage(self, user_id, period):
+        return {"total_cost": 1.0, "period": period}
+
+    def get_user_api_keys(self, user_id):
+        return {
+            "items": [
+                {
+                    "id": f"key-{user_id}",
+                    "usage_5h": 1.0,
+                    "usage_1d": 2.0,
+                    "usage_7d": 3.0,
+                }
+            ],
+            "total": 1,
+        }
 
     def list_groups(self, platform=None):
         return [{"id": "g1", "name": "Group One", "status": "active"}]
@@ -320,6 +347,14 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
             self.calls.append("users")
             return super().list_users()
 
+        def get_user_usage(self, user_id, period):
+            self.calls.append(f"user_usage:{user_id}:{period}")
+            return super().get_user_usage(user_id, period)
+
+        def get_user_api_keys(self, user_id):
+            self.calls.append(f"user_api_keys:{user_id}")
+            return super().get_user_api_keys(user_id)
+
         def get_usage_stats(self, *, user_id, start_date, end_date, timezone_name):
             self.calls.append(f"usage:{start_date}")
             return super().get_usage_stats(
@@ -342,6 +377,16 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "accounts",
         "groups:openai",
         "users",
+        "user_usage:u1:5h",
+        "user_usage:u1:1d",
+        "user_usage:u1:7d",
+        "user_usage:u1:30d",
+        "user_usage:u2:5h",
+        "user_usage:u2:1d",
+        "user_usage:u2:7d",
+        "user_usage:u2:30d",
+        "user_api_keys:u1",
+        "user_api_keys:u2",
         "usage:2026-05-10",
         "usage:2026-05-09",
     ]
@@ -351,6 +396,8 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "accounts",
         "groups",
         "users",
+        "user_usage",
+        "user_api_keys",
         "usage_current_day",
         "usage_previous_day",
     }
@@ -560,7 +607,7 @@ def test_notification_scheduler_runs_startup_tick_and_reports_snapshot() -> None
             return []
 
     service = _FakeService()
-    scheduler = NotificationScheduler(service, collect_interval_seconds=60)
+    scheduler = NotificationScheduler(service, cadence_seconds=60)
 
     scheduler.start()
     snapshot = scheduler.snapshot()
@@ -568,7 +615,7 @@ def test_notification_scheduler_runs_startup_tick_and_reports_snapshot() -> None
 
     assert service.calls == 1
     assert snapshot.enabled is True
-    assert snapshot.collect_interval_seconds == 60
+    assert snapshot.cadence_seconds == 60
     assert snapshot.tick_count == 1
     assert snapshot.last_tick_started_at is not None
     assert snapshot.last_tick_error is None
@@ -592,7 +639,6 @@ def test_evaluate_once_does_not_expire_samples_when_expiration_unset(client) -> 
     settings = _settings([_rule(threshold="10", for_minutes=0, target_ids=())])
     main.get_flow_store().save_notification_settings(settings)
     service = main.get_notification_service()
-    service.expiration = None
     _install_fake_pipeline(
         [
             _metric_sample(
@@ -614,8 +660,10 @@ def test_evaluate_once_returns_no_data_when_sample_is_expired(client) -> None:
     login(client)
     settings = _settings([_rule(threshold="10", for_minutes=0)])
     main.get_flow_store().save_notification_settings(settings)
+    main.get_flow_store().save_operational_data_runtime_settings(
+        OperationalDataRuntimeSettings(enabled=True, expiration=180)
+    )
     service = main.get_notification_service()
-    service.expiration = 180
     _install_fake_pipeline(
         [
             _metric_sample(
@@ -650,8 +698,8 @@ def test_scheduler_status_endpoint_reports_disabled_scheduler(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["enabled"] is False
-    assert payload["running"] is False
-    assert payload["collect_interval_seconds"] == 0
+    assert payload["running"] is True
+    assert payload["cadence_seconds"] == 60
     assert payload["expiration"] is None
     assert payload["tick_count"] == 0
     assert payload["source_statuses"] == []

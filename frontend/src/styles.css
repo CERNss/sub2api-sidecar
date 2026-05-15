@@ -588,6 +588,17 @@ pre {
   margin: 0;
 }
 
+.runtime-toggle {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
 .credit-status {
   margin: 0;
 }
@@ -818,7 +829,28 @@ pre {
 .notif-summary-area {
   grid-area: summary;
   display: grid;
-  min-width: 0;
+  gap: 12px;
+  align-content: start;
+}
+
+.notif-runtime-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+  padding: 14px;
+  background: #ffffff;
+}
+
+.notif-runtime-expiration {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.notif-runtime-expiration .button {
+  min-height: 38px;
 }
 
 .notif-rules-area {

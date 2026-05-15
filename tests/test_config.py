@@ -24,6 +24,9 @@ CONFIG_ENV_NAMES = (
     "AUTO_ROTATION_COOLDOWN_MINUTES",
     "AUTO_ROTATION_USAGE_WINDOW",
     "AUTO_ROTATION_USAGE_THRESHOLDS_JSON",
+    "AUTO_ROTATION_IMBALANCE_EPSILON",
+    "AUTO_ROTATION_IMPROVEMENT_DELTA",
+    "CREDIT_CONTROL_ENABLED",
     "CREDIT_CONTROL_RECHARGE_TICK_SECONDS",
     "OPERATIONAL_DATA_ENABLED",
     "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS",
@@ -44,6 +47,7 @@ CONFIG_ENV_NAMES = (
 def _clear_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for env_name in CONFIG_ENV_NAMES:
         monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
 
 
 def test_settings_loads_non_secret_config_from_yaml(
@@ -85,20 +89,6 @@ sub2api:
         description: 茶壶保护 - 暂停 5 分钟
 provisioning:
   assignment_mode: managed_pool
-auto_rotation:
-  enabled: true
-  interval_seconds: 300
-  cooldown_minutes: 5
-  usage_window: 5h
-  usage_thresholds:
-    - 10
-    - 20.5
-credit_control:
-  recharge_tick_seconds: 120
-operational_data:
-  enabled: true
-  collect_interval_seconds: 90
-  expiration: 240
 """.lstrip(),
         encoding="utf-8",
     )
@@ -116,15 +106,6 @@ operational_data:
     assert settings.sqlite_db_path == "./data/yaml.db"
     assert settings.request_timeout_seconds == 12
     assert settings.assignment_mode.value == "managed_pool"
-    assert settings.auto_rotation.enabled is True
-    assert settings.auto_rotation.interval_seconds == 300
-    assert settings.auto_rotation.cooldown_minutes == 5
-    assert settings.auto_rotation.usage_window.value == "5h"
-    assert settings.auto_rotation.usage_thresholds == (10.0, 20.5)
-    assert settings.credit_control.recharge_tick_seconds == 120
-    assert settings.operational_data.enabled is True
-    assert settings.operational_data.collect_interval_seconds == 90
-    assert settings.operational_data.expiration == 240
 
     defaults = settings.sub2api_provisioning_defaults
     assert defaults.group_platform == "yaml-group"
@@ -157,37 +138,21 @@ sub2api:
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SUB2API_BASE_URL", "http://env-sub2api.local")
     monkeypatch.setenv("APP_ACCESS_KEY_TTL_HOURS", "18")
-    monkeypatch.setenv("OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS", "45")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
 
     settings = Settings.from_env()
 
     assert settings.sub2api_base_url == "http://env-sub2api.local"
     assert settings.app_access_key_ttl_hours == 18
-    assert settings.operational_data.collect_interval_seconds == 45
 
 
-def test_settings_defaults_operational_data_to_enabled(monkeypatch) -> None:
+def test_settings_rejects_removed_operational_data_interval(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-
-    settings = Settings.from_env()
-
-    assert settings.operational_data.enabled is True
-    assert settings.operational_data.collect_interval_seconds == 60
-    assert settings.operational_data.expiration is None
-
-
-def test_settings_rejects_negative_operational_data_interval(monkeypatch) -> None:
-    _clear_config_env(monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
-    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
-    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-    monkeypatch.setenv("OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS", "-1")
+    monkeypatch.setenv("OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS", "60")
 
     with pytest.raises(Exception) as exc_info:
         Settings.from_env()
@@ -195,50 +160,69 @@ def test_settings_rejects_negative_operational_data_interval(monkeypatch) -> Non
     assert "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS" in str(exc_info.value)
 
 
-def test_settings_rejects_enabled_operational_data_with_zero_interval(
-    monkeypatch,
+def test_settings_rejects_removed_yaml_runtime_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _clear_config_env(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+app:
+  base_url: http://127.0.0.1:8000
+openai:
+  oauth_redirect_uri: http://localhost:1455/callback
+sub2api:
+  base_url: http://mock-sub2api.local
+auto_rotation:
+  enabled: true
+  interval_seconds: 60
+credit_control:
+  enabled: true
+  recharge_tick_seconds: 60
+operational_data:
+  enabled: true
+  expiration: 240
+  collect_interval_seconds: 60
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
-    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-    monkeypatch.setenv("OPERATIONAL_DATA_ENABLED", "true")
-    monkeypatch.setenv("OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS", "0")
 
     with pytest.raises(Exception) as exc_info:
         Settings.from_env()
 
-    assert "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "auto_rotation" in message
+    assert "credit_control" in message
+    assert "operational_data" in message
+    assert "auto_rotation.enabled" in message
+    assert "auto_rotation.interval_seconds" in message
+    assert "credit_control.enabled" in message
+    assert "credit_control.recharge_tick_seconds" in message
+    assert "operational_data.enabled" in message
+    assert "operational_data.expiration" in message
+    assert "operational_data.collect_interval_seconds" in message
 
 
-def test_settings_loads_operational_data_expiration_from_env(monkeypatch) -> None:
+def test_settings_rejects_removed_runtime_env(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
     monkeypatch.setenv("OPERATIONAL_DATA_EXPIRATION", "240")
-
-    settings = Settings.from_env()
-
-    assert settings.operational_data.expiration == 240
-
-
-def test_settings_rejects_non_positive_operational_data_expiration(
-    monkeypatch,
-) -> None:
-    _clear_config_env(monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
-    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
-    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-    monkeypatch.setenv("OPERATIONAL_DATA_EXPIRATION", "0")
+    monkeypatch.setenv("CREDIT_CONTROL_ENABLED", "false")
+    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
 
     with pytest.raises(Exception) as exc_info:
         Settings.from_env()
 
-    assert "OPERATIONAL_DATA_EXPIRATION" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "AUTO_ROTATION_ENABLED" in message
+    assert "CREDIT_CONTROL_ENABLED" in message
+    assert "OPERATIONAL_DATA_EXPIRATION" in message
 
 
 def test_settings_normalizes_env_base_path(monkeypatch) -> None:
@@ -301,36 +285,26 @@ def test_settings_parse_sub2api_provisioning_overrides(monkeypatch) -> None:
     assert rules[0].description == "茶壶保护 - 暂停 5 分钟"
 
 
-def test_settings_parse_managed_pool_and_auto_rotation(monkeypatch) -> None:
+def test_settings_parse_managed_pool(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
     monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "managed_pool")
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_INTERVAL_SECONDS", "900")
-    monkeypatch.setenv("AUTO_ROTATION_COOLDOWN_MINUTES", "15")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "7d")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[10, 25.5]")
 
     settings = Settings.from_env()
 
     assert settings.assignment_mode.value == "managed_pool"
-    assert settings.auto_rotation.enabled is True
-    assert settings.auto_rotation.interval_seconds == 900
-    assert settings.auto_rotation.cooldown_minutes == 15
-    assert settings.auto_rotation.usage_window.value == "7d"
-    assert settings.auto_rotation.usage_thresholds == (10.0, 25.5)
 
 
-def test_settings_reject_invalid_auto_rotation_window(monkeypatch) -> None:
+def test_settings_rejects_removed_auto_rotation_env(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "2h")
+    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "7d")
 
     with pytest.raises(Exception) as exc_info:
         Settings.from_env()

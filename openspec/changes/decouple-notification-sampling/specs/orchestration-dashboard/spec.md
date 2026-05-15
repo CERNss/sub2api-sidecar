@@ -3,11 +3,11 @@
 ### Requirement: Periodic rule evaluation
 The system SHALL periodically evaluate enabled notification rules at the configured `readIntervalMinutes` cadence. The system SHALL replace the previous per-rule live upstream collector design with an operational data pipeline that first collects upstream data, then persists normalized local snapshots and metric samples, then evaluates rules from local samples. Rule evaluation SHALL read the latest local metric sample for each rule instead of calling upstream Sub2API collectors per rule.
 
-#### Scenario: Operational data configuration controls collection
+#### Scenario: Operational data runtime settings control collection
 - **GIVEN** the service starts after this change
 - **WHEN** notification runtime settings are loaded
-- **THEN** the system uses a new operational data configuration namespace for collection enabled state, upstream collection interval seconds, and optional expiration seconds
-- **THEN** invalid operational data intervals or configured expiration values prevent startup instead of silently disabling collection
+- **THEN** the system reads operational data enabled state and optional expiration seconds from SQLite runtime settings
+- **THEN** there is no deployment config field for changing the collection interval
 - **THEN** an unset operational data expiration means persisted local data does not expire
 
 #### Scenario: Scheduler samples upstream data before evaluating local rules

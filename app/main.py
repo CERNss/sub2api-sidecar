@@ -19,7 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import ACCESS_KEY_COOKIE_NAME, AuthSession, EphemeralAdminAuthManager
 from app.clients.sub2api import Sub2APIAuthError, Sub2APIClient, Sub2APIError
-from app.config import Settings, get_settings
+from app.config import OPERATIONAL_RUNTIME_INTERVAL_SECONDS, Settings, get_settings
 from app.errors import FlowNotFoundError, ProvisioningError
 from app.logging_config import setup_logging
 from app.models.credit import (
@@ -37,6 +37,10 @@ from app.models.credit import (
 )
 from app.models.flow import AssignmentMode, FlowStatus
 from app.models.notification import NotificationSettings
+from app.models.operational_data import (
+    CreditControlRuntimeSettings,
+    OperationalDataRuntimeSettings,
+)
 from app.models.rotation import AutoRotationUsageWindow, RotationPoolGroup, RotationPoolKind
 from app.models.schemas import (
     AutoRotationConfigEnvelope,
@@ -59,6 +63,9 @@ from app.models.schemas import (
     CreditControlPolicyResponse,
     CreditControlRunResponse,
     CreditControlRunsEnvelope,
+    CreditControlRuntimeSettingsEnvelope,
+    CreditControlRuntimeSettingsRequest,
+    CreditControlRuntimeSettingsResponse,
     CreditControlSchedulerStatusResponse,
     CreditControlUserDetailEnvelope,
     CreditControlUserResponse,
@@ -73,6 +80,9 @@ from app.models.schemas import (
     NotificationEvaluateRequest,
     NotificationEvaluateResponse,
     NotificationSchedulerStatusResponse,
+    OperationalDataRuntimeSettingsEnvelope,
+    OperationalDataRuntimeSettingsRequest,
+    OperationalDataRuntimeSettingsResponse,
     OperationalDataSourceStatusResponse,
     NotificationRuleStateResponse,
     NotificationTestRequest,
@@ -126,46 +136,33 @@ async def lifespan(app_instance: FastAPI):
     get_settings()
     get_flow_store()
     get_auth_manager()
-    settings = get_settings()
-    rotation_scheduler: AutoRotationScheduler | None = None
-    notification_scheduler: NotificationScheduler | None = None
-    credit_scheduler: CreditControlScheduler | None = None
-    app_instance.state.auto_rotation_scheduler = None
-    app_instance.state.credit_control_scheduler = None
-    app_instance.state.notification_scheduler = None
-    if settings.auto_rotation.enabled and settings.auto_rotation.interval_seconds > 0:
-        rotation_scheduler = AutoRotationScheduler(
-            rotation_service=get_rotation_service(),
-            interval_seconds=settings.auto_rotation.interval_seconds,
-        )
-        app_instance.state.auto_rotation_scheduler = rotation_scheduler
-        rotation_scheduler.start()
+    rotation_scheduler = AutoRotationScheduler(
+        rotation_service=get_rotation_service(),
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_rotation_service().get_auto_rotation_config().enabled,
+    )
+    app_instance.state.auto_rotation_scheduler = rotation_scheduler
+    rotation_scheduler.start()
     notification_scheduler = NotificationScheduler(
         notification_service=get_notification_service(),
-        collect_interval_seconds=(
-            settings.operational_data.collect_interval_seconds
-            if settings.operational_data.enabled
-            else 0
-        ),
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
     )
     app_instance.state.notification_scheduler = notification_scheduler
     notification_scheduler.start()
-    if settings.credit_control.recharge_tick_seconds > 0:
-        credit_scheduler = CreditControlScheduler(
-            credit_service=get_credit_control_service(),
-            tick_seconds=settings.credit_control.recharge_tick_seconds,
-        )
-        app_instance.state.credit_control_scheduler = credit_scheduler
-        credit_scheduler.start()
+    credit_scheduler = CreditControlScheduler(
+        credit_service=get_credit_control_service(),
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_credit_control_runtime_settings().enabled,
+    )
+    app_instance.state.credit_control_scheduler = credit_scheduler
+    credit_scheduler.start()
     try:
         yield
     finally:
-        if rotation_scheduler is not None:
-            rotation_scheduler.stop()
-        if notification_scheduler is not None:
-            notification_scheduler.stop()
-        if credit_scheduler is not None:
-            credit_scheduler.stop()
+        rotation_scheduler.stop()
+        notification_scheduler.stop()
+        credit_scheduler.stop()
 
 
 app = FastAPI(
@@ -228,7 +225,6 @@ def get_provisioning_service() -> ProvisioningService:
 
 @lru_cache(maxsize=1)
 def get_notification_service() -> NotificationService:
-    settings = get_settings()
     store = get_flow_store()
     return NotificationService(
         store=store,
@@ -237,7 +233,6 @@ def get_notification_service() -> NotificationService:
             client=get_sub2api_client(),
             store=store,
         ),
-        expiration=settings.operational_data.expiration,
     )
 
 
@@ -246,6 +241,72 @@ def get_credit_control_service() -> CreditControlService:
     return CreditControlService(
         store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
+    )
+
+
+def get_operational_data_runtime_settings() -> OperationalDataRuntimeSettings:
+    stored = get_flow_store().get_operational_data_runtime_settings()
+    if stored is not None:
+        return stored
+    return OperationalDataRuntimeSettings()
+
+
+def save_operational_data_runtime_settings(
+    payload: OperationalDataRuntimeSettingsRequest,
+) -> OperationalDataRuntimeSettings:
+    existing = get_flow_store().get_operational_data_runtime_settings()
+    now = datetime.now(timezone.utc)
+    settings = OperationalDataRuntimeSettings(
+        enabled=payload.enabled,
+        expiration=payload.expiration,
+        created_at=existing.created_at if existing else now,
+        updated_at=now,
+    )
+    return get_flow_store().save_operational_data_runtime_settings(settings)
+
+
+def operational_data_runtime_settings_response(
+    settings: OperationalDataRuntimeSettings | None = None,
+) -> OperationalDataRuntimeSettingsEnvelope:
+    settings = settings if settings is not None else get_operational_data_runtime_settings()
+    return OperationalDataRuntimeSettingsEnvelope(
+        settings=OperationalDataRuntimeSettingsResponse(
+            enabled=settings.enabled,
+            expiration=settings.expiration,
+            updated_at=settings.updated_at,
+        )
+    )
+
+
+def get_credit_control_runtime_settings() -> CreditControlRuntimeSettings:
+    stored = get_flow_store().get_credit_control_runtime_settings()
+    if stored is not None:
+        return stored
+    return CreditControlRuntimeSettings()
+
+
+def save_credit_control_runtime_settings(
+    payload: CreditControlRuntimeSettingsRequest,
+) -> CreditControlRuntimeSettings:
+    existing = get_flow_store().get_credit_control_runtime_settings()
+    now = datetime.now(timezone.utc)
+    settings = CreditControlRuntimeSettings(
+        enabled=payload.enabled,
+        created_at=existing.created_at if existing else now,
+        updated_at=now,
+    )
+    return get_flow_store().save_credit_control_runtime_settings(settings)
+
+
+def credit_control_runtime_settings_response(
+    settings: CreditControlRuntimeSettings | None = None,
+) -> CreditControlRuntimeSettingsEnvelope:
+    settings = settings if settings is not None else get_credit_control_runtime_settings()
+    return CreditControlRuntimeSettingsEnvelope(
+        settings=CreditControlRuntimeSettingsResponse(
+            enabled=settings.enabled,
+            updated_at=settings.updated_at,
+        )
     )
 
 
@@ -1047,11 +1108,9 @@ def credit_control_user_detail(
         user_id,
         usage_window=usage_window,
     )
-    api_keys_payload = get_sub2api_client().get_user_api_keys(user_id)
     api_keys = [
         credit_api_key_response(api_key, usage_window)
-        for api_key in api_keys_payload.get("items", [])
-        if isinstance(api_key, dict)
+        for api_key in get_credit_control_service().get_user_api_keys(user_id)
     ]
     response_item = credit_user_response(item)
     payload = CreditControlUserDetailEnvelope(
@@ -1221,17 +1280,39 @@ def credit_control_runs(
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
+@app.get("/api/credit-control/settings")
+def credit_control_settings_get(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content=credit_control_runtime_settings_response().model_dump(mode="json"),
+    )
+
+
+@app.put("/api/credit-control/settings")
+def credit_control_settings_put(
+    payload: CreditControlRuntimeSettingsRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    settings = save_credit_control_runtime_settings(payload)
+    return JSONResponse(
+        status_code=200,
+        content=credit_control_runtime_settings_response(settings).model_dump(mode="json"),
+    )
+
+
 @app.get("/api/credit-control/scheduler")
 def credit_control_scheduler_status(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     scheduler = getattr(app.state, "credit_control_scheduler", None)
     if scheduler is None:
-        settings = get_settings()
+        runtime_settings = get_credit_control_runtime_settings()
         response = CreditControlSchedulerStatusResponse(
-            enabled=settings.credit_control.recharge_tick_seconds > 0,
+            enabled=runtime_settings.enabled,
             running=False,
-            tick_seconds=settings.credit_control.recharge_tick_seconds,
+            cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
             tick_count=0,
         )
     else:
@@ -1643,12 +1724,11 @@ def rotation_auto_scheduler_status(
 ) -> JSONResponse:
     scheduler = getattr(app.state, "auto_rotation_scheduler", None)
     if scheduler is None:
-        settings = get_settings()
+        runtime_config = get_rotation_service().get_auto_rotation_config()
         response = AutoRotationSchedulerStatusResponse(
-            enabled=settings.auto_rotation.enabled
-            and settings.auto_rotation.interval_seconds > 0,
+            enabled=runtime_config.enabled,
             running=False,
-            interval_seconds=settings.auto_rotation.interval_seconds,
+            cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
             tick_count=0,
         )
     else:
@@ -1688,23 +1768,40 @@ def notifications_config_get(_: AuthSession = Depends(require_api_auth)) -> JSON
     return JSONResponse(status_code=200, content=redact_settings(settings))
 
 
+@app.get("/api/operational-data/settings")
+def operational_data_settings_get(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content=operational_data_runtime_settings_response().model_dump(mode="json"),
+    )
+
+
+@app.put("/api/operational-data/settings")
+def operational_data_settings_put(
+    payload: OperationalDataRuntimeSettingsRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    settings = save_operational_data_runtime_settings(payload)
+    return JSONResponse(
+        status_code=200,
+        content=operational_data_runtime_settings_response(settings).model_dump(mode="json"),
+    )
+
+
 @app.get("/notifications/scheduler")
 def notifications_scheduler_status(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     scheduler = getattr(app.state, "notification_scheduler", None)
-    settings = get_settings()
+    runtime_settings = get_operational_data_runtime_settings()
     if scheduler is None:
-        interval_seconds = (
-            settings.operational_data.collect_interval_seconds
-            if settings.operational_data.enabled
-            else 0
-        )
         response = NotificationSchedulerStatusResponse(
-            enabled=interval_seconds > 0,
+            enabled=runtime_settings.enabled,
             running=False,
-            collect_interval_seconds=interval_seconds,
-            expiration=settings.operational_data.expiration,
+            cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+            expiration=runtime_settings.expiration,
             tick_count=0,
             source_statuses=[
                 OperationalDataSourceStatusResponse(**status.model_dump())
@@ -1716,7 +1813,7 @@ def notifications_scheduler_status(
         response = NotificationSchedulerStatusResponse(
             **{
                 **snapshot.__dict__,
-                "expiration": settings.operational_data.expiration,
+                "expiration": runtime_settings.expiration,
                 "source_statuses": [
                     OperationalDataSourceStatusResponse(**status.model_dump())
                     for status in snapshot.source_statuses or []

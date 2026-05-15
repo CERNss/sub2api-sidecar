@@ -14,7 +14,18 @@ from app.auth import ACCESS_KEY_COOKIE_NAME
 from app.clients.sub2api import Sub2APIClient
 from app.config import Sub2APIProvisioningDefaults, get_settings
 from app.models.flow import AssignmentMode
-from app.models.rotation import RotationPoolGroup, RotationPoolKind, UserGroupAssignment
+from app.models.operational_data import (
+    CreditControlRuntimeSettings,
+    OperationalDataRuntimeSettings,
+    OperationalDataSnapshot,
+)
+from app.models.rotation import (
+    AutoRotationRuntimeConfig,
+    AutoRotationUsageWindow,
+    RotationPoolGroup,
+    RotationPoolKind,
+    UserGroupAssignment,
+)
 from app.services.credit_scheduler import CreditControlScheduler
 from app.services.rotation_scheduler import AutoRotationScheduler
 
@@ -404,6 +415,111 @@ def clear_caches() -> None:
     main.get_provisioning_service.cache_clear()
     main.get_notification_service.cache_clear()
     main.get_credit_control_service.cache_clear()
+
+
+def save_auto_rotation_config(
+    *,
+    enabled: bool = True,
+    auto_assign_new_users: bool = False,
+    usage_window: AutoRotationUsageWindow = AutoRotationUsageWindow.window_5h,
+    usage_thresholds: tuple[float, ...] = (),
+    imbalance_epsilon: float = 0.0,
+    improvement_delta: float = 0.0,
+    schedule_source_group_ids: tuple[object, ...] = (),
+) -> AutoRotationRuntimeConfig:
+    return main.get_flow_store().save_auto_rotation_config(
+        AutoRotationRuntimeConfig(
+            enabled=enabled,
+            auto_assign_new_users=auto_assign_new_users,
+            cooldown_minutes=0,
+            usage_window=usage_window,
+            usage_thresholds=usage_thresholds,
+            imbalance_epsilon=imbalance_epsilon,
+            improvement_delta=improvement_delta,
+            schedule_source_group_ids=schedule_source_group_ids,
+        )
+    )
+
+
+def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
+    store = main.get_flow_store()
+    now = datetime.now(timezone.utc)
+    groups = []
+    for group in backend.groups:
+        group_kind = group.get("group_kind", group.get("type"))
+        groups.append(
+            {
+                **group,
+                "group_kind": group_kind,
+                "is_subscription": bool(
+                    group.get("is_subscription")
+                    or str(group_kind or "").strip().lower() == "subscription"
+                    or group.get("subscription_id") not in (None, "")
+                ),
+            }
+        )
+    users = []
+    for user in backend.users:
+        current_group_id = user.get("current_group_id", user.get("group_id"))
+        current_group_name = user.get("current_group_name", user.get("group_name"))
+        users.append(
+            {
+                **user,
+                "current_group_id": current_group_id,
+                "current_group_name": current_group_name,
+                "group_ids": [current_group_id] if current_group_id not in (None, "") else [],
+            }
+        )
+    user_usage: dict[str, dict[str, dict[str, float]]] = {}
+    for user in users:
+        user_id = int(user["id"])
+        costs = {
+            101: {"5h": 1.5, "1d": 2.5, "7d": 6.0, "30d": 20.0},
+            202: {"5h": 0.2, "1d": 0.5, "7d": 1.2, "30d": 4.0},
+        }.get(user_id, {})
+        user_usage[str(user_id)] = {
+            window: {"total_cost": cost, "total_actual_cost": cost}
+            for window, cost in costs.items()
+        }
+    user_api_keys = {
+        str(user["id"]): {
+            "items": backend.user_api_keys.get(
+                int(user["id"]),
+                [
+                    {
+                        "id": f"key-{user['id']}",
+                        "name": "primary",
+                        "group_id": 11,
+                        "group_name": "rotation-low",
+                        "usage_5h": 1.0,
+                        "usage_1d": 2.0,
+                        "usage_7d": 3.0,
+                    }
+                ],
+            ),
+            "total": len(
+                backend.user_api_keys.get(
+                    int(user["id"]),
+                    [{"id": f"key-{user['id']}"}],
+                )
+            ),
+        }
+        for user in users
+    }
+    for source_key, payload in {
+        "groups": groups,
+        "users": users,
+        "user_usage": user_usage,
+        "user_api_keys": user_api_keys,
+    }.items():
+        store.save_operational_data_snapshot(
+            OperationalDataSnapshot(
+                source_key=source_key,
+                observed_at=now,
+                collected_at=now,
+                payload=payload,
+            )
+        )
 
 
 def fake_sub2api_request(self, method: str, url: str, json=None, params=None, timeout=None):
@@ -1045,6 +1161,7 @@ def test_oauth_complete_rejects_malformed_callback_url(client) -> None:
 def test_rotation_pool_candidates_and_exclusive_selection(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         add_response = client.post("/rotation/pool/groups", json={"group_id": 11, "priority": 0})
@@ -1068,6 +1185,7 @@ def test_rotation_pool_candidates_and_exclusive_selection(client) -> None:
 def test_landing_and_rotation_pools_are_independent(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         landing = client.post(
@@ -1100,6 +1218,7 @@ def test_landing_and_rotation_pools_are_independent(client) -> None:
 def test_rotation_pool_rejects_public_group(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         response = client.post("/rotation/pool/groups", json={"group_id": 33})
@@ -1111,6 +1230,7 @@ def test_rotation_pool_rejects_public_group(client) -> None:
 def test_rotation_pool_rejects_subscription_group(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         response = client.post("/rotation/pool/groups", json={"group_id": 44})
@@ -1176,6 +1296,7 @@ def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
 def test_credit_control_lists_filters_and_details_users(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         response = client.get(
@@ -1204,6 +1325,7 @@ def test_credit_control_lists_filters_and_details_users(client) -> None:
 def test_credit_control_manual_adjustment_preview_execute_and_audit(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     payload = {
         "amount": 5,
@@ -1236,6 +1358,7 @@ def test_credit_control_manual_adjustment_preview_execute_and_audit(client) -> N
 def test_credit_control_manual_adjustment_partial_failure_records_audit(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     payload = {
         "amount": -5,
@@ -1262,6 +1385,7 @@ def test_credit_control_manual_adjustment_partial_failure_records_audit(client) 
 def test_credit_control_rejects_invalid_adjustment_without_upstream_call(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         zero = client.post(
@@ -1285,6 +1409,7 @@ def test_credit_control_rejects_invalid_adjustment_without_upstream_call(client)
 def test_credit_control_policy_crud_preview_schedule_and_dedup(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
     start_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     policy_payload = {
         "name": "low balance recharge",
@@ -1357,8 +1482,8 @@ def test_credit_control_scheduler_status_reports_disabled_scheduler(client) -> N
     assert response.status_code == 200
     payload = response.json()
     assert payload["enabled"] is False
-    assert payload["running"] is False
-    assert payload["tick_seconds"] == 0
+    assert payload["running"] is True
+    assert payload["cadence_seconds"] == 60
     assert payload["tick_count"] == 0
 
 
@@ -1372,7 +1497,7 @@ def test_credit_control_scheduler_runs_startup_tick_and_reports_snapshot() -> No
             return []
 
     service = _FakeCreditService()
-    scheduler = CreditControlScheduler(service, tick_seconds=60)
+    scheduler = CreditControlScheduler(service, cadence_seconds=60)
 
     scheduler.start()
     snapshot = scheduler.snapshot()
@@ -1380,7 +1505,7 @@ def test_credit_control_scheduler_runs_startup_tick_and_reports_snapshot() -> No
 
     assert service.calls == 1
     assert snapshot.enabled is True
-    assert snapshot.tick_seconds == 60
+    assert snapshot.cadence_seconds == 60
     assert snapshot.tick_count == 1
     assert snapshot.last_tick_started_at is not None
     assert snapshot.last_tick_error is None
@@ -1389,6 +1514,7 @@ def test_credit_control_scheduler_runs_startup_tick_and_reports_snapshot() -> No
 def test_credit_control_recurring_policy_round_trips_dashboard_schedule(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
     policy_payload = {
         "name": "weekly group recharge",
         "enabled": True,
@@ -1417,6 +1543,7 @@ def test_credit_control_recurring_policy_round_trips_dashboard_schedule(client) 
 def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         response = client.post(
@@ -1449,6 +1576,7 @@ def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups
 def test_existing_user_group_orchestration_requires_direct_source_group(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         response = client.post(
@@ -1492,6 +1620,7 @@ def test_existing_user_group_orchestration_rejects_ambiguous_allowed_groups_as_s
         )
     )
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         users_response = client.get("/orchestration/users?email=allowed-only")
@@ -1519,6 +1648,7 @@ def test_existing_user_group_orchestration_rejects_ambiguous_allowed_groups_as_s
 def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
 
     with patch.object(requests.Session, "request", new=backend.request):
         response = client.post(
@@ -1603,8 +1733,8 @@ def test_auto_rotation_scheduler_status_reports_disabled_scheduler(client) -> No
     assert response.status_code == 200
     payload = response.json()
     assert payload["enabled"] is False
-    assert payload["running"] is False
-    assert payload["interval_seconds"] == 0
+    assert payload["running"] is True
+    assert payload["cadence_seconds"] == 60
     assert payload["tick_count"] == 0
 
 
@@ -1613,13 +1743,13 @@ def test_auto_rotation_scheduler_reports_tick_errors() -> None:
         def run_auto_rotation(self, trigger_type):
             raise RuntimeError(f"boom: {trigger_type.value}")
 
-    scheduler = AutoRotationScheduler(_FakeRotationService(), interval_seconds=60)
+    scheduler = AutoRotationScheduler(_FakeRotationService(), cadence_seconds=60)
 
     scheduler._tick_once()
     snapshot = scheduler.snapshot()
 
     assert snapshot.enabled is True
-    assert snapshot.interval_seconds == 60
+    assert snapshot.cadence_seconds == 60
     assert snapshot.tick_count == 0
     assert snapshot.last_tick_started_at is not None
     assert "boom: automatic_interval" in (snapshot.last_tick_error or "")
@@ -1628,6 +1758,7 @@ def test_auto_rotation_scheduler_reports_tick_errors() -> None:
 def test_manual_rotation_success_skip_and_failure(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
     now = datetime.now(timezone.utc)
     store = main.get_flow_store()
     store.upsert_rotation_pool_group(
@@ -1702,6 +1833,7 @@ def test_manual_rotation_success_skip_and_failure(client) -> None:
 def test_manual_rotation_does_not_require_dynamic_rotation_pool(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
+    save_operational_snapshots(backend)
     now = datetime.now(timezone.utc)
     store = main.get_flow_store()
     store.upsert_user_assignment(
@@ -1738,14 +1870,13 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 8.0, "usage_1d": 80.0, "usage_7d": 200.0}]
     backend.user_api_keys[202] = [{"id": 2, "usage_5h": 1.0, "usage_1d": 10.0, "usage_7d": 20.0}]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
         now = datetime.now(timezone.utc)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
@@ -1818,14 +1949,13 @@ def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 8.0, "usage_1d": 80.0, "usage_7d": 200.0}]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
         now = datetime.now(timezone.utc)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
@@ -1876,13 +2006,13 @@ def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -
 
 def test_manual_and_preview_run_records_reject_rollback(client, monkeypatch) -> None:
     backend = FakeRotationSub2API()
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_auto_rotation_config(usage_window=AutoRotationUsageWindow.window_1d)
+        save_operational_snapshots(backend)
         now = datetime.now(timezone.utc)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
@@ -1939,15 +2069,13 @@ def test_auto_rotation_dead_band_skips_when_spread_within_epsilon(
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
     backend.user_api_keys[202] = [{"id": 2, "usage_5h": 4.0, "usage_1d": 40.0, "usage_7d": 80.0}]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
-    monkeypatch.setenv("AUTO_ROTATION_IMBALANCE_EPSILON", "10.0")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_auto_rotation_config(imbalance_epsilon=10.0)
+        save_operational_snapshots(backend)
         now = datetime.now(timezone.utc)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
@@ -2010,15 +2138,13 @@ def test_auto_rotation_improvement_delta_blocks_marginal_swap(
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
     backend.user_api_keys[202] = [{"id": 2, "usage_5h": 0.0, "usage_1d": 0.0, "usage_7d": 0.0}]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
-    monkeypatch.setenv("AUTO_ROTATION_IMPROVEMENT_DELTA", "10.0")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_auto_rotation_config(improvement_delta=10.0)
+        save_operational_snapshots(backend)
         now = datetime.now(timezone.utc)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
@@ -2078,13 +2204,13 @@ def test_auto_rotation_dry_run_syncs_current_upstream_assignments_without_mutati
     backend = FakeRotationSub2API()
     backend.users[1]["group_id"] = 11
     backend.users[1]["group_name"] = "rotation-low"
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_auto_rotation_config(usage_window=AutoRotationUsageWindow.window_1d)
+        save_operational_snapshots(backend)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
                 group_id=33,
@@ -2139,14 +2265,12 @@ def test_auto_rotation_runtime_config_can_be_saved_and_controls_execution(
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 10.0, "usage_7d": 20.0}]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_operational_snapshots(backend)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
                 group_id=33,
@@ -2247,14 +2371,12 @@ def test_auto_rotation_auto_assigns_new_users_only_within_schedule_range(
             "group_name": "subscription-dedicated",
         },
     ]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_operational_snapshots(backend)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
                 group_id=33,
@@ -2337,14 +2459,12 @@ def test_auto_rotation_empty_schedule_range_does_not_auto_assign_new_users(
             "group_name": "public-shared",
         }
     ]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_operational_snapshots(backend)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
                 group_id=11,
@@ -2402,14 +2522,13 @@ def test_auto_rotation_skips_ambiguous_and_outside_pool_current_upstream_users(
             "group_name": "public-shared",
         },
     ]
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "5h")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[10]")
     clear_caches()
 
     with TestClient(main.app) as auto_client:
         login(auto_client)
         store = main.get_flow_store()
+        save_auto_rotation_config(usage_thresholds=(10.0,))
+        save_operational_snapshots(backend)
         now = datetime.now(timezone.utc)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(

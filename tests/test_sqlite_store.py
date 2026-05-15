@@ -6,6 +6,8 @@ from pathlib import Path
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionEventStatus, ProvisionEventType, ProvisionFlow
 from app.models.operational_data import (
+    CreditControlRuntimeSettings,
+    OperationalDataRuntimeSettings,
     OperationalDataSnapshot,
     OperationalDataSourceStatus,
     OperationalMetricSample,
@@ -269,3 +271,42 @@ def test_sqlite_store_upserts_operational_source_status(tmp_path: Path) -> None:
     assert statuses[0].status == "succeeded"
     assert statuses[0].error_message is None
     assert statuses[0].item_count == 3
+
+
+def test_sqlite_store_persists_runtime_settings(tmp_path: Path) -> None:
+    db_path = tmp_path / "runtime-settings.db"
+    store = SQLiteFlowStore(str(db_path))
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+    store.save_operational_data_runtime_settings(
+        OperationalDataRuntimeSettings(
+            enabled=False,
+            expiration=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.save_operational_data_runtime_settings(
+        OperationalDataRuntimeSettings(
+            enabled=True,
+            expiration=180,
+            created_at=now,
+            updated_at=now + timedelta(minutes=1),
+        )
+    )
+    store.save_credit_control_runtime_settings(
+        CreditControlRuntimeSettings(
+            enabled=False,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    operational = store.get_operational_data_runtime_settings()
+    credit = store.get_credit_control_runtime_settings()
+
+    assert operational is not None
+    assert operational.enabled is True
+    assert operational.expiration == 180
+    assert credit is not None
+    assert credit.enabled is False

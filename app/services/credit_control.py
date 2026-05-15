@@ -23,6 +23,11 @@ from app.models.credit import (
     CreditUsageWindow,
     CreditUserSnapshot,
 )
+from app.services.operational_data import (
+    SOURCE_USER_API_KEYS,
+    SOURCE_USER_USAGE,
+    SOURCE_USERS,
+)
 from app.stores.sqlite import SQLiteFlowStore
 
 logger = logging.getLogger(__name__)
@@ -122,6 +127,21 @@ class CreditControlService:
             if str(item.user_id) == str(user_id):
                 return item, self.store.list_credit_audit_records(user_id=user_id, limit=20)
         raise CreditControlError("User not found")
+
+    def get_user_api_keys(
+        self,
+        user_id: Any,
+    ) -> list[dict[str, Any]]:
+        payload = self._latest_snapshot_payload(SOURCE_USER_API_KEYS, default={})
+        if not isinstance(payload, dict):
+            return []
+        api_keys_payload = payload.get(str(user_id))
+        if not isinstance(api_keys_payload, dict):
+            return []
+        items = api_keys_payload.get("items")
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
 
     def preview_adjustment(
         self,
@@ -622,10 +642,14 @@ class CreditControlService:
     def _load_user_snapshots(
         self, usage_window: CreditUsageWindow = CreditUsageWindow.window_1d
     ) -> list[CreditUserSnapshot]:
-        users = self.sub2api_client.list_users()
+        users = self._latest_snapshot_payload(SOURCE_USERS, default=[])
+        if not isinstance(users, list):
+            users = []
         snapshots: list[CreditUserSnapshot] = []
         for user in users:
-            usage = self._safe_user_usage(user["id"], usage_window)
+            if not isinstance(user, dict):
+                continue
+            usage = self._user_usage_from_snapshot(user["id"], usage_window)
             snapshots.append(
                 CreditUserSnapshot(
                     user_id=user["id"],
@@ -647,12 +671,27 @@ class CreditControlService:
             )
         return snapshots
 
-    def _safe_user_usage(self, user_id: Any, usage_window: CreditUsageWindow) -> dict[str, Any]:
-        try:
-            return self.sub2api_client.get_user_usage(user_id, usage_window.value)
-        except Sub2APIError as exc:
-            logger.warning("Could not load Sub2API user usage for user_id=%s: %s", user_id, exc)
+    def _user_usage_from_snapshot(
+        self,
+        user_id: Any,
+        usage_window: CreditUsageWindow,
+    ) -> dict[str, Any]:
+        usage_payload = self._latest_snapshot_payload(SOURCE_USER_USAGE, default={})
+        if not isinstance(usage_payload, dict):
             return {}
+        user_usage = usage_payload.get(str(user_id))
+        if not isinstance(user_usage, dict):
+            return {}
+        usage = user_usage.get(usage_window.value)
+        if not isinstance(usage, dict) or usage.get("error"):
+            return {}
+        return usage
+
+    def _latest_snapshot_payload(self, source_key: str, *, default: Any) -> Any:
+        snapshot = self.store.get_latest_operational_data_snapshot(source_key)
+        if snapshot is None:
+            return default
+        return snapshot.payload
 
     def _extract_consumption(self, usage: dict[str, Any]) -> float | None:
         for key in (

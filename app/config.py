@@ -17,6 +17,40 @@ load_dotenv()
 
 CONFIG_PATH_ENV = "CONFIG_PATH"
 DEFAULT_CONFIG_PATH = "config.yaml"
+OPERATIONAL_RUNTIME_INTERVAL_SECONDS = 60
+
+REMOVED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
+    ("auto_rotation",),
+    ("credit_control",),
+    ("operational_data",),
+    ("auto_rotation", "enabled"),
+    ("auto_rotation", "interval_seconds"),
+    ("auto_rotation", "cooldown_minutes"),
+    ("auto_rotation", "usage_window"),
+    ("auto_rotation", "usage_thresholds"),
+    ("auto_rotation", "imbalance_epsilon"),
+    ("auto_rotation", "improvement_delta"),
+    ("credit_control", "enabled"),
+    ("credit_control", "recharge_tick_seconds"),
+    ("operational_data", "enabled"),
+    ("operational_data", "expiration"),
+    ("operational_data", "collect_interval_seconds"),
+)
+
+REMOVED_ENV_NAMES: tuple[str, ...] = (
+    "AUTO_ROTATION_ENABLED",
+    "AUTO_ROTATION_INTERVAL_SECONDS",
+    "AUTO_ROTATION_COOLDOWN_MINUTES",
+    "AUTO_ROTATION_USAGE_WINDOW",
+    "AUTO_ROTATION_USAGE_THRESHOLDS_JSON",
+    "AUTO_ROTATION_IMBALANCE_EPSILON",
+    "AUTO_ROTATION_IMPROVEMENT_DELTA",
+    "CREDIT_CONTROL_ENABLED",
+    "CREDIT_CONTROL_RECHARGE_TICK_SECONDS",
+    "OPERATIONAL_DATA_ENABLED",
+    "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS",
+    "OPERATIONAL_DATA_EXPIRATION",
+)
 
 
 @dataclass(frozen=True)
@@ -77,36 +111,6 @@ class ProvisioningAssignmentMode(str, Enum):
     managed_pool = "managed_pool"
 
 
-class AutoRotationUsageWindow(str, Enum):
-    window_5h = "5h"
-    window_1d = "1d"
-    window_7d = "7d"
-    window_30d = "30d"
-
-
-@dataclass(frozen=True)
-class AutoRotationSettings:
-    enabled: bool = False
-    interval_seconds: int = 0
-    cooldown_minutes: int = 0
-    usage_window: AutoRotationUsageWindow = AutoRotationUsageWindow.window_1d
-    usage_thresholds: tuple[float, ...] = ()
-    imbalance_epsilon: float = 0.0
-    improvement_delta: float = 0.0
-
-
-@dataclass(frozen=True)
-class CreditControlSettings:
-    recharge_tick_seconds: int = 60
-
-
-@dataclass(frozen=True)
-class OperationalDataSettings:
-    enabled: bool = True
-    collect_interval_seconds: int = 60
-    expiration: int | None = None
-
-
 @dataclass(frozen=True)
 class Settings:
     sub2api_base_url: str
@@ -116,9 +120,6 @@ class Settings:
     openai_oauth_redirect_uri: str
     sub2api_provisioning_defaults: Sub2APIProvisioningDefaults
     assignment_mode: ProvisioningAssignmentMode = ProvisioningAssignmentMode.dedicated
-    auto_rotation: AutoRotationSettings = AutoRotationSettings()
-    credit_control: CreditControlSettings = CreditControlSettings()
-    operational_data: OperationalDataSettings = OperationalDataSettings()
     app_auth_username: str = "admin"
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
@@ -128,6 +129,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         config = _load_config()
+        _reject_removed_settings(config)
         missing: list[str] = []
         values: dict[str, Any] = {}
 
@@ -237,78 +239,6 @@ class Settings:
             account_model_whitelist=_account_model_whitelist_setting(config),
         )
         values["assignment_mode"] = _assignment_mode_setting(config)
-        values["auto_rotation"] = AutoRotationSettings(
-            enabled=_bool_setting(
-                config,
-                "AUTO_ROTATION_ENABLED",
-                ("auto_rotation", "enabled"),
-                default=False,
-            ),
-            interval_seconds=_int_setting(
-                config,
-                "AUTO_ROTATION_INTERVAL_SECONDS",
-                ("auto_rotation", "interval_seconds"),
-                default=0,
-            ),
-            cooldown_minutes=_int_setting(
-                config,
-                "AUTO_ROTATION_COOLDOWN_MINUTES",
-                ("auto_rotation", "cooldown_minutes"),
-                default=0,
-            ),
-            usage_window=_usage_window_setting(config),
-            usage_thresholds=_thresholds_setting(config),
-            imbalance_epsilon=_float_setting(
-                config,
-                "AUTO_ROTATION_IMBALANCE_EPSILON",
-                ("auto_rotation", "imbalance_epsilon"),
-                default=0.0,
-            ),
-            improvement_delta=_float_setting(
-                config,
-                "AUTO_ROTATION_IMPROVEMENT_DELTA",
-                ("auto_rotation", "improvement_delta"),
-                default=0.0,
-            ),
-        )
-        values["credit_control"] = CreditControlSettings(
-            recharge_tick_seconds=_int_setting(
-                config,
-                "CREDIT_CONTROL_RECHARGE_TICK_SECONDS",
-                ("credit_control", "recharge_tick_seconds"),
-                default=60,
-            ),
-        )
-        values["operational_data"] = _operational_data_setting(config)
-
-        if values["auto_rotation"].interval_seconds < 0:
-            raise ConfigurationError("AUTO_ROTATION_INTERVAL_SECONDS must be >= 0")
-        if values["auto_rotation"].cooldown_minutes < 0:
-            raise ConfigurationError("AUTO_ROTATION_COOLDOWN_MINUTES must be >= 0")
-        if values["auto_rotation"].imbalance_epsilon < 0:
-            raise ConfigurationError("AUTO_ROTATION_IMBALANCE_EPSILON must be >= 0")
-        if values["auto_rotation"].improvement_delta < 0:
-            raise ConfigurationError("AUTO_ROTATION_IMPROVEMENT_DELTA must be >= 0")
-        if values["credit_control"].recharge_tick_seconds < 0:
-            raise ConfigurationError("CREDIT_CONTROL_RECHARGE_TICK_SECONDS must be >= 0")
-        if values["operational_data"].collect_interval_seconds < 0:
-            raise ConfigurationError(
-                "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS must be >= 0"
-            )
-        if (
-            values["operational_data"].enabled
-            and values["operational_data"].collect_interval_seconds <= 0
-        ):
-            raise ConfigurationError(
-                "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS must be greater than zero when operational data collection is enabled"
-            )
-        if (
-            values["operational_data"].expiration is not None
-            and values["operational_data"].expiration <= 0
-        ):
-            raise ConfigurationError(
-                "OPERATIONAL_DATA_EXPIRATION must be greater than zero"
-            )
         if values["sub2api_provisioning_defaults"].account_concurrency <= 0:
             raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
 
@@ -368,6 +298,25 @@ def _config_label(path: tuple[str, ...]) -> str:
     return ".".join(path)
 
 
+def _reject_removed_settings(config: Mapping[str, Any]) -> None:
+    configured_paths = [
+        _config_label(path)
+        for path in REMOVED_CONFIG_PATHS
+        if _config_value(config, path) is not None
+    ]
+    configured_env = [
+        env_name for env_name in REMOVED_ENV_NAMES if _env_string(env_name) is not None
+    ]
+    if not configured_paths and not configured_env:
+        return
+    removed = ", ".join(sorted([*configured_paths, *configured_env]))
+    raise ConfigurationError(
+        "Removed configuration fields are not supported: "
+        f"{removed}. Configure runtime switches and operational data expiration "
+        "through the authenticated web UI/API."
+    )
+
+
 def _string_setting(
     config: Mapping[str, Any],
     env_name: str,
@@ -416,32 +365,6 @@ def _parse_int_value(raw_value: Any, *, source: str) -> int:
         raise ConfigurationError(f"{source} must be an integer") from exc
 
 
-def _float_setting(
-    config: Mapping[str, Any],
-    env_name: str,
-    config_path: tuple[str, ...],
-    *,
-    default: float,
-) -> float:
-    env_value = _env_string(env_name)
-    if env_value is not None:
-        return _parse_float_value(env_value, source=env_name)
-
-    raw_value = _config_value(config, config_path)
-    if raw_value is None or raw_value == "":
-        return default
-    return _parse_float_value(raw_value, source=_config_label(config_path))
-
-
-def _parse_float_value(raw_value: Any, *, source: str) -> float:
-    if isinstance(raw_value, bool):
-        raise ConfigurationError(f"{source} must be numeric")
-    try:
-        return float(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigurationError(f"{source} must be numeric") from exc
-
-
 def _bool_setting(
     config: Mapping[str, Any],
     env_name: str,
@@ -479,43 +402,6 @@ def _base_path_setting(config: Mapping[str, Any]) -> str:
         default="",
     )
     return _normalize_base_path(raw_value or "")
-
-
-def _operational_data_setting(config: Mapping[str, Any]) -> OperationalDataSettings:
-    return OperationalDataSettings(
-        enabled=_bool_setting(
-            config,
-            "OPERATIONAL_DATA_ENABLED",
-            ("operational_data", "enabled"),
-            default=True,
-        ),
-        collect_interval_seconds=_int_setting(
-            config,
-            "OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS",
-            ("operational_data", "collect_interval_seconds"),
-            default=60,
-        ),
-        expiration=_optional_int_setting(
-            config,
-            "OPERATIONAL_DATA_EXPIRATION",
-            ("operational_data", "expiration"),
-        ),
-    )
-
-
-def _optional_int_setting(
-    config: Mapping[str, Any],
-    env_name: str,
-    config_path: tuple[str, ...],
-) -> int | None:
-    env_value = _env_string(env_name)
-    if env_value is not None:
-        return _parse_int_value(env_value, source=env_name)
-
-    raw_value = _config_value(config, config_path)
-    if raw_value is None or raw_value == "":
-        return None
-    return _parse_int_value(raw_value, source=_config_label(config_path))
 
 
 def _normalize_base_path(raw_value: str) -> str:
@@ -676,66 +562,6 @@ def _assignment_mode_setting(config: Mapping[str, Any]) -> ProvisioningAssignmen
         raise ConfigurationError(
             f"{source} must be one of: {', '.join(mode.value for mode in ProvisioningAssignmentMode)}"
         ) from exc
-
-
-def _usage_window_setting(config: Mapping[str, Any]) -> AutoRotationUsageWindow:
-    env_name = "AUTO_ROTATION_USAGE_WINDOW"
-    config_path = ("auto_rotation", "usage_window")
-    raw_value = _env_string(env_name)
-    source = env_name
-    if raw_value is None:
-        raw_value = _config_value(config, config_path)
-        source = _config_label(config_path)
-    if raw_value is None or raw_value == "":
-        raw_value = AutoRotationUsageWindow.window_1d.value
-        source = env_name
-
-    try:
-        return AutoRotationUsageWindow(str(raw_value).strip())
-    except ValueError as exc:
-        raise ConfigurationError(
-            f"{source} must be one of: {', '.join(window.value for window in AutoRotationUsageWindow)}"
-        ) from exc
-
-
-def _thresholds_setting(config: Mapping[str, Any]) -> tuple[float, ...]:
-    env_name = "AUTO_ROTATION_USAGE_THRESHOLDS_JSON"
-    env_value = _env_string(env_name)
-    if env_value is not None:
-        try:
-            payload = json.loads(env_value)
-        except json.JSONDecodeError as exc:
-            raise ConfigurationError(f"{env_name} must be valid JSON") from exc
-        return _parse_thresholds_payload(payload, source=env_name)
-
-    config_path = ("auto_rotation", "usage_thresholds")
-    payload = _config_value(config, config_path)
-    if payload is None:
-        return ()
-
-    return _parse_thresholds_payload(payload, source=_config_label(config_path))
-
-
-def _parse_thresholds_payload(payload: Any, *, source: str) -> tuple[float, ...]:
-    if not isinstance(payload, list):
-        raise ConfigurationError(f"{source} must be an array")
-
-    thresholds: list[float] = []
-    last_value: float | None = None
-    for index, item in enumerate(payload, start=1):
-        if isinstance(item, bool):
-            raise ConfigurationError(f"{source}[{index}] must be numeric")
-        try:
-            value = float(item)
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(f"{source}[{index}] must be numeric") from exc
-        if value < 0:
-            raise ConfigurationError(f"{source}[{index}] must be >= 0")
-        if last_value is not None and value < last_value:
-            raise ConfigurationError(f"{source} must be sorted in ascending order")
-        thresholds.append(value)
-        last_value = value
-    return tuple(thresholds)
 
 
 @lru_cache(maxsize=1)

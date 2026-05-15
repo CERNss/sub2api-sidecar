@@ -536,6 +536,15 @@ type CreditControlAuditPayload = ApiPayload & {
   total?: number;
 };
 
+type CreditControlRuntimeSettings = {
+  enabled: boolean;
+  updated_at?: string | null;
+};
+
+type CreditControlRuntimeSettingsPayload = ApiPayload & {
+  settings: CreditControlRuntimeSettings;
+};
+
 type CreditUserFilters = {
   window: "5h" | "1d" | "7d" | "30d";
   search: string;
@@ -3214,6 +3223,10 @@ function CreditControlView({
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [status, setStatus] = useState<StatusState>(emptyStatus);
+  const [runtimeSettings, setRuntimeSettings] = useState<CreditControlRuntimeSettings>({
+    enabled: true
+  });
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
 
   const [adjustmentMode, setAdjustmentMode] = useState<AdjustmentTargetMode>("selected");
   const [adjustmentAmount, setAdjustmentAmount] = useState<number | null>(10);
@@ -3298,6 +3311,43 @@ function CreditControlView({
       }
     } finally {
       setLoadingUsers(false);
+    }
+  }
+
+  async function loadRuntimeSettings() {
+    try {
+      const payload = await requestJson<CreditControlRuntimeSettingsPayload>(
+        "/api/credit-control/settings",
+        { method: "GET" },
+        "加载额度控制运行设置失败"
+      );
+      setRuntimeSettings(payload.settings);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "加载额度控制运行设置失败"), tone: "error" });
+      }
+    }
+  }
+
+  async function saveRuntimeSettings(enabled: boolean) {
+    const previous = runtimeSettings;
+    setRuntimeSettings((current) => ({ ...current, enabled }));
+    setRuntimeBusy(true);
+    try {
+      const payload = await requestJson<CreditControlRuntimeSettingsPayload>(
+        "/api/credit-control/settings",
+        { method: "PUT", body: JSON.stringify({ enabled }) },
+        "保存额度控制运行设置失败"
+      );
+      setRuntimeSettings(payload.settings);
+      setStatus({ message: enabled ? "自动充值后台执行已启用" : "自动充值后台执行已停用", tone: "success" });
+    } catch (error: unknown) {
+      setRuntimeSettings(previous);
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "保存额度控制运行设置失败"), tone: "error" });
+      }
+    } finally {
+      setRuntimeBusy(false);
     }
   }
 
@@ -3491,6 +3541,7 @@ function CreditControlView({
   }
 
   useEffect(() => {
+    void loadRuntimeSettings();
     void loadUsers();
   }, []);
 
@@ -3521,6 +3572,14 @@ function CreditControlView({
             <h2>余额管理</h2>
           </div>
           <Space wrap>
+            <label className="runtime-toggle runtime-toggle-credit">
+              <Switch
+                checked={runtimeSettings.enabled}
+                loading={runtimeBusy}
+                onChange={(checked) => void saveRuntimeSettings(checked)}
+              />
+              <span>自动充值后台执行</span>
+            </label>
             <AntSegmented
               value={activeTab}
               onChange={(value) => onTabChange(value as CreditControlTab)}

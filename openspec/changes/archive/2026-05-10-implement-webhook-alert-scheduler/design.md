@@ -26,7 +26,7 @@ The harder constraint: most signals in the UI catalog (`platform_key_quota`, `ac
 
 ### 1. Scheduler is one daemon thread, lifespan-managed
 
-`NotificationScheduler` mirrors `AutoRotationScheduler`: an `Event`-gated `while not self._stop_event.wait(self.tick_seconds)` loop. The tick interval is intentionally short (e.g. 30 seconds default) so per-rule `readIntervalMinutes` granularity stays close to the configured cadence without busy-waiting.
+`NotificationScheduler` mirrors `AutoRotationScheduler`: an `Event`-gated loop that waits on the process-owned scheduler cadence. The cadence is intentionally short so per-rule `readIntervalMinutes` granularity stays close to runtime status without busy-waiting.
 
 **Why this approach:**
 

@@ -161,16 +161,16 @@ The system SHALL evaluate eligible users against current Rotation pool usage loa
 - **THEN** the system does not call the Sub2API group replacement API
 - **THEN** the system does not write preview-only assignment or audit changes to local storage
 
-#### Scenario: Interval-based automatic rotation runs without operator input
-- **GIVEN** automatic rotation is enabled with a configured execution interval
-- **WHEN** the interval elapses while the sidecar process is running
+#### Scenario: Cadence-based automatic rotation runs without operator input
+- **GIVEN** automatic rotation is enabled
+- **WHEN** the internal operational cadence elapses while the sidecar process is running
 - **THEN** the system runs the same evaluation and execution path used by `POST /rotation/auto/run`
 - **THEN** the system records the cycle outcome in rotation audit storage
 
 #### Scenario: Automatic rotation reports empty-pool failure safely
 - **GIVEN** automatic rotation is enabled
 - **AND** the local dedicated rotation pool is empty
-- **WHEN** the system runs `POST /rotation/auto/run` or an interval-based cycle
+- **WHEN** the system runs `POST /rotation/auto/run` or a cadence-based cycle
 - **THEN** the system returns or records a failure indicating that no rotation targets are available
 - **THEN** the system does not call the Sub2API group replacement API
 

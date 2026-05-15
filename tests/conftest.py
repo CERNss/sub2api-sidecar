@@ -12,6 +12,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import app.main as main
 from app.config import get_settings
+from app.models.operational_data import (
+    CreditControlRuntimeSettings,
+    OperationalDataRuntimeSettings,
+)
+from app.stores.sqlite import SQLiteFlowStore
 
 
 def clear_app_caches() -> None:
@@ -39,21 +44,19 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("APP_ACCESS_KEY_TTL_HOURS", "12")
     monkeypatch.setenv("SQLITE_DB_PATH", str(db_path))
     monkeypatch.setenv("PROVISIONING_ASSIGNMENT_MODE", "dedicated")
-    monkeypatch.setenv("AUTO_ROTATION_ENABLED", "false")
-    monkeypatch.setenv("AUTO_ROTATION_INTERVAL_SECONDS", "0")
-    monkeypatch.setenv("AUTO_ROTATION_COOLDOWN_MINUTES", "0")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_WINDOW", "1d")
-    monkeypatch.setenv("AUTO_ROTATION_USAGE_THRESHOLDS_JSON", "[]")
-    monkeypatch.setenv("CREDIT_CONTROL_RECHARGE_TICK_SECONDS", "0")
-    monkeypatch.setenv("OPERATIONAL_DATA_ENABLED", "false")
-    monkeypatch.setenv("OPERATIONAL_DATA_COLLECT_INTERVAL_SECONDS", "0")
-    monkeypatch.delenv("OPERATIONAL_DATA_EXPIRATION", raising=False)
     monkeypatch.setenv("SUB2API_GROUP_PLATFORM", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PROVIDER", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_PLATFORM", "openai")
     monkeypatch.setenv("SUB2API_ACCOUNT_TYPE", "oauth")
     monkeypatch.setenv("SUB2API_ACCOUNT_WS_MODE", "context_pool")
     monkeypatch.setenv("SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE", "true")
+    store = SQLiteFlowStore(str(db_path))
+    store.save_operational_data_runtime_settings(
+        OperationalDataRuntimeSettings(enabled=False)
+    )
+    store.save_credit_control_runtime_settings(
+        CreditControlRuntimeSettings(enabled=False)
+    )
     clear_app_caches()
     yield {"db_path": str(db_path)}
     clear_app_caches()

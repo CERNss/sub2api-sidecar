@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from app.clients.sub2api import Sub2APIClient, Sub2APIError
@@ -20,6 +20,12 @@ from app.models.rotation import (
     RotationResultStatus,
     RotationTrigger,
     UserGroupAssignment,
+)
+from app.services.operational_data import (
+    SOURCE_GROUPS,
+    SOURCE_USER_API_KEYS,
+    SOURCE_USER_USAGE,
+    SOURCE_USERS,
 )
 from app.stores.sqlite import SQLiteFlowStore
 
@@ -83,9 +89,7 @@ class RotationService:
             self._normalize_key(group.group_id): group
             for group in self.store.list_rotation_pool_groups(RotationPoolKind.landing)
         }
-        groups = self.sub2api_client.list_groups(
-            platform=self.settings.sub2api_provisioning_defaults.group_platform
-        )
+        groups = self._latest_groups_snapshot()
         candidates: list[dict[str, Any]] = []
         for group in groups:
             group_key = self._normalize_key(group["id"])
@@ -349,7 +353,7 @@ class RotationService:
         )
 
     def _get_direct_user_group(self, user_id: Any) -> tuple[Any | None, str | None]:
-        for user in self.sub2api_client.list_users():
+        for user in self._latest_users_snapshot():
             if self._normalize_key(user.get("id")) == self._normalize_key(user_id):
                 return user.get("current_group_id"), user.get("current_group_name")
         return None, None
@@ -636,13 +640,13 @@ class RotationService:
         if stored is not None:
             return stored
         return AutoRotationRuntimeConfig(
-            enabled=self.settings.auto_rotation.enabled,
+            enabled=False,
             auto_assign_new_users=False,
-            cooldown_minutes=self.settings.auto_rotation.cooldown_minutes,
-            usage_window=AutoRotationUsageWindow(self.settings.auto_rotation.usage_window.value),
-            usage_thresholds=self.settings.auto_rotation.usage_thresholds,
-            imbalance_epsilon=self.settings.auto_rotation.imbalance_epsilon,
-            improvement_delta=self.settings.auto_rotation.improvement_delta,
+            cooldown_minutes=0,
+            usage_window=AutoRotationUsageWindow.window_1d,
+            usage_thresholds=(),
+            imbalance_epsilon=0.0,
+            improvement_delta=0.0,
             schedule_source_group_ids=(),
         )
 
@@ -726,7 +730,7 @@ class RotationService:
         assignments: list[UserGroupAssignment] = []
         new_user_candidates: list[UserGroupAssignment] = []
         seen_user_keys: set[str] = set()
-        for user in self.sub2api_client.list_users():
+        for user in self._latest_users_snapshot():
             summary["seen"] += 1
             user_id = user.get("id")
             seen_user_keys.add(self._normalize_key(user_id))
@@ -1204,9 +1208,7 @@ class RotationService:
 
     def _get_upstream_group(self, group_id: Any) -> dict[str, Any]:
         target_key = self._normalize_key(group_id)
-        for group in self.sub2api_client.list_groups(
-            platform=self.settings.sub2api_provisioning_defaults.group_platform
-        ):
+        for group in self._latest_groups_snapshot():
             if self._normalize_key(group["id"]) == target_key:
                 return group
         raise RotationTargetValidationError("Group was not found in upstream Sub2API")
@@ -1282,7 +1284,7 @@ class RotationService:
         return ",".join(f"{key}:{loads[key]:.6g}" for key in sorted(loads))
 
     def _build_usage_snapshot(self, user_id: Any) -> dict[str, Any]:
-        api_keys_response = self.sub2api_client.get_user_api_keys(user_id)
+        api_keys_response = self._user_api_keys_snapshot(user_id)
         api_keys = api_keys_response["items"]
         has_api_keys = api_keys_response["total"] > 0
         usage_window = self._window_enum()
@@ -1300,14 +1302,7 @@ class RotationService:
             }[usage_window]
             usage_value = sum(float(item.get(field_name) or 0.0) for item in api_keys)
         elif has_api_keys and usage_window == AutoRotationUsageWindow.window_30d:
-            end_date = date.today()
-            start_date = end_date - timedelta(days=29)
-            stats = self.sub2api_client.get_usage_stats(
-                user_id=user_id,
-                start_date=start_date,
-                end_date=end_date,
-                timezone_name="",
-            )
+            stats = self._user_usage_snapshot(user_id, usage_window)
             usage_value = float(stats.get("total_actual_cost") or 0.0)
 
         return {
@@ -1316,6 +1311,57 @@ class RotationService:
             "has_api_keys": has_api_keys,
             "api_key_count": api_keys_response["total"],
         }
+
+    def _latest_groups_snapshot(self) -> list[dict[str, Any]]:
+        payload = self._latest_operational_payload(SOURCE_GROUPS, default=[])
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def _latest_users_snapshot(self) -> list[dict[str, Any]]:
+        payload = self._latest_operational_payload(SOURCE_USERS, default=[])
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def _user_api_keys_snapshot(self, user_id: Any) -> dict[str, Any]:
+        payload = self._latest_operational_payload(SOURCE_USER_API_KEYS, default={})
+        if not isinstance(payload, dict):
+            return {"items": [], "total": 0}
+        api_keys_payload = payload.get(str(user_id))
+        if not isinstance(api_keys_payload, dict):
+            return {"items": [], "total": 0}
+        items = [
+            item
+            for item in api_keys_payload.get("items", [])
+            if isinstance(item, dict)
+        ]
+        total = api_keys_payload.get("total")
+        if not isinstance(total, int):
+            total = len(items)
+        return {"items": items, "total": total}
+
+    def _user_usage_snapshot(
+        self,
+        user_id: Any,
+        usage_window: AutoRotationUsageWindow,
+    ) -> dict[str, Any]:
+        payload = self._latest_operational_payload(SOURCE_USER_USAGE, default={})
+        if not isinstance(payload, dict):
+            return {}
+        user_usage = payload.get(str(user_id))
+        if not isinstance(user_usage, dict):
+            return {}
+        usage = user_usage.get(usage_window.value)
+        if not isinstance(usage, dict) or usage.get("error"):
+            return {}
+        return usage
+
+    def _latest_operational_payload(self, source_key: str, *, default: Any) -> Any:
+        snapshot = self.store.get_latest_operational_data_snapshot(source_key)
+        if snapshot is None:
+            return default
+        return snapshot.payload
 
     def _window_enum(self) -> AutoRotationUsageWindow:
         return self.get_auto_rotation_config().usage_window

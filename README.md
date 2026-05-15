@@ -128,36 +128,25 @@
 - V1 仅支持 4 个窗口：`5h`、`1d`、`7d`、`30d`
 - `5h` / `1d` / `7d` 通过用户现有 API key 的窗口用量字段汇总
 - `30d` 通过 upstream usage stats 聚合查询
-- `auto_rotation.usage_thresholds` 需要是升序数组
+- 自动轮换的业务策略通过后台页面或 `/rotation/auto/config` 运行时配置保存，不再放进 `config.yaml`
 - 实际切组使用 upstream `POST /api/v1/admin/users/{user_id}/replace-group`，由 upstream 迁移该用户旧分组下的 API keys 并失效认证缓存
 - 正在进行中的流式请求、WebSocket 或已建立连接不会半路切换，需要下一次请求或重连才会使用新分组
-- 轮换池中的组数量必须满足：
-  - `len(rotation_pool_groups) == len(auto_rotation.usage_thresholds) + 1`
-
-例子：
-
-- 阈值是 `[10, 50]`
-- 轮换池里有 3 个组，优先级从低到高分别是 `A -> B -> C`
-- 用量 `<=10` 的用户会落到 `A`
-- 用量 `>10 且 <=50` 的用户会落到 `B`
-- 用量 `>50` 的用户会落到 `C`
 
 ### 推荐 rollout
 
 1. 先保持 `provisioning.assignment_mode=dedicated`
 2. 通过 `GET /rotation/pool/candidates` 和 `POST /rotation/pool/groups` 选出一小组专属轮换目标
-3. 设置 `auto_rotation.usage_window`、`auto_rotation.usage_thresholds`、`auto_rotation.cooldown_minutes`
+3. 通过动态编排页面或 `/rotation/auto/config` 设置 usage window、cooldown、阈值、dead-band 等运行时策略
 4. 先手动调用 `POST /rotation/auto/run` 验证策略
-5. 再打开 `auto_rotation.interval_seconds`
+5. 再在动态编排页面打开运行时自动轮换开关
 6. 最后把 `provisioning.assignment_mode` 切到 `managed_pool`
 
 ### 回滚
 
 1. 把 `provisioning.assignment_mode` 切回 `dedicated`
-2. 关闭 `auto_rotation.enabled`
-3. 把 `auto_rotation.interval_seconds` 设回 `0`
-4. 如有需要，用 `POST /rotation/manual` 把用户迁回目标专属组
-5. 再按需清理本地轮换池
+2. 在动态编排页面关闭运行时自动轮换开关
+3. 如有需要，用 `POST /rotation/manual` 把用户迁回目标专属组
+4. 再按需清理本地轮换池
 
 ## 目录结构
 
@@ -235,7 +224,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-`config.yaml` 放非敏感、可读性更强的运行配置，例如本服务地址、OAuth redirect、SQLite 路径、预配模式、自动轮换策略、Sub2API 默认 payload 和临时不可调度规则。
+`config.yaml` 放非敏感、启动前必须确定的部署配置，例如本服务地址、OAuth redirect、SQLite 路径、预配模式、Sub2API 默认 payload 和临时不可调度规则。自动轮换、自动充值、运行态数据采集这类运行时开关和策略在后台页面/API 保存到 SQLite，不再放进 `config.yaml`。
 
 `.env` 只保留密钥和密码类字段：
 
@@ -250,12 +239,12 @@ APP_AUTH_PASSWORD=change-me
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
 - `app.base_path` 可选，默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
-- `auto_rotation.enabled=true` 且 `auto_rotation.interval_seconds > 0` 时，后台自动轮换才会启动；已登录管理员可请求 `GET /rotation/auto/scheduler` 确认是否运行。
-- `credit_control.recharge_tick_seconds` 默认 `60`，用于后台执行到期充值策略；设为 `0` 会关闭后台执行。已登录管理员可请求 `GET /api/credit-control/scheduler` 确认是否运行。
-- `operational_data.enabled=true` 且 `operational_data.collect_interval_seconds > 0` 时，后台运行态数据采集才会启动；默认每 `60` 秒按顺序拉取 Sub2API accounts、groups、users、当天 usage、昨天 usage，先落 SQLite raw snapshots 和派生 metrics，再由告警、自动编排等功能读取本地数据。`operational_data.expiration` 可选，单位为秒；不设置表示本地数据永不过期，设置为正整数时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。已登录管理员可请求 `GET /notifications/scheduler` 查看采样状态、每个数据源状态、最近一次 tick 时间和错误。
+- 自动轮换执行开关和业务策略通过动态编排页面或 `/rotation/auto/config` 运行时配置；已登录管理员可请求 `GET /rotation/auto/scheduler` 查看后台调度线程和当前运行时开关。
+- 自动充值后台执行开关通过额度控制页面或 `/api/credit-control/settings` 运行时配置；已登录管理员可请求 `GET /api/credit-control/scheduler` 查看状态。
+- 运行态数据采集开关和 `expiration` 通过页面或 `/api/operational-data/settings` 运行时配置。采集线程按内部 60 秒节拍读取当前设置，按顺序拉取 Sub2API accounts、groups、users、用户 usage、用户 API keys、当天 usage、昨天 usage，先落 SQLite raw snapshots 和派生 metrics，再由告警、自动编排、额度控制读取本地数据。`expiration` 不设置表示本地数据永不过期，设置为正整数秒时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。已登录管理员可请求 `GET /notifications/scheduler` 查看采样状态、每个数据源状态、最近一次 tick 时间和错误。
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
 
-环境变量可以覆盖 `config.yaml` 中的同名配置项；新部署建议优先改 `config.yaml`。
+环境变量可以覆盖 `config.yaml` 中的同名配置项；已移除的运行时环境变量不再兼容，出现时会直接启动失败。新部署建议优先改 `config.yaml`。
 
 ### Nginx Proxy Manager 子路径部署
 

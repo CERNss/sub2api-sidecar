@@ -74,6 +74,12 @@ export type NotificationSettings = {
   rules: NotificationRule[];
 };
 
+export type OperationalDataRuntimeSettings = {
+  enabled: boolean;
+  expiration: number | null;
+  updatedAt?: string | null;
+};
+
 export type NotificationDeliveryOutcome = {
   receiverId: string;
   provider: WebhookProvider;

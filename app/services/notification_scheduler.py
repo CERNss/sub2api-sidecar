@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event, Thread
+from typing import Callable
 
 from app.models.operational_data import OperationalDataSourceStatus
 from app.services.notification import NotificationService
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 class NotificationSchedulerSnapshot:
     enabled: bool
     running: bool
-    collect_interval_seconds: int
+    cadence_seconds: int
     tick_count: int
     last_tick_started_at: datetime | None = None
     last_tick_finished_at: datetime | None = None
@@ -31,10 +32,14 @@ class NotificationSchedulerSnapshot:
 
 class NotificationScheduler:
     def __init__(
-        self, notification_service: NotificationService, collect_interval_seconds: int
+        self,
+        notification_service: NotificationService,
+        cadence_seconds: int,
+        enabled_provider: Callable[[], bool] | None = None,
     ) -> None:
         self.notification_service = notification_service
-        self.collect_interval_seconds = collect_interval_seconds
+        self.cadence_seconds = cadence_seconds
+        self.enabled_provider = enabled_provider or (lambda: True)
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._tick_count = 0
@@ -45,10 +50,10 @@ class NotificationScheduler:
         self._last_delivery_count = 0
 
     def start(self) -> None:
-        if self.collect_interval_seconds <= 0:
+        if self.cadence_seconds <= 0:
             logger.info(
-                "Notification scheduler disabled | collect_interval_seconds=%s",
-                self.collect_interval_seconds,
+                "Notification scheduler disabled | cadence_seconds=%s",
+                self.cadence_seconds,
             )
             return
         if self._thread is not None:
@@ -58,8 +63,8 @@ class NotificationScheduler:
         )
         self._thread.start()
         logger.info(
-            "Notification scheduler started | collect_interval_seconds=%s",
-            self.collect_interval_seconds,
+            "Notification scheduler started | cadence_seconds=%s",
+            self.cadence_seconds,
         )
         self._tick_once()
 
@@ -81,9 +86,9 @@ class NotificationScheduler:
         if source_statuses is None and store is not None:
             source_statuses = store.list_operational_data_source_statuses()
         return NotificationSchedulerSnapshot(
-            enabled=self.collect_interval_seconds > 0,
+            enabled=self._enabled(),
             running=self.is_running,
-            collect_interval_seconds=self.collect_interval_seconds,
+            cadence_seconds=self.cadence_seconds,
             tick_count=self._tick_count,
             last_tick_started_at=self._last_tick_started_at,
             last_tick_finished_at=self._last_tick_finished_at,
@@ -98,12 +103,18 @@ class NotificationScheduler:
         )
 
     def _run(self) -> None:
-        while not self._stop_event.wait(self.collect_interval_seconds):
+        while not self._stop_event.wait(self.cadence_seconds):
             self._tick_once()
 
     def _tick_once(self) -> None:
         try:
             self._last_tick_started_at = datetime.now(timezone.utc)
+            if not self._enabled():
+                self._last_outcome_count = 0
+                self._last_delivery_count = 0
+                self._last_tick_error = None
+                logger.info("Notification scheduler tick skipped | enabled=false")
+                return
             outcomes = self.notification_service.tick(now=self._last_tick_started_at)
             self._last_outcome_count = len(outcomes)
             self._last_delivery_count = sum(len(outcome.deliveries) for outcome in outcomes)
@@ -119,3 +130,10 @@ class NotificationScheduler:
             logger.exception("Notification scheduler tick failed")
         finally:
             self._last_tick_finished_at = datetime.now(timezone.utc)
+
+    def _enabled(self) -> bool:
+        try:
+            return bool(self.enabled_provider())
+        except Exception:
+            logger.exception("Notification scheduler enabled check failed")
+            return False

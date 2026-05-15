@@ -2,7 +2,7 @@
 
 Notification evaluation currently couples rule timing, upstream data collection, threshold evaluation, and webhook delivery inside `NotificationService.tick()`. Each due rule invokes a collector for its own `signalKey`, so multiple rules can repeat the same Sub2API reads and there is no durable record of what the scheduler has recently observed.
 
-This change intentionally discards that collector-as-rule-input design. The new operational data pipeline owns data collection as a separate runtime concern and uses a neutral configuration namespace.
+This change intentionally discards that collector-as-rule-input design. The new operational data pipeline owns data collection as a separate runtime concern and exposes neutral runtime settings through SQLite/API/UI.
 
 The desired shape is a shared two-stage operational data pipeline:
 
@@ -17,7 +17,7 @@ The desired shape is a shared two-stage operational data pipeline:
 - Evaluate scheduled rules from local samples while preserving `readIntervalMinutes`, `forMinutes`, `cooldownMinutes`, recovery, and delivery semantics.
 - Make scheduler status report sampling freshness and per-source errors.
 - Keep on-demand evaluation useful by refreshing samples before evaluating one rule.
-- Introduce a new operational data config namespace as the source of truth for collection interval, optional data expiration, and enabled state.
+- Introduce neutral operational data runtime settings as the source of truth for optional data expiration and enabled state.
 - Explicitly document the data source used by each pipeline stage.
 
 **Non-Goals:**
@@ -35,18 +35,18 @@ Samples will be stored in SQLite tables owned by the existing `SQLiteFlowStore`.
 
 Alternative considered: keep samples in process memory only. That would be faster but would lose restart visibility and would not solve the "prove what was last sampled" problem.
 
-### Use operational data configuration only
+### Use operational data runtime settings only
 
-Add a runtime config namespace:
+Add SQLite-backed runtime settings edited through authenticated API/UI, not through `config.yaml`:
 
-```yaml
-operational_data:
-  enabled: true
-  collect_interval_seconds: 60
-  # expiration: 180
+```json
+{
+  "enabled": true,
+  "expiration": null
+}
 ```
 
-`operational_data.expiration` is optional and measured in seconds; when it is unset, persisted local operational data does not expire.
+The collection cadence is the service-owned 60 second operational cadence and has no user-facing config field. `expiration` is optional and measured in seconds; when it is unset, persisted local operational data does not expire.
 
 ### Add a snapshot-based collector
 
@@ -83,13 +83,13 @@ The first implementation data sources are:
 
 ## Risks / Trade-offs
 
-- Local samples can expire if upstream collection fails and `operational_data.expiration` is configured → Store per-source errors and expose sampling status in `/notifications/scheduler`; expired or missing samples evaluate as `no_data`.
+- Local samples can expire if upstream collection fails and runtime `expiration` is configured -> Store per-source errors and expose sampling status in `/notifications/scheduler`; expired or missing samples evaluate as `no_data`.
 - A single sampling step can fail before all signals are computed → Persist status per source and keep previous samples available, but mark failure so operators can see the problem.
 - Existing tests that registered fake collectors directly may need to shift to seeded samples or fake samplers → Prefer tests that verify local-sample evaluation and one sampling call per tick.
 
 ## Migration Plan
 
-1. Add new operational data settings and migrate runtime construction to those settings.
+1. Add new operational data runtime settings and migrate runtime construction to those settings.
 2. Add SQLite tables for operational snapshots, metric samples, and source statuses with `CREATE TABLE IF NOT EXISTS`.
 3. Add models and store methods for saving/listing latest snapshots, metric samples, and source statuses.
 4. Add `OperationalDataCollector` and inject it into `NotificationService`.

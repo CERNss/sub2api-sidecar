@@ -5,7 +5,7 @@ Notification evaluation currently pulls upstream Sub2API data inside each rule e
 ## What Changes
 
 - Replace the previous per-rule live collector design with a shared operational data pipeline: collect upstream data, persist local snapshots and metrics, then let notifications evaluate rules from local samples.
-- Use a neutral operational data configuration namespace for collection and data expiration.
+- Use neutral operational data runtime settings for collection enablement and data expiration.
 - Add a periodic operational data collection stage that fetches the required Sub2API datasets on a fixed cadence and persists raw snapshots plus normalized metric samples into SQLite.
 - Change scheduled rule evaluation to read the latest persisted local samples instead of calling upstream collectors per rule.
 - Preserve on-demand evaluation semantics while making it use the same local sample source after an immediate sampling refresh.
@@ -21,8 +21,8 @@ Notification evaluation currently pulls upstream Sub2API data inside each rule e
 
 ## Impact
 
-- Affected code: notification services, the old collector integration, scheduler, SQLite store, API status schemas, tests, and configuration docs.
+- Affected code: notification services, the old collector integration, scheduler, SQLite store, API status schemas, tests, and runtime-settings docs.
 - Affected APIs: `GET /notifications/scheduler` gains sampling status fields; `POST /notifications/evaluate` refreshes local samples before evaluating a single rule.
-- Configuration: the pipeline uses only the dedicated operational data config namespace.
+- Runtime settings: the pipeline uses only the SQLite-backed operational data runtime settings.
 - Storage: adds durable operational data snapshot, metric sample, and source-status tables to SQLite.
 - No breaking API removals are expected.

@@ -367,7 +367,7 @@ class CreditControlSchedulerStatusResponse(BaseModel):
     success: bool = True
     enabled: bool
     running: bool
-    tick_seconds: int
+    cadence_seconds: int
     tick_count: int
     last_tick_started_at: datetime | None = None
     last_tick_finished_at: datetime | None = None
@@ -375,6 +375,20 @@ class CreditControlSchedulerStatusResponse(BaseModel):
     last_run_count: int = 0
     last_affected_count: int = 0
     last_failure_count: int = 0
+
+
+class CreditControlRuntimeSettingsResponse(BaseModel):
+    enabled: bool = True
+    updated_at: datetime | None = None
+
+
+class CreditControlRuntimeSettingsRequest(BaseModel):
+    enabled: bool = True
+
+
+class CreditControlRuntimeSettingsEnvelope(BaseModel):
+    success: bool = True
+    settings: CreditControlRuntimeSettingsResponse
 
 
 class CreditControlAuditEnvelope(BaseModel):
@@ -518,7 +532,7 @@ class AutoRotationSchedulerStatusResponse(BaseModel):
     success: bool = True
     enabled: bool
     running: bool
-    interval_seconds: int
+    cadence_seconds: int
     tick_count: int
     last_tick_started_at: datetime | None = None
     last_tick_finished_at: datetime | None = None
@@ -565,7 +579,7 @@ class NotificationSchedulerStatusResponse(BaseModel):
     success: bool = True
     enabled: bool
     running: bool
-    collect_interval_seconds: int
+    cadence_seconds: int
     expiration: int | None = None
     tick_count: int
     last_tick_started_at: datetime | None = None
@@ -578,6 +592,22 @@ class NotificationSchedulerStatusResponse(BaseModel):
     last_sampling_error: str | None = None
     sampled_signal_count: int = 0
     source_statuses: list[OperationalDataSourceStatusResponse] = Field(default_factory=list)
+
+
+class OperationalDataRuntimeSettingsResponse(BaseModel):
+    enabled: bool = True
+    expiration: int | None = None
+    updated_at: datetime | None = None
+
+
+class OperationalDataRuntimeSettingsRequest(BaseModel):
+    enabled: bool = True
+    expiration: int | None = Field(default=None, gt=0)
+
+
+class OperationalDataRuntimeSettingsEnvelope(BaseModel):
+    success: bool = True
+    settings: OperationalDataRuntimeSettingsResponse
 
 
 class NotificationEvaluateRequest(BaseModel):

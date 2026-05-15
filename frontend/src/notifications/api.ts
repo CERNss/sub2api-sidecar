@@ -4,6 +4,7 @@ import {
   NotificationDeliveryHistory,
   NotificationDeliveryRecord,
   NotificationDeliveryOutcome,
+  OperationalDataRuntimeSettings,
   NotificationRule,
   NotificationSettings,
   NotificationTestResult,
@@ -18,6 +19,10 @@ import {
 } from "./types";
 
 type ApiPayload = Record<string, unknown>;
+
+type OperationalDataRuntimeSettingsPayload = ApiPayload & {
+  settings?: ApiPayload;
+};
 
 export class NotificationApiError extends Error {
   status: number;
@@ -399,6 +404,20 @@ function hydrateDeliveryHistory(raw: unknown): NotificationDeliveryHistory {
   };
 }
 
+function hydrateOperationalDataSettings(raw: unknown): OperationalDataRuntimeSettings {
+  const source = raw && typeof raw === "object" ? raw as OperationalDataRuntimeSettingsPayload : {};
+  const settings = source.settings && typeof source.settings === "object"
+    ? source.settings as ApiPayload
+    : {};
+  return {
+    enabled: typeof settings.enabled === "boolean" ? settings.enabled : true,
+    expiration: typeof settings.expiration === "number" && Number.isFinite(settings.expiration)
+      ? settings.expiration
+      : null,
+    updatedAt: typeof settings.updated_at === "string" ? settings.updated_at : null
+  };
+}
+
 export function getNotificationApiErrorMessage(error: unknown, fallbackMessage: string): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -413,6 +432,32 @@ export async function loadNotificationSettings(): Promise<NotificationSettings> 
     "加载告警配置失败"
   );
   return hydrateSettings(payload);
+}
+
+export async function loadOperationalDataSettings(): Promise<OperationalDataRuntimeSettings> {
+  const payload = await requestNotificationJson<unknown>(
+    "/api/operational-data/settings",
+    { method: "GET" },
+    "加载运行态数据设置失败"
+  );
+  return hydrateOperationalDataSettings(payload);
+}
+
+export async function saveOperationalDataSettings(
+  settings: OperationalDataRuntimeSettings
+): Promise<OperationalDataRuntimeSettings> {
+  const payload = await requestNotificationJson<unknown>(
+    "/api/operational-data/settings",
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: settings.enabled,
+        expiration: settings.expiration
+      })
+    },
+    "保存运行态数据设置失败"
+  );
+  return hydrateOperationalDataSettings(payload);
 }
 
 export async function loadNotificationDeliveries(limit = 50): Promise<NotificationDeliveryHistory> {

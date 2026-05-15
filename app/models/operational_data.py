@@ -44,3 +44,20 @@ class OperationalDataSnapshot(BaseModel):
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     collected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload: Any
+
+
+class OperationalDataRuntimeSettings(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    enabled: bool = True
+    expiration: int | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CreditControlRuntimeSettings(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    enabled: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

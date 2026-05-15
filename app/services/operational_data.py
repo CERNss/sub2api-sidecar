@@ -36,8 +36,11 @@ logger = logging.getLogger(__name__)
 SOURCE_ACCOUNTS = "accounts"
 SOURCE_GROUPS = "groups"
 SOURCE_USERS = "users"
+SOURCE_USER_USAGE = "user_usage"
+SOURCE_USER_API_KEYS = "user_api_keys"
 SOURCE_USAGE_CURRENT_DAY = "usage_current_day"
 SOURCE_USAGE_PREVIOUS_DAY = "usage_previous_day"
+USER_USAGE_WINDOWS = ("5h", "1d", "7d", "30d")
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,16 @@ class OperationalDataCollector:
             self.client.list_users,
             item_count=lambda value: len(value),
         )
+        user_usage, user_usage_status = self._fetch_source(
+            SOURCE_USER_USAGE,
+            lambda: self._fetch_user_usage(users),
+            item_count=_mapping_item_count,
+        )
+        user_api_keys, user_api_keys_status = self._fetch_source(
+            SOURCE_USER_API_KEYS,
+            lambda: self._fetch_user_api_keys(users),
+            item_count=_mapping_item_count,
+        )
         current_usage, current_usage_status = self._fetch_source(
             SOURCE_USAGE_CURRENT_DAY,
             lambda: self.client.get_usage_stats(
@@ -111,6 +124,8 @@ class OperationalDataCollector:
             accounts_status,
             groups_status,
             users_status,
+            user_usage_status,
+            user_api_keys_status,
             current_usage_status,
             previous_usage_status,
         ]
@@ -127,6 +142,8 @@ class OperationalDataCollector:
             accounts=accounts,
             groups=groups,
             users=users,
+            user_usage=user_usage,
+            user_api_keys=user_api_keys,
             current_usage=current_usage,
             previous_usage=previous_usage,
         )
@@ -192,6 +209,54 @@ class OperationalDataCollector:
         )
         self.store.save_operational_data_source_status(status)
         return value, status
+
+    def _fetch_user_usage(
+        self,
+        users: list[dict[str, Any]] | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not users:
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for user in users:
+            user_id = user.get("id")
+            if user_id in (None, ""):
+                continue
+            usage_by_window: dict[str, Any] = {}
+            for window in USER_USAGE_WINDOWS:
+                try:
+                    usage_by_window[window] = self.client.get_user_usage(user_id, window)
+                except Exception as exc:
+                    logger.warning(
+                        "Operational user usage fetch failed | user_id=%s window=%s error=%s",
+                        user_id,
+                        window,
+                        exc,
+                    )
+                    usage_by_window[window] = {"error": str(exc)}
+            result[str(user_id)] = usage_by_window
+        return result
+
+    def _fetch_user_api_keys(
+        self,
+        users: list[dict[str, Any]] | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not users:
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for user in users:
+            user_id = user.get("id")
+            if user_id in (None, ""):
+                continue
+            try:
+                result[str(user_id)] = self.client.get_user_api_keys(user_id)
+            except Exception as exc:
+                logger.warning(
+                    "Operational user API key fetch failed | user_id=%s error=%s",
+                    user_id,
+                    exc,
+                )
+                result[str(user_id)] = {"items": [], "total": 0, "error": str(exc)}
+        return result
 
     def _derive_samples(
         self,
@@ -277,6 +342,8 @@ class OperationalDataCollector:
         accounts: list[dict[str, Any]] | None,
         groups: list[dict[str, Any]] | None,
         users: list[dict[str, Any]] | None,
+        user_usage: dict[str, dict[str, Any]] | None,
+        user_api_keys: dict[str, dict[str, Any]] | None,
         current_usage: dict[str, Any] | None,
         previous_usage: dict[str, Any] | None,
     ) -> None:
@@ -284,6 +351,8 @@ class OperationalDataCollector:
             SOURCE_ACCOUNTS: accounts,
             SOURCE_GROUPS: groups,
             SOURCE_USERS: users,
+            SOURCE_USER_USAGE: user_usage,
+            SOURCE_USER_API_KEYS: user_api_keys,
             SOURCE_USAGE_CURRENT_DAY: current_usage,
             SOURCE_USAGE_PREVIOUS_DAY: previous_usage,
         }
@@ -303,6 +372,12 @@ class OperationalDataCollector:
 def _usage_item_count(value: Any) -> int:
     if isinstance(value, dict) and value:
         return 1
+    return 0
+
+
+def _mapping_item_count(value: Any) -> int:
+    if isinstance(value, dict):
+        return len(value)
     return 0
 
 

@@ -21,6 +21,8 @@ from app.models.notification import (
     NotificationSettings,
 )
 from app.models.operational_data import (
+    CreditControlRuntimeSettings,
+    OperationalDataRuntimeSettings,
     OperationalDataSnapshot,
     OperationalDataSourceStatus,
     OperationalMetricSample,
@@ -324,6 +326,36 @@ class SQLiteFlowStore(FlowStore):
             )
             connection.commit()
         return config
+
+    def get_operational_data_runtime_settings(
+        self,
+    ) -> OperationalDataRuntimeSettings | None:
+        return self._load_runtime_settings(
+            "operational_data",
+            OperationalDataRuntimeSettings,
+        )
+
+    def save_operational_data_runtime_settings(
+        self,
+        settings: OperationalDataRuntimeSettings,
+    ) -> OperationalDataRuntimeSettings:
+        self._save_runtime_settings("operational_data", settings)
+        return settings
+
+    def get_credit_control_runtime_settings(
+        self,
+    ) -> CreditControlRuntimeSettings | None:
+        return self._load_runtime_settings(
+            "credit_control",
+            CreditControlRuntimeSettings,
+        )
+
+    def save_credit_control_runtime_settings(
+        self,
+        settings: CreditControlRuntimeSettings,
+    ) -> CreditControlRuntimeSettings:
+        self._save_runtime_settings("credit_control", settings)
+        return settings
 
     def upsert_user_assignment(self, assignment: UserGroupAssignment) -> UserGroupAssignment:
         payload = assignment.model_dump_json()
@@ -698,6 +730,43 @@ class SQLiteFlowStore(FlowStore):
             OperationalDataSourceStatus,
         )
 
+    def _load_runtime_settings(
+        self,
+        settings_key: str,
+        model_cls: type[BaseModel],
+    ) -> Any | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM runtime_settings
+            WHERE settings_key = ?
+            """,
+            (settings_key,),
+            model_cls,
+        )
+
+    def _save_runtime_settings(self, settings_key: str, settings: BaseModel) -> None:
+        payload = settings.model_dump_json()
+        created_at = getattr(settings, "created_at")
+        updated_at = getattr(settings, "updated_at")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_settings (
+                    settings_key, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(settings_key) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    settings_key,
+                    payload,
+                    created_at.isoformat(),
+                    updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+
     def save_credit_policy(self, policy: CreditRechargePolicy) -> CreditRechargePolicy:
         payload = policy.model_dump_json()
         with self._connect() as connection:
@@ -997,6 +1066,16 @@ class SQLiteFlowStore(FlowStore):
                     config_key TEXT PRIMARY KEY,
                     enabled INTEGER NOT NULL,
                     usage_window TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_settings (
+                    settings_key TEXT PRIMARY KEY,
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
