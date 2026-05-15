@@ -6,9 +6,9 @@
 
 ## 2. Runtime Settings And Scheduling
 
-- [x] 2.1 Add SQLite-backed runtime settings for operational data (`enabled`, optional `expiration`) and credit control (`enabled`).
+- [x] 2.1 Add SQLite-backed runtime settings for operational data (`enabled`, `collect_interval_seconds`, optional `expiration`, optional `retention_seconds`, optional `max_storage_mb`) and credit control (`enabled`).
 - [x] 2.2 Add authenticated API endpoints and frontend controls for operational data and credit-control runtime settings.
-- [x] 2.3 Start operational data, automatic-rotation, and credit-control schedulers on the internal 60 second cadence without deployment enable gates.
+- [x] 2.3 Start operational data, automatic-rotation, and credit-control schedulers without deployment enable gates; operational data reads its runtime collection interval.
 - [x] 2.4 Make each scheduler tick read persisted runtime settings and skip work when disabled.
 - [x] 2.5 Keep automatic-rotation policy defaults independent from deployment config.
 

@@ -241,6 +241,112 @@ def test_sqlite_store_persists_latest_operational_data_snapshot(tmp_path: Path) 
     assert snapshot.payload == [{"id": "newer"}]
 
 
+def test_sqlite_store_cleans_operational_data_by_retention_cutoff(tmp_path: Path) -> None:
+    db_path = tmp_path / "operational-cleanup-retention.db"
+    store = SQLiteFlowStore(str(db_path))
+    older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    newer = older + timedelta(minutes=10)
+
+    store.save_operational_metric_samples(
+        [
+            OperationalMetricSample(
+                metric_key="account_invalid",
+                value=1,
+                observed_at=older,
+                collected_at=older,
+            ),
+            OperationalMetricSample(
+                metric_key="account_invalid",
+                value=2,
+                observed_at=newer,
+                collected_at=newer,
+            ),
+        ]
+    )
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key="accounts",
+            observed_at=older,
+            collected_at=older,
+            payload=[{"id": "older"}],
+        )
+    )
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key="accounts",
+            observed_at=newer,
+            collected_at=newer,
+            payload=[{"id": "newer"}],
+        )
+    )
+
+    result = store.cleanup_operational_data(retention_cutoff=older + timedelta(minutes=1))
+
+    assert result.deleted_metric_samples == 1
+    assert result.deleted_snapshots == 1
+    assert store.get_latest_operational_metric_sample("account_invalid").value == 2
+    assert store.get_latest_operational_data_snapshot("accounts").payload == [{"id": "newer"}]
+
+
+def test_sqlite_store_cleans_operational_data_by_size_without_deleting_latest_per_key(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "operational-cleanup-size.db"
+    store = SQLiteFlowStore(str(db_path))
+    older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    newer = older + timedelta(minutes=10)
+
+    store.save_operational_metric_samples(
+        [
+            OperationalMetricSample(
+                metric_key="account_invalid",
+                value=1,
+                observed_at=older,
+                collected_at=older,
+                snapshot={"payload": "x" * 200},
+            ),
+            OperationalMetricSample(
+                metric_key="account_invalid",
+                value=2,
+                observed_at=newer,
+                collected_at=newer,
+                snapshot={"payload": "y" * 200},
+            ),
+            OperationalMetricSample(
+                metric_key="user_balance_low",
+                value=3,
+                observed_at=newer,
+                collected_at=newer,
+                snapshot={"payload": "z" * 200},
+            ),
+        ]
+    )
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key="accounts",
+            observed_at=older,
+            collected_at=older,
+            payload=[{"id": "older", "payload": "a" * 200}],
+        )
+    )
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key="accounts",
+            observed_at=newer,
+            collected_at=newer,
+            payload=[{"id": "newer", "payload": "b" * 200}],
+        )
+    )
+
+    result = store.cleanup_operational_data(max_storage_bytes=1)
+
+    assert result.deleted_metric_samples == 1
+    assert result.deleted_snapshots == 1
+    assert store.get_latest_operational_metric_sample("account_invalid").value == 2
+    assert store.get_latest_operational_metric_sample("user_balance_low").value == 3
+    assert store.get_latest_operational_data_snapshot("accounts").payload[0]["id"] == "newer"
+
+
 def test_sqlite_store_upserts_operational_source_status(tmp_path: Path) -> None:
     db_path = tmp_path / "operational-statuses.db"
     store = SQLiteFlowStore(str(db_path))
@@ -282,7 +388,10 @@ def test_sqlite_store_persists_runtime_settings(tmp_path: Path) -> None:
     store.save_operational_data_runtime_settings(
         OperationalDataRuntimeSettings(
             enabled=False,
+            collect_interval_seconds=60,
             expiration=None,
+            retention_seconds=None,
+            max_storage_mb=None,
             created_at=now,
             updated_at=now,
         )
@@ -290,7 +399,10 @@ def test_sqlite_store_persists_runtime_settings(tmp_path: Path) -> None:
     store.save_operational_data_runtime_settings(
         OperationalDataRuntimeSettings(
             enabled=True,
+            collect_interval_seconds=45,
             expiration=180,
+            retention_seconds=3600,
+            max_storage_mb=128,
             created_at=now,
             updated_at=now + timedelta(minutes=1),
         )
@@ -316,7 +428,10 @@ def test_sqlite_store_persists_runtime_settings(tmp_path: Path) -> None:
 
     assert operational is not None
     assert operational.enabled is True
+    assert operational.collect_interval_seconds == 45
     assert operational.expiration == 180
+    assert operational.retention_seconds == 3600
+    assert operational.max_storage_mb == 128
     assert credit is not None
     assert credit.enabled is False
     assert provisioning is not None

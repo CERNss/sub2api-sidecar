@@ -7,9 +7,9 @@ Operational data now collects Sub2API accounts, groups, users, and usage into SQ
 **Goals:**
 - Make the deployment config obvious by removing `auto_rotation`, `credit_control`, and `operational_data` runtime sections entirely.
 - Remove parsing and documentation for runtime scheduler switches, scheduler intervals, and automatic-rotation policy fields from deployment config.
-- Use a single internal 60 second cadence for background collection and scheduler loops.
+- Keep scheduler intervals out of deployment config; operational-data collection uses a SQLite runtime interval that defaults to 60 seconds, while credit-control and automatic-rotation process loops keep their internal cadence.
 - Preserve runtime policy APIs for automatic rotation and add runtime settings APIs for operational data and credit control.
-- Make runtime enable/disable and operational data expiration changes take effect without service restart.
+- Make runtime enable/disable and operational data interval/expiration changes take effect without service restart.
 - Make operational-data snapshots and metrics the shared read layer for notification evaluation, credit-control reads, and automatic-orchestration reads wherever those features need upstream state.
 - Fail fast when removed deployment fields are present instead of keeping compatibility.
 
@@ -17,7 +17,7 @@ Operational data now collects Sub2API accounts, groups, users, and usage into SQ
 - Removing the authenticated automatic-rotation runtime policy fields such as cooldown, usage window, thresholds, and balance tolerances.
 - Changing webhook rule `readIntervalMinutes`, `forMinutes`, or `cooldownMinutes`.
 - Replacing SQLite operational data storage.
-- Adding a user-configurable collection interval under another name.
+- Adding a deployment-configurable collection interval under another name.
 - Replacing direct upstream mutation calls such as group replacement, API-key group update, and credit balance update.
 
 ## Decisions
@@ -35,11 +35,14 @@ Operational data runtime settings are persisted in SQLite and edited only throug
 ```json
 {
   "enabled": true,
-  "expiration": null
+  "collect_interval_seconds": 60,
+  "expiration": null,
+  "retention_seconds": null,
+  "max_storage_mb": null
 }
 ```
 
-`expiration` is optional; if it is unset, local operational data never expires. Operators change it through authenticated API/UI and the next scheduler tick reads the new value.
+`collect_interval_seconds` defaults to 60 seconds and is changed only through authenticated API/UI. It is not a deployment config field. `expiration` is optional and controls consumer staleness checks; if it is unset, local operational data never expires for reads. `retention_seconds` and `max_storage_mb` are optional cleanup guards. `retention_seconds` deletes local snapshot and metric records older than the retention window after collection. `max_storage_mb` deletes oldest local snapshot and metric records until the operational data payload size is under the configured cap, while keeping the latest record for each source and metric key. Operators change these values through authenticated API/UI and the next scheduler wait/tick reads the new values.
 
 Credit-control runtime settings are persisted in SQLite and edited only through the authenticated runtime API/UI:
 
@@ -72,11 +75,11 @@ New OAuth flows read the current provisioning runtime setting when `POST /provis
 
 All four are runtime settings, not deployment settings, and none of these documents belongs in `config.yaml`.
 
-### Internal cadence is code-owned
+### Operational data cadence is runtime-owned
 
-The background collection cadence is a code constant of 60 seconds. Operational data, automatic rotation, and credit-control scheduler loops start with the process and use that internal cadence. At each tick, the scheduler reads its current persisted runtime setting. Disabled runtime settings skip work but do not require stopping the process thread. Status endpoints report `cadence_seconds` as observed process status, but it is not a deployment config contract.
+The background collection cadence defaults to 60 seconds and belongs to operational-data runtime settings in SQLite. The operational data scheduler loop starts with the process and reads the current persisted interval between ticks. Disabled runtime settings skip work but do not require stopping the process thread. After each successful collection pass, the service runs operational-data cleanup from the same SQLite runtime settings. Status endpoints report `cadence_seconds`, `collect_interval_seconds`, cleanup settings, and current operational-data payload size as observed process/runtime status, but none is a deployment config contract.
 
-Alternative considered: keep `operational_data.collect_interval_seconds` as the single user-facing interval. The current requirement is simpler: no interval config at all.
+Automatic rotation and credit-control scheduler loops keep the code-owned 60 second process cadence; they consume the local operational snapshots and their own runtime enabled/policy settings.
 
 ### Runtime policy config stays runtime policy
 
@@ -97,7 +100,8 @@ Direct upstream calls remain only for mutating upstream state or for explicit op
 ## Risks / Trade-offs
 
 - Existing deployments with old keys or runtime sections will fail startup after upgrade -> operators must remove the sections and set runtime switches in the web UI/API.
-- A fixed 60 second cadence is less tunable -> it avoids drift and keeps operational data fresh enough for current consumers.
+- Runtime collection cadence can be set too aggressively -> the API validates a minimum interval and status exposes source errors/freshness.
+- Runtime cleanup can be set too aggressively -> size cleanup preserves the newest record for each source and metric key, and expiration still protects consumers from stale reads.
 - Status APIs expose `cadence_seconds` as an observed process value -> docs and tests should frame it as status, not a configurable field.
 - Runtime settings default records must be created lazily or read with stable defaults -> otherwise fresh installs could report missing settings.
 - Using local snapshots means consumers may act on data up to one cadence old -> status APIs surface collection freshness and expiration controls gate stale data.
@@ -106,5 +110,5 @@ Direct upstream calls remain only for mutating upstream state or for explicit op
 
 1. Remove `auto_rotation`, `credit_control`, and `operational_data` sections from `config.yaml`, plus their previous environment variables, before deploying.
 2. Start the service with only deployment settings such as app, storage, OpenAI OAuth, Sub2API connection, and Sub2API provisioning defaults.
-3. Configure provisioning assignment mode, operational data enabled/expiration, credit-control enabled, and automatic-rotation business policy through the authenticated runtime UI/API after startup.
+3. Configure provisioning assignment mode, operational data enabled/collect interval/expiration/cleanup guards, credit-control enabled, and automatic-rotation business policy through the authenticated runtime UI/API after startup.
 4. Confirm scheduler status endpoints report running process schedulers and current runtime enabled state.

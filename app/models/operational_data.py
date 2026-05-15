@@ -52,9 +52,24 @@ class OperationalDataRuntimeSettings(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     enabled: bool = True
+    collect_interval_seconds: int = Field(default=60, ge=5)
     expiration: int | None = None
+    retention_seconds: int | None = Field(default=None, gt=0)
+    max_storage_mb: int | None = Field(default=None, gt=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OperationalDataCleanupResult(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    cleaned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    retention_cutoff: datetime | None = None
+    size_limit_bytes: int | None = None
+    storage_bytes_before: int = 0
+    storage_bytes_after: int = 0
+    deleted_metric_samples: int = 0
+    deleted_snapshots: int = 0
 
 
 class CreditControlRuntimeSettings(BaseModel):

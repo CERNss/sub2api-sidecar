@@ -1,13 +1,16 @@
 ## MODIFIED Requirements
 
 ### Requirement: Periodic rule evaluation
-The system SHALL periodically evaluate enabled notification rules at the configured `readIntervalMinutes` cadence. The system SHALL use a neutral operational data pipeline that first collects upstream data on an internal 60 second cadence, then persists normalized local snapshots and metric samples, then evaluates rules from local samples. Rule evaluation SHALL read the latest local metric sample for each rule instead of calling upstream Sub2API collectors per rule.
+The system SHALL periodically evaluate enabled notification rules at the configured `readIntervalMinutes` cadence. The system SHALL use a neutral operational data pipeline that first collects upstream data on the persisted operational-data runtime interval, then persists normalized local snapshots and metric samples, then evaluates rules from local samples. Rule evaluation SHALL read the latest local metric sample for each rule instead of calling upstream Sub2API collectors per rule.
 
 #### Scenario: Operational data configuration controls collection
 - **GIVEN** the service starts after this change
 - **WHEN** operational-data runtime settings are loaded
-- **THEN** the system reads collection enabled state and optional expiration seconds from SQLite runtime settings
+- **THEN** the system reads collection enabled state, collection interval seconds, optional expiration seconds, optional retention seconds, and optional maximum storage MB from SQLite runtime settings
+- **THEN** the collection interval defaults to 60 seconds when no runtime setting has been saved
 - **THEN** unset expiration means persisted local data does not expire
+- **THEN** unset retention seconds means no time-based local data cleanup
+- **THEN** unset maximum storage MB means no size-based local data cleanup
 - **THEN** deployment config does not accept an `operational_data` section
 - **THEN** removed fields such as `operational_data.enabled`, `operational_data.expiration`, and `operational_data.collect_interval_seconds` prevent startup instead of being ignored
 
@@ -23,6 +26,9 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **THEN** the persistence stage stores raw source snapshots in SQLite operational data snapshot tables
 - **THEN** the persistence stage stores derived metric samples in SQLite operational metric sample tables
 - **THEN** the persistence stage stores per-source collection status in SQLite source-status tables
+- **THEN** the cleanup stage deletes local snapshot and metric sample records older than the configured retention window when retention seconds is set
+- **THEN** the cleanup stage deletes oldest local snapshot and metric sample records when the operational-data payload size exceeds the configured maximum storage MB
+- **THEN** size-based cleanup keeps the newest record for each source and each metric key
 - **THEN** the evaluation stage evaluates due enabled rules using SQLite notification config, local metric samples, and notification rule state
 - **THEN** the system persists the updated rule state regardless of decision
 
@@ -50,9 +56,10 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 
 #### Scenario: Scheduler status exposes sampling freshness
 - **GIVEN** an authenticated operator
-- **WHEN** the operator requests `GET /notifications/scheduler`
+- **WHEN** the operator requests `GET /api/operational-data/status`
 - **THEN** the response includes whether the scheduler is enabled and running
-- **THEN** the response includes the effective internal collection interval as status
+- **THEN** the response includes the effective collection interval as status
+- **THEN** the response includes cleanup settings and current operational-data payload size
 - **THEN** the response includes the last sampling start and finish timestamps
 - **THEN** the response includes the last sampling error, sampled signal count, and per-source status details
 
@@ -66,10 +73,10 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 
 #### Scenario: Operator updates operational-data runtime settings without restart
 - **GIVEN** an authenticated operator opens the web UI
-- **WHEN** the operator enables or disables operational-data collection or changes expiration
-- **THEN** the setting is saved to SQLite through an authenticated runtime settings API
-- **THEN** the next scheduler tick uses the updated setting without restarting the service
-- **THEN** scheduler status reports the persisted enabled state, effective internal cadence, expiration, and source freshness
+- **WHEN** the operator enables or disables operational-data collection, changes collection interval, changes expiration, changes retention seconds, or changes maximum storage MB
+- **THEN** the setting is saved to SQLite through a global settings control backed by an authenticated runtime settings API
+- **THEN** the next scheduler wait or tick uses the updated setting without restarting the service
+- **THEN** scheduler status reports the persisted enabled state, effective collection interval, expiration, cleanup settings, storage size, and source freshness
 
 ### Requirement: Credit-control scheduling uses operational runtime data
 The system SHALL run credit-control due-policy execution from the shared operational runtime model instead of a separate deployment tick configuration.

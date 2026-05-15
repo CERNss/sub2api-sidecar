@@ -22,6 +22,7 @@ from app.models.notification import (
 )
 from app.models.operational_data import (
     CreditControlRuntimeSettings,
+    OperationalDataCleanupResult,
     OperationalDataRuntimeSettings,
     OperationalDataSnapshot,
     OperationalDataSourceStatus,
@@ -700,6 +701,62 @@ class SQLiteFlowStore(FlowStore):
             OperationalDataSnapshot,
         )
 
+    def operational_data_storage_bytes(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_metric_samples), 0)
+                    + COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_data_snapshots), 0)
+                    AS storage_bytes
+                """
+            ).fetchone()
+        return int(row["storage_bytes"] if row else 0)
+
+    def cleanup_operational_data(
+        self,
+        *,
+        retention_cutoff: datetime | None = None,
+        max_storage_bytes: int | None = None,
+    ) -> OperationalDataCleanupResult:
+        cleaned_at = datetime.now(timezone.utc)
+        before = self.operational_data_storage_bytes()
+        deleted_metric_samples = 0
+        deleted_snapshots = 0
+        with self._connect() as connection:
+            if retention_cutoff is not None:
+                cursor = connection.execute(
+                    "DELETE FROM operational_metric_samples WHERE observed_at < ?",
+                    (retention_cutoff.isoformat(),),
+                )
+                deleted_metric_samples += cursor.rowcount if cursor.rowcount > 0 else 0
+                cursor = connection.execute(
+                    "DELETE FROM operational_data_snapshots WHERE observed_at < ?",
+                    (retention_cutoff.isoformat(),),
+                )
+                deleted_snapshots += cursor.rowcount if cursor.rowcount > 0 else 0
+            if max_storage_bytes is not None:
+                while self._operational_data_storage_bytes(connection) > max_storage_bytes:
+                    deleted = self._delete_oldest_operational_data_record(connection)
+                    if deleted is None:
+                        break
+                    table_name, row_count = deleted
+                    if table_name == "operational_metric_samples":
+                        deleted_metric_samples += row_count
+                    else:
+                        deleted_snapshots += row_count
+            connection.commit()
+            after = self._operational_data_storage_bytes(connection)
+        return OperationalDataCleanupResult(
+            cleaned_at=cleaned_at,
+            retention_cutoff=retention_cutoff,
+            size_limit_bytes=max_storage_bytes,
+            storage_bytes_before=before,
+            storage_bytes_after=after,
+            deleted_metric_samples=deleted_metric_samples,
+            deleted_snapshots=deleted_snapshots,
+        )
+
     def save_operational_data_source_status(
         self, status: OperationalDataSourceStatus
     ) -> OperationalDataSourceStatus:
@@ -782,6 +839,77 @@ class SQLiteFlowStore(FlowStore):
                 ),
             )
             connection.commit()
+
+    def _operational_data_storage_bytes(self, connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            """
+            SELECT
+                COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_metric_samples), 0)
+                + COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_data_snapshots), 0)
+                AS storage_bytes
+            """
+        ).fetchone()
+        return int(row["storage_bytes"] if row else 0)
+
+    def _delete_oldest_operational_data_record(
+        self,
+        connection: sqlite3.Connection,
+    ) -> tuple[str, int] | None:
+        metric = connection.execute(
+            """
+            SELECT sample_id AS id, observed_at, collected_at FROM operational_metric_samples
+            WHERE sample_id NOT IN (
+                SELECT sample_id FROM (
+                    SELECT sample_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY metric_key
+                               ORDER BY observed_at DESC, collected_at DESC, sample_id DESC
+                           ) AS rn
+                    FROM operational_metric_samples
+                )
+                WHERE rn = 1
+            )
+            ORDER BY observed_at ASC, collected_at ASC, sample_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        snapshot = connection.execute(
+            """
+            SELECT snapshot_id AS id, observed_at, collected_at FROM operational_data_snapshots
+            WHERE snapshot_id NOT IN (
+                SELECT snapshot_id FROM (
+                    SELECT snapshot_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY source_key
+                               ORDER BY observed_at DESC, collected_at DESC, snapshot_id DESC
+                           ) AS rn
+                    FROM operational_data_snapshots
+                )
+                WHERE rn = 1
+            )
+            ORDER BY observed_at ASC, collected_at ASC, snapshot_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if metric is None and snapshot is None:
+            return None
+        if snapshot is None or (
+            metric is not None
+            and (metric["observed_at"], metric["collected_at"]) <= (
+                snapshot["observed_at"],
+                snapshot["collected_at"],
+            )
+        ):
+            cursor = connection.execute(
+                "DELETE FROM operational_metric_samples WHERE sample_id = ?",
+                (metric["id"],),
+            )
+            return "operational_metric_samples", cursor.rowcount if cursor.rowcount > 0 else 0
+        cursor = connection.execute(
+            "DELETE FROM operational_data_snapshots WHERE snapshot_id = ?",
+            (snapshot["id"],),
+        )
+        return "operational_data_snapshots", cursor.rowcount if cursor.rowcount > 0 else 0
 
     def save_credit_policy(self, policy: CreditRechargePolicy) -> CreditRechargePolicy:
         payload = policy.model_dump_json()

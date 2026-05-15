@@ -20,7 +20,7 @@ def test_runtime_environment_reads_are_centralized_in_config() -> None:
 
 def test_background_schedulers_expose_authenticated_status_endpoints() -> None:
     endpoints = {
-        '"/notifications/scheduler"',
+        '"/api/operational-data/status"',
         '"/rotation/auto/scheduler"',
         '"/api/credit-control/scheduler"',
     }

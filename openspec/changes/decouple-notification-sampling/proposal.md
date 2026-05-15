@@ -22,7 +22,7 @@ Notification evaluation currently pulls upstream Sub2API data inside each rule e
 ## Impact
 
 - Affected code: notification services, the old collector integration, scheduler, SQLite store, API status schemas, tests, and runtime-settings docs.
-- Affected APIs: `GET /notifications/scheduler` gains sampling status fields; `POST /notifications/evaluate` refreshes local samples before evaluating a single rule.
+- Affected APIs: `GET /api/operational-data/status` exposes sampling status fields; `POST /notifications/evaluate` refreshes local samples before evaluating a single rule.
 - Runtime settings: the pipeline uses only the SQLite-backed operational data runtime settings.
 - Storage: adds durable operational data snapshot, metric sample, and source-status tables to SQLite.
 - No breaking API removals are expected.

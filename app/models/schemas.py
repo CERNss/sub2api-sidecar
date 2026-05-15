@@ -589,18 +589,20 @@ class OperationalDataSourceStatusResponse(BaseModel):
     updated_at: datetime | None = None
 
 
-class NotificationSchedulerStatusResponse(BaseModel):
+class OperationalDataStatusResponse(BaseModel):
     success: bool = True
     enabled: bool
     running: bool
     cadence_seconds: int
+    collect_interval_seconds: int
     expiration: int | None = None
+    retention_seconds: int | None = None
+    max_storage_mb: int | None = None
+    storage_bytes: int = 0
     tick_count: int
     last_tick_started_at: datetime | None = None
     last_tick_finished_at: datetime | None = None
     last_tick_error: str | None = None
-    last_outcome_count: int = 0
-    last_delivery_count: int = 0
     last_sampling_started_at: datetime | None = None
     last_sampling_finished_at: datetime | None = None
     last_sampling_error: str | None = None
@@ -610,13 +612,19 @@ class NotificationSchedulerStatusResponse(BaseModel):
 
 class OperationalDataRuntimeSettingsResponse(BaseModel):
     enabled: bool = True
+    collect_interval_seconds: int = 60
     expiration: int | None = None
+    retention_seconds: int | None = None
+    max_storage_mb: int | None = None
     updated_at: datetime | None = None
 
 
 class OperationalDataRuntimeSettingsRequest(BaseModel):
     enabled: bool = True
+    collect_interval_seconds: int = Field(default=60, ge=5)
     expiration: int | None = Field(default=None, gt=0)
+    retention_seconds: int | None = Field(default=None, gt=0)
+    max_storage_mb: int | None = Field(default=None, gt=0)
 
 
 class OperationalDataRuntimeSettingsEnvelope(BaseModel):

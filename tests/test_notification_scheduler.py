@@ -126,6 +126,7 @@ def _install_fake_pipeline(
     main.get_flow_store().save_operational_data_runtime_settings(
         OperationalDataRuntimeSettings(
             enabled=True,
+            collect_interval_seconds=existing.collect_interval_seconds if existing else 60,
             expiration=existing.expiration if existing else None,
         )
     )
@@ -429,6 +430,41 @@ def test_operational_data_collector_records_source_failures(client) -> None:
     assert main.get_flow_store().get_latest_operational_metric_sample("account_invalid")
 
 
+def test_notification_refresh_samples_runs_operational_data_cleanup(client) -> None:
+    login(client)
+    older = datetime(2026, 5, 10, 11, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    main.get_flow_store().save_operational_metric_samples(
+        [
+            OperationalMetricSample(
+                metric_key="account_invalid",
+                value=99,
+                observed_at=older,
+                collected_at=older,
+            )
+        ]
+    )
+    main.get_flow_store().save_operational_data_runtime_settings(
+        OperationalDataRuntimeSettings(
+            enabled=True,
+            collect_interval_seconds=60,
+            retention_seconds=1800,
+            max_storage_mb=None,
+        )
+    )
+    service = main.get_notification_service()
+    service.operational_data_collector = OperationalDataCollector(
+        client=_FakeSub2APIClient(),
+        store=main.get_flow_store(),
+    )
+
+    service.refresh_samples(now=now)
+
+    latest = main.get_flow_store().get_latest_operational_metric_sample("account_invalid")
+    assert latest is not None
+    assert latest.value == 1
+
+
 # --- Evaluator ---
 
 
@@ -686,23 +722,96 @@ def test_evaluate_once_returns_no_data_when_sample_is_expired(client) -> None:
 
 
 def test_scheduler_status_endpoint_requires_auth(client) -> None:
-    response = client.get("/notifications/scheduler")
+    response = client.get("/api/operational-data/status")
     assert response.status_code == 401
 
 
 def test_scheduler_status_endpoint_reports_disabled_scheduler(client) -> None:
     login(client)
 
-    response = client.get("/notifications/scheduler")
+    response = client.get("/api/operational-data/status")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["enabled"] is False
     assert payload["running"] is True
     assert payload["cadence_seconds"] == 60
+    assert payload["collect_interval_seconds"] == 60
     assert payload["expiration"] is None
+    assert payload["retention_seconds"] is None
+    assert payload["max_storage_mb"] is None
+    assert payload["storage_bytes"] == 0
     assert payload["tick_count"] == 0
     assert payload["source_statuses"] == []
+
+
+def test_operational_data_settings_api_updates_collection_interval(client) -> None:
+    login(client)
+
+    saved = client.put(
+        "/api/operational-data/settings",
+        json={
+            "enabled": True,
+            "collect_interval_seconds": 30,
+            "expiration": 180,
+            "retention_seconds": 3600,
+            "max_storage_mb": 128,
+        },
+    )
+    reloaded = client.get("/api/operational-data/settings")
+    status = client.get("/api/operational-data/status")
+
+    assert saved.status_code == 200
+    assert saved.json()["settings"]["enabled"] is True
+    assert saved.json()["settings"]["collect_interval_seconds"] == 30
+    assert saved.json()["settings"]["expiration"] == 180
+    assert saved.json()["settings"]["retention_seconds"] == 3600
+    assert saved.json()["settings"]["max_storage_mb"] == 128
+    assert reloaded.status_code == 200
+    assert reloaded.json()["settings"]["collect_interval_seconds"] == 30
+    assert reloaded.json()["settings"]["retention_seconds"] == 3600
+    assert reloaded.json()["settings"]["max_storage_mb"] == 128
+    assert status.status_code == 200
+    assert status.json()["cadence_seconds"] == 30
+    assert status.json()["collect_interval_seconds"] == 30
+    assert status.json()["retention_seconds"] == 3600
+    assert status.json()["max_storage_mb"] == 128
+
+
+def test_operational_data_settings_api_rejects_too_short_collection_interval(client) -> None:
+    login(client)
+
+    response = client.put(
+        "/api/operational-data/settings",
+        json={
+            "enabled": True,
+            "collect_interval_seconds": 0,
+            "expiration": None,
+            "retention_seconds": None,
+            "max_storage_mb": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_notification_scheduler_reads_runtime_cadence_provider() -> None:
+    class _FakeService:
+        last_collection_result = None
+        store = None
+
+        def tick(self, *, now=None):
+            return []
+
+    scheduler = NotificationScheduler(
+        _FakeService(),
+        cadence_seconds=60,
+        cadence_provider=lambda: 15,
+    )
+
+    snapshot = scheduler.snapshot()
+
+    assert snapshot.cadence_seconds == 15
 
 
 def test_evaluate_endpoint_requires_auth(client) -> None:

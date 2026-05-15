@@ -80,10 +80,10 @@ from app.models.schemas import (
     NotificationDeliveryRecordResponse,
     NotificationEvaluateRequest,
     NotificationEvaluateResponse,
-    NotificationSchedulerStatusResponse,
     OperationalDataRuntimeSettingsEnvelope,
     OperationalDataRuntimeSettingsRequest,
     OperationalDataRuntimeSettingsResponse,
+    OperationalDataStatusResponse,
     OperationalDataSourceStatusResponse,
     NotificationRuleStateResponse,
     NotificationTestRequest,
@@ -151,6 +151,7 @@ async def lifespan(app_instance: FastAPI):
         notification_service=get_notification_service(),
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
         enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
+        cadence_provider=lambda: get_operational_data_runtime_settings().collect_interval_seconds,
     )
     app_instance.state.notification_scheduler = notification_scheduler
     notification_scheduler.start()
@@ -262,7 +263,10 @@ def save_operational_data_runtime_settings(
     now = datetime.now(timezone.utc)
     settings = OperationalDataRuntimeSettings(
         enabled=payload.enabled,
+        collect_interval_seconds=payload.collect_interval_seconds,
         expiration=payload.expiration,
+        retention_seconds=payload.retention_seconds,
+        max_storage_mb=payload.max_storage_mb,
         created_at=existing.created_at if existing else now,
         updated_at=now,
     )
@@ -276,9 +280,56 @@ def operational_data_runtime_settings_response(
     return OperationalDataRuntimeSettingsEnvelope(
         settings=OperationalDataRuntimeSettingsResponse(
             enabled=settings.enabled,
+            collect_interval_seconds=settings.collect_interval_seconds,
             expiration=settings.expiration,
+            retention_seconds=settings.retention_seconds,
+            max_storage_mb=settings.max_storage_mb,
             updated_at=settings.updated_at,
         )
+    )
+
+
+def operational_data_status_response() -> OperationalDataStatusResponse:
+    scheduler = getattr(app.state, "notification_scheduler", None)
+    runtime_settings = get_operational_data_runtime_settings()
+    if scheduler is None:
+        return OperationalDataStatusResponse(
+            enabled=runtime_settings.enabled,
+            running=False,
+            cadence_seconds=runtime_settings.collect_interval_seconds,
+            collect_interval_seconds=runtime_settings.collect_interval_seconds,
+            expiration=runtime_settings.expiration,
+            retention_seconds=runtime_settings.retention_seconds,
+            max_storage_mb=runtime_settings.max_storage_mb,
+            storage_bytes=get_flow_store().operational_data_storage_bytes(),
+            tick_count=0,
+            source_statuses=[
+                OperationalDataSourceStatusResponse(**status.model_dump())
+                for status in get_flow_store().list_operational_data_source_statuses()
+            ],
+        )
+    snapshot = scheduler.snapshot()
+    return OperationalDataStatusResponse(
+        enabled=snapshot.enabled,
+        running=snapshot.running,
+        cadence_seconds=snapshot.cadence_seconds,
+        collect_interval_seconds=runtime_settings.collect_interval_seconds,
+        expiration=runtime_settings.expiration,
+        retention_seconds=runtime_settings.retention_seconds,
+        max_storage_mb=runtime_settings.max_storage_mb,
+        storage_bytes=get_flow_store().operational_data_storage_bytes(),
+        tick_count=snapshot.tick_count,
+        last_tick_started_at=snapshot.last_tick_started_at,
+        last_tick_finished_at=snapshot.last_tick_finished_at,
+        last_tick_error=snapshot.last_tick_error,
+        last_sampling_started_at=snapshot.last_sampling_started_at,
+        last_sampling_finished_at=snapshot.last_sampling_finished_at,
+        last_sampling_error=snapshot.last_sampling_error,
+        sampled_signal_count=snapshot.sampled_signal_count,
+        source_statuses=[
+            OperationalDataSourceStatusResponse(**status.model_dump())
+            for status in snapshot.source_statuses or []
+        ],
     )
 
 
@@ -1848,37 +1899,14 @@ def operational_data_settings_put(
     )
 
 
-@app.get("/notifications/scheduler")
-def notifications_scheduler_status(
+@app.get("/api/operational-data/status")
+def operational_data_status(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    scheduler = getattr(app.state, "notification_scheduler", None)
-    runtime_settings = get_operational_data_runtime_settings()
-    if scheduler is None:
-        response = NotificationSchedulerStatusResponse(
-            enabled=runtime_settings.enabled,
-            running=False,
-            cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
-            expiration=runtime_settings.expiration,
-            tick_count=0,
-            source_statuses=[
-                OperationalDataSourceStatusResponse(**status.model_dump())
-                for status in get_flow_store().list_operational_data_source_statuses()
-            ],
-        )
-    else:
-        snapshot = scheduler.snapshot()
-        response = NotificationSchedulerStatusResponse(
-            **{
-                **snapshot.__dict__,
-                "expiration": runtime_settings.expiration,
-                "source_statuses": [
-                    OperationalDataSourceStatusResponse(**status.model_dump())
-                    for status in snapshot.source_statuses or []
-                ],
-            }
-        )
-    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=200,
+        content=operational_data_status_response().model_dump(mode="json"),
+    )
 
 
 @app.put("/notifications/config")

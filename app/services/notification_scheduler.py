@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event, Thread
@@ -36,10 +37,12 @@ class NotificationScheduler:
         notification_service: NotificationService,
         cadence_seconds: int,
         enabled_provider: Callable[[], bool] | None = None,
+        cadence_provider: Callable[[], int] | None = None,
     ) -> None:
         self.notification_service = notification_service
         self.cadence_seconds = cadence_seconds
         self.enabled_provider = enabled_provider or (lambda: True)
+        self.cadence_provider = cadence_provider
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._tick_count = 0
@@ -85,10 +88,11 @@ class NotificationScheduler:
         source_statuses = collection.source_statuses if collection else None
         if source_statuses is None and store is not None:
             source_statuses = store.list_operational_data_source_statuses()
+        cadence_seconds = self._cadence_seconds()
         return NotificationSchedulerSnapshot(
             enabled=self._enabled(),
             running=self.is_running,
-            cadence_seconds=self.cadence_seconds,
+            cadence_seconds=cadence_seconds,
             tick_count=self._tick_count,
             last_tick_started_at=self._last_tick_started_at,
             last_tick_finished_at=self._last_tick_finished_at,
@@ -103,8 +107,16 @@ class NotificationScheduler:
         )
 
     def _run(self) -> None:
-        while not self._stop_event.wait(self.cadence_seconds):
+        last_tick_at = time.monotonic()
+        while not self._stop_event.is_set():
+            next_tick_at = last_tick_at + self._cadence_seconds()
+            wait_seconds = min(1.0, max(0.0, next_tick_at - time.monotonic()))
+            if wait_seconds > 0:
+                if self._stop_event.wait(wait_seconds):
+                    break
+                continue
             self._tick_once()
+            last_tick_at = time.monotonic()
 
     def _tick_once(self) -> None:
         try:
@@ -137,3 +149,13 @@ class NotificationScheduler:
         except Exception:
             logger.exception("Notification scheduler enabled check failed")
             return False
+
+    def _cadence_seconds(self) -> int:
+        if self.cadence_provider is None:
+            return self.cadence_seconds
+        try:
+            cadence = int(self.cadence_provider())
+        except Exception:
+            logger.exception("Notification scheduler cadence check failed")
+            return self.cadence_seconds
+        return max(5, cadence)

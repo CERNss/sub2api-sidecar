@@ -122,9 +122,31 @@ class NotificationService:
     def refresh_samples(self, *, now: datetime | None = None) -> None:
         if self.operational_data_collector is None:
             return
-        if not self.operational_data_runtime_settings().enabled:
+        settings = self.operational_data_runtime_settings()
+        if not settings.enabled:
             return
         self.last_collection_result = self.operational_data_collector.collect(now=now)
+        retention_cutoff = None
+        if settings.retention_seconds is not None:
+            moment = _ensure_aware(now or datetime.now(timezone.utc))
+            retention_cutoff = moment - timedelta(seconds=settings.retention_seconds)
+        max_storage_bytes = (
+            settings.max_storage_mb * 1024 * 1024
+            if settings.max_storage_mb is not None
+            else None
+        )
+        if retention_cutoff is not None or max_storage_bytes is not None:
+            result = self.store.cleanup_operational_data(
+                retention_cutoff=retention_cutoff,
+                max_storage_bytes=max_storage_bytes,
+            )
+            logger.info(
+                "Operational data cleanup completed | deleted_metric_samples=%s deleted_snapshots=%s storage_bytes_before=%s storage_bytes_after=%s",
+                result.deleted_metric_samples,
+                result.deleted_snapshots,
+                result.storage_bytes_before,
+                result.storage_bytes_after,
+            )
 
     def operational_data_runtime_settings(self):
         stored = self.store.get_operational_data_runtime_settings()

@@ -5,7 +5,7 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 
 #### Scenario: Operational data runtime settings control collection
 - **GIVEN** the service starts after this change
-- **WHEN** notification runtime settings are loaded
+- **WHEN** operational data runtime settings are loaded
 - **THEN** the system reads operational data enabled state and optional expiration seconds from SQLite runtime settings
 - **THEN** there is no deployment config field for changing the collection interval
 - **THEN** an unset operational data expiration means persisted local data does not expire
@@ -47,7 +47,7 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 
 #### Scenario: Scheduler status exposes sampling freshness
 - **GIVEN** an authenticated operator
-- **WHEN** the operator requests `GET /notifications/scheduler`
+- **WHEN** the operator requests `GET /api/operational-data/status`
 - **THEN** the response includes whether the scheduler is enabled and running
 - **THEN** the response includes the last sampling start and finish timestamps
 - **THEN** the response includes the last sampling error, sampled signal count, and per-source status details

@@ -149,6 +149,69 @@ type ProvisioningRuntimeSettingsPayload = ApiPayload & {
   settings: ProvisioningRuntimeSettings;
 };
 
+type OperationalDataRuntimeSettings = {
+  enabled: boolean;
+  collectIntervalSeconds: number;
+  expiration: number | null;
+  retentionSeconds: number | null;
+  maxStorageMb: number | null;
+  updatedAt?: string | null;
+};
+
+type OperationalDataRuntimeSettingsPayload = ApiPayload & {
+  settings?: ApiPayload;
+};
+
+type OperationalDataSourceStatus = {
+  sourceKey: string;
+  status: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  errorMessage?: string | null;
+  itemCount?: number | null;
+  updatedAt?: string | null;
+};
+
+type OperationalDataStatusPayload = ApiPayload & {
+  enabled?: boolean;
+  running?: boolean;
+  cadence_seconds?: number;
+  collect_interval_seconds?: number;
+  expiration?: number | null;
+  retention_seconds?: number | null;
+  max_storage_mb?: number | null;
+  storage_bytes?: number;
+  tick_count?: number;
+  last_tick_started_at?: string | null;
+  last_tick_finished_at?: string | null;
+  last_tick_error?: string | null;
+  last_sampling_started_at?: string | null;
+  last_sampling_finished_at?: string | null;
+  last_sampling_error?: string | null;
+  sampled_signal_count?: number;
+  source_statuses?: ApiPayload[];
+};
+
+type OperationalDataStatus = {
+  enabled: boolean;
+  running: boolean;
+  cadenceSeconds: number;
+  collectIntervalSeconds: number;
+  expiration: number | null;
+  retentionSeconds: number | null;
+  maxStorageMb: number | null;
+  storageBytes: number;
+  tickCount: number;
+  lastTickStartedAt?: string | null;
+  lastTickFinishedAt?: string | null;
+  lastTickError?: string | null;
+  lastSamplingStartedAt?: string | null;
+  lastSamplingFinishedAt?: string | null;
+  lastSamplingError?: string | null;
+  sampledSignalCount: number;
+  sourceStatuses: OperationalDataSourceStatus[];
+};
+
 type OrchestrationMode = "replace_group" | "api_key";
 
 type GroupCapacityFallback = {
@@ -649,6 +712,112 @@ async function requestJson<T extends ApiPayload>(
   return payload as T;
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function hydrateOperationalDataSettings(raw: unknown): OperationalDataRuntimeSettings {
+  const source = raw && typeof raw === "object" ? raw as OperationalDataRuntimeSettingsPayload : {};
+  const settings = source.settings && typeof source.settings === "object"
+    ? source.settings as ApiPayload
+    : {};
+  const collectIntervalSeconds = finiteNumber(settings.collect_interval_seconds);
+  const expiration = finiteNumber(settings.expiration);
+  const retentionSeconds = finiteNumber(settings.retention_seconds);
+  const maxStorageMb = finiteNumber(settings.max_storage_mb);
+  return {
+    enabled: typeof settings.enabled === "boolean" ? settings.enabled : true,
+    collectIntervalSeconds: collectIntervalSeconds ?? 60,
+    expiration,
+    retentionSeconds,
+    maxStorageMb,
+    updatedAt: stringOrNull(settings.updated_at)
+  };
+}
+
+function hydrateOperationalDataStatus(raw: unknown): OperationalDataStatus {
+  const source = raw && typeof raw === "object" ? raw as OperationalDataStatusPayload : {};
+  const cadenceSeconds = finiteNumber(source.cadence_seconds);
+  const collectIntervalSeconds = finiteNumber(source.collect_interval_seconds);
+  const expiration = finiteNumber(source.expiration);
+  const retentionSeconds = finiteNumber(source.retention_seconds);
+  const maxStorageMb = finiteNumber(source.max_storage_mb);
+  const storageBytes = finiteNumber(source.storage_bytes);
+  const tickCount = finiteNumber(source.tick_count);
+  const sampledSignalCount = finiteNumber(source.sampled_signal_count);
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : false,
+    running: typeof source.running === "boolean" ? source.running : false,
+    cadenceSeconds: cadenceSeconds ?? 0,
+    collectIntervalSeconds: collectIntervalSeconds ?? cadenceSeconds ?? 60,
+    expiration,
+    retentionSeconds,
+    maxStorageMb,
+    storageBytes: storageBytes ?? 0,
+    tickCount: tickCount ?? 0,
+    lastTickStartedAt: stringOrNull(source.last_tick_started_at),
+    lastTickFinishedAt: stringOrNull(source.last_tick_finished_at),
+    lastTickError: stringOrNull(source.last_tick_error),
+    lastSamplingStartedAt: stringOrNull(source.last_sampling_started_at),
+    lastSamplingFinishedAt: stringOrNull(source.last_sampling_finished_at),
+    lastSamplingError: stringOrNull(source.last_sampling_error),
+    sampledSignalCount: sampledSignalCount ?? 0,
+    sourceStatuses: Array.isArray(source.source_statuses)
+      ? source.source_statuses.map((item) => ({
+        sourceKey: String(item.source_key ?? ""),
+        status: String(item.status ?? ""),
+        startedAt: stringOrNull(item.started_at),
+        finishedAt: stringOrNull(item.finished_at),
+        errorMessage: stringOrNull(item.error_message),
+        itemCount: finiteNumber(item.item_count),
+        updatedAt: stringOrNull(item.updated_at)
+      })).filter((item) => item.sourceKey)
+      : []
+  };
+}
+
+async function loadOperationalDataSettings(): Promise<OperationalDataRuntimeSettings> {
+  const payload = await requestJson<ApiPayload>(
+    "/api/operational-data/settings",
+    { method: "GET" },
+    "加载运行态数据设置失败"
+  );
+  return hydrateOperationalDataSettings(payload);
+}
+
+async function saveOperationalDataSettings(
+  settings: OperationalDataRuntimeSettings
+): Promise<OperationalDataRuntimeSettings> {
+  const payload = await requestJson<ApiPayload>(
+    "/api/operational-data/settings",
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: settings.enabled,
+        collect_interval_seconds: settings.collectIntervalSeconds,
+        expiration: settings.expiration,
+        retention_seconds: settings.retentionSeconds,
+        max_storage_mb: settings.maxStorageMb
+      })
+    },
+    "保存运行态数据设置失败"
+  );
+  return hydrateOperationalDataSettings(payload);
+}
+
+async function loadOperationalDataStatus(): Promise<OperationalDataStatus> {
+  const payload = await requestJson<ApiPayload>(
+    "/api/operational-data/status",
+    { method: "GET" },
+    "加载运行态数据状态失败"
+  );
+  return hydrateOperationalDataStatus(payload);
+}
+
 function getErrorMessage(error: unknown, fallbackMessage: string): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -683,6 +852,20 @@ function formatDate(value: string): string {
     minute: "2-digit",
     second: "2-digit"
   }).format(date);
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  if (value < 1024) {
+    return `${Math.round(value)} B`;
+  }
+  const mb = value / 1024 / 1024;
+  if (mb >= 1) {
+    return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
+  }
+  return `${(value / 1024).toFixed(1)} KB`;
 }
 
 function unknownToText(value: unknown): string {
@@ -1701,7 +1884,7 @@ function App() {
   }
 
   return (
-    <AppChrome title={APP_TITLE}>
+    <AppChrome title={APP_TITLE} headerControls={<GlobalSettingsButton />}>
       <OperatorWorkspace />
     </AppChrome>
   );
@@ -1726,19 +1909,411 @@ function SsoStatusView({ status }: { status: StatusState }) {
   );
 }
 
-function AppChrome({ title, children }: { title: string; children: ReactNode }) {
+function AppChrome({
+  title,
+  children,
+  headerControls
+}: {
+  title: string;
+  children: ReactNode;
+  headerControls?: ReactNode;
+}) {
   return (
     <div className="page">
+      {headerControls ? <div className="page-corner-controls">{headerControls}</div> : null}
       <div className="shell">
         <header className="app-header">
           <div>
             <p className="eyebrow">Sub2API Sidecar</p>
-            <h1>{title}</h1>
+            <div className="app-title-row">
+              <h1>{title}</h1>
+              <OperationalDataStatusDot />
+            </div>
           </div>
         </header>
         {children}
       </div>
     </div>
+  );
+}
+
+function GlobalSettingsButton() {
+  const [open, setOpen] = useState(false);
+  const [settings, setSettings] = useState<OperationalDataRuntimeSettings>({
+    enabled: true,
+    collectIntervalSeconds: 60,
+    expiration: null,
+    retentionSeconds: null,
+    maxStorageMb: null
+  });
+  const [collectIntervalDraft, setCollectIntervalDraft] = useState("60");
+  const [expirationDraft, setExpirationDraft] = useState("");
+  const [retentionDraft, setRetentionDraft] = useState("");
+  const [maxStorageDraft, setMaxStorageDraft] = useState("");
+  const [status, setStatus] = useState<OperationalDataStatus | null>(null);
+  const [message, setMessage] = useState<StatusState>(emptyStatus);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  function handleAuthExpired(error: unknown): boolean {
+    if (getErrorStatus(error) !== 401) {
+      return false;
+    }
+    setMessage({ message: "登录已失效，正在返回登录页", tone: "error" });
+    window.setTimeout(() => {
+      window.location.href = frontendRoutePath("/login");
+    }, 500);
+    return true;
+  }
+
+  async function refreshRuntimeState(showSpinner = false) {
+    if (showSpinner) {
+      setIsLoading(true);
+    }
+    try {
+      const [loadedSettings, loadedStatus] = await Promise.all([
+        loadOperationalDataSettings(),
+        loadOperationalDataStatus()
+      ]);
+      setSettings(loadedSettings);
+      setCollectIntervalDraft(String(loadedSettings.collectIntervalSeconds));
+      setExpirationDraft(loadedSettings.expiration === null ? "" : String(loadedSettings.expiration));
+      setRetentionDraft(loadedSettings.retentionSeconds === null ? "" : String(loadedSettings.retentionSeconds));
+      setMaxStorageDraft(loadedSettings.maxStorageMb === null ? "" : String(loadedSettings.maxStorageMb));
+      setStatus(loadedStatus);
+      if (message.tone === "error") {
+        setMessage(emptyStatus);
+      }
+    } catch (error) {
+      if (!handleAuthExpired(error)) {
+        setMessage({ message: getErrorMessage(error, "加载全局设置失败"), tone: "error" });
+      }
+    } finally {
+      if (showSpinner) {
+        setIsLoading(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadInitialState() {
+      try {
+        const [loadedSettings, loadedStatus] = await Promise.all([
+          loadOperationalDataSettings(),
+          loadOperationalDataStatus()
+        ]);
+        if (cancelled) return;
+        setSettings(loadedSettings);
+        setCollectIntervalDraft(String(loadedSettings.collectIntervalSeconds));
+        setExpirationDraft(loadedSettings.expiration === null ? "" : String(loadedSettings.expiration));
+        setRetentionDraft(loadedSettings.retentionSeconds === null ? "" : String(loadedSettings.retentionSeconds));
+        setMaxStorageDraft(loadedSettings.maxStorageMb === null ? "" : String(loadedSettings.maxStorageMb));
+        setStatus(loadedStatus);
+      } catch (error) {
+        if (!cancelled && !handleAuthExpired(error)) {
+          setMessage({ message: getErrorMessage(error, "加载全局设置失败"), tone: "error" });
+        }
+      }
+    }
+    void loadInitialState();
+    const timer = window.setInterval(() => {
+      if (!cancelled) {
+        void refreshRuntimeState(false);
+      }
+    }, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  function parseExpirationDraft(): number | null | undefined {
+    const raw = expirationDraft.trim();
+    if (!raw) {
+      return null;
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) {
+      setMessage({ message: "Expiration 必须为空或正整数秒。", tone: "error" });
+      return undefined;
+    }
+    return Math.floor(value);
+  }
+
+  function parseOptionalPositiveIntegerDraft(
+    rawDraft: string,
+    fieldName: string
+  ): number | null | undefined {
+    const raw = rawDraft.trim();
+    if (!raw) {
+      return null;
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) {
+      setMessage({ message: `${fieldName} 必须为空或正整数。`, tone: "error" });
+      return undefined;
+    }
+    return Math.floor(value);
+  }
+
+  function parseCollectIntervalDraft(): number | undefined {
+    const value = Number(collectIntervalDraft);
+    if (!Number.isFinite(value) || value < 5) {
+      setMessage({ message: "采集间隔必须是至少 5 秒的整数。", tone: "error" });
+      return undefined;
+    }
+    return Math.floor(value);
+  }
+
+  async function persistSettings(next: OperationalDataRuntimeSettings) {
+    setIsSaving(true);
+    setMessage({ message: "正在保存全局设置。", tone: "info" });
+    try {
+      const saved = await saveOperationalDataSettings(next);
+      setSettings(saved);
+      setCollectIntervalDraft(String(saved.collectIntervalSeconds));
+      setExpirationDraft(saved.expiration === null ? "" : String(saved.expiration));
+      setRetentionDraft(saved.retentionSeconds === null ? "" : String(saved.retentionSeconds));
+      setMaxStorageDraft(saved.maxStorageMb === null ? "" : String(saved.maxStorageMb));
+      const refreshedStatus = await loadOperationalDataStatus();
+      setStatus(refreshedStatus);
+      setMessage({ message: "全局设置已保存。", tone: "success" });
+    } catch (error) {
+      if (!handleAuthExpired(error)) {
+        setMessage({ message: getErrorMessage(error, "保存全局设置失败"), tone: "error" });
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function saveOperationalDataRuntimeSettings() {
+    const expiration = parseExpirationDraft();
+    if (expiration === undefined) {
+      return;
+    }
+    const collectIntervalSeconds = parseCollectIntervalDraft();
+    if (collectIntervalSeconds === undefined) {
+      return;
+    }
+    const retentionSeconds = parseOptionalPositiveIntegerDraft(retentionDraft, "保留时长");
+    if (retentionSeconds === undefined) {
+      return;
+    }
+    const maxStorageMb = parseOptionalPositiveIntegerDraft(maxStorageDraft, "最大占用");
+    if (maxStorageMb === undefined) {
+      return;
+    }
+    await persistSettings({
+      ...settings,
+      collectIntervalSeconds,
+      expiration,
+      retentionSeconds,
+      maxStorageMb
+    });
+  }
+
+  function toggleOperationalData(enabled: boolean) {
+    const next = { ...settings, enabled };
+    setSettings(next);
+    void persistSettings(next);
+  }
+
+  const isOperationalRunning = Boolean(status?.enabled && status?.running);
+
+  return (
+    <>
+      <Tooltip title="全局设置">
+        <button
+          className="global-settings-button"
+          type="button"
+          aria-label="全局设置"
+          onClick={() => {
+            setOpen(true);
+            void refreshRuntimeState(true);
+          }}
+        >
+          <Settings size={18} aria-hidden="true" />
+        </button>
+      </Tooltip>
+      <Modal
+        title="全局设置"
+        open={open}
+        width={620}
+        footer={null}
+        onCancel={() => setOpen(false)}
+      >
+        <div className="global-settings-panel">
+          <section className="global-setting-section">
+            <header className="global-setting-section-head">
+              <div>
+                <Typography.Text strong>运行态数据</Typography.Text>
+                <Typography.Text type="secondary">Operational Data</Typography.Text>
+              </div>
+              <Tag color={isOperationalRunning ? "green" : "red"}>
+                {isOperationalRunning ? "运行中" : "未运行"}
+              </Tag>
+            </header>
+            <div className="global-setting-row">
+              <div>
+                <Typography.Text strong>采集开关</Typography.Text>
+                <Typography.Text type="secondary">影响告警、动态编排、余额管理读取的本地数据</Typography.Text>
+              </div>
+              <Switch
+                checked={settings.enabled}
+                loading={isSaving}
+                checkedChildren="开启"
+                unCheckedChildren="关闭"
+                onChange={toggleOperationalData}
+              />
+            </div>
+            <div className="global-expiration-row">
+              <div className="ant-field">
+                <Typography.Text strong>采集间隔</Typography.Text>
+                <InputNumber
+                  min={5}
+                  precision={0}
+                  value={collectIntervalDraft === "" ? null : Number(collectIntervalDraft)}
+                  addonAfter="秒"
+                  disabled={isSaving}
+                  onChange={(value) => setCollectIntervalDraft(value === null ? "" : String(value))}
+                  style={{ width: "100%" }}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>Expiration</Typography.Text>
+                <InputNumber
+                  min={1}
+                  precision={0}
+                  value={expirationDraft === "" ? null : Number(expirationDraft)}
+                  placeholder="不设置"
+                  disabled={isSaving}
+                  onChange={(value) => setExpirationDraft(value === null ? "" : String(value))}
+                  style={{ width: "100%" }}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>保留时长</Typography.Text>
+                <InputNumber
+                  min={1}
+                  precision={0}
+                  value={retentionDraft === "" ? null : Number(retentionDraft)}
+                  placeholder="不设置"
+                  addonAfter="秒"
+                  disabled={isSaving}
+                  onChange={(value) => setRetentionDraft(value === null ? "" : String(value))}
+                  style={{ width: "100%" }}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>最大占用</Typography.Text>
+                <InputNumber
+                  min={1}
+                  precision={0}
+                  value={maxStorageDraft === "" ? null : Number(maxStorageDraft)}
+                  placeholder="不设置"
+                  addonAfter="MB"
+                  disabled={isSaving}
+                  onChange={(value) => setMaxStorageDraft(value === null ? "" : String(value))}
+                  style={{ width: "100%" }}
+                />
+              </div>
+              <AntButton
+                type="primary"
+                icon={isSaving ? <LoaderCircle className="spin" size={16} aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}
+                loading={isSaving}
+                onClick={() => void saveOperationalDataRuntimeSettings()}
+              >
+                保存
+              </AntButton>
+            </div>
+            <div className="global-setting-status-grid">
+              <span>间隔 {status?.collectIntervalSeconds || status?.cadenceSeconds || "-" }s</span>
+              <span>Tick {status?.tickCount ?? "-"}</span>
+              <span>信号 {status?.sampledSignalCount ?? "-"}</span>
+              <span>占用 {formatBytes(status?.storageBytes ?? 0)}</span>
+            </div>
+            {status?.lastSamplingFinishedAt ? (
+              <Typography.Text type="secondary">
+                最近采集 {formatDate(status.lastSamplingFinishedAt)}
+              </Typography.Text>
+            ) : null}
+            {status?.lastTickError || status?.lastSamplingError ? (
+              <Alert
+                showIcon
+                type="error"
+                message={status.lastTickError || status.lastSamplingError}
+              />
+            ) : null}
+            {message.message ? <StatusLine status={message} /> : null}
+            <div className="global-setting-actions">
+              <AntButton
+                icon={<RefreshCw size={16} aria-hidden="true" />}
+                loading={isLoading}
+                onClick={() => void refreshRuntimeState(true)}
+              >
+                刷新
+              </AntButton>
+            </div>
+          </section>
+        </div>
+      </Modal>
+    </>
+  );
+}
+
+function OperationalDataStatusDot() {
+  const [status, setStatus] = useState<OperationalDataStatus | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  async function refreshStatus() {
+    try {
+      setStatus(await loadOperationalDataStatus());
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const loaded = await loadOperationalDataStatus();
+        if (!cancelled) {
+          setStatus(loaded);
+          setFailed(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setFailed(true);
+        }
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => {
+      if (!cancelled) {
+        void refreshStatus();
+      }
+    }, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const isRunning = Boolean(status?.enabled && status?.running);
+  const dotLabel = isRunning ? "运行态数据采集正在运行" : "运行态数据采集未运行";
+
+  return (
+    <Tooltip title={failed ? "运行态数据状态读取失败" : dotLabel}>
+      <span
+        className={`operational-status-dot ${isRunning ? "running" : "stopped"}`}
+        aria-label={failed ? "运行态数据状态读取失败" : dotLabel}
+        role="status"
+      />
+    </Tooltip>
   );
 }
 

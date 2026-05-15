@@ -15,7 +15,7 @@ The desired shape is a shared two-stage operational data pipeline:
 - Collect Sub2API data once per scheduler tick and reuse it for all notification rules.
 - Persist latest and historical operational snapshots and metric samples in SQLite.
 - Evaluate scheduled rules from local samples while preserving `readIntervalMinutes`, `forMinutes`, `cooldownMinutes`, recovery, and delivery semantics.
-- Make scheduler status report sampling freshness and per-source errors.
+- Make operational-data status report sampling freshness and per-source errors.
 - Keep on-demand evaluation useful by refreshing samples before evaluating one rule.
 - Introduce neutral operational data runtime settings as the source of truth for optional data expiration and enabled state.
 - Explicitly document the data source used by each pipeline stage.
@@ -83,7 +83,7 @@ The first implementation data sources are:
 
 ## Risks / Trade-offs
 
-- Local samples can expire if upstream collection fails and runtime `expiration` is configured -> Store per-source errors and expose sampling status in `/notifications/scheduler`; expired or missing samples evaluate as `no_data`.
+- Local samples can expire if upstream collection fails and runtime `expiration` is configured -> Store per-source errors and expose sampling status in `/api/operational-data/status`; expired or missing samples evaluate as `no_data`.
 - A single sampling step can fail before all signals are computed → Persist status per source and keep previous samples available, but mark failure so operators can see the problem.
 - Existing tests that registered fake collectors directly may need to shift to seeded samples or fake samplers → Prefer tests that verify local-sample evaluation and one sampling call per tick.
 
@@ -94,5 +94,5 @@ The first implementation data sources are:
 3. Add models and store methods for saving/listing latest snapshots, metric samples, and source statuses.
 4. Add `OperationalDataCollector` and inject it into `NotificationService`.
 5. Change scheduled and on-demand evaluation to refresh/read local samples.
-6. Extend `/notifications/scheduler` response with collection status.
+6. Expose `/api/operational-data/status` with collection status.
 7. Keep existing rule state and delivery tables unchanged.
