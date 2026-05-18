@@ -106,6 +106,7 @@ from app.models.schemas import (
     ProvisioningRuntimeSettingsResponse,
     ProvisionStartRequest,
     RotationExecutionResponse,
+    RotationPoolGroupRemoveRequest,
     RotationPoolCandidateResponse,
     RotationPoolCandidatesEnvelope,
     RotationPoolGroupRequest,
@@ -1785,11 +1786,32 @@ def rotation_pool_remove_group(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     parsed_pool_kind = parse_rotation_pool_kind(pool_kind)
-    get_rotation_service().remove_group_from_pool(group_id, parsed_pool_kind)
+    remove_rotation_pool_group(group_id, parsed_pool_kind)
     return JSONResponse(
         status_code=200,
         content={"success": True, "group_id": group_id, "pool_kind": parsed_pool_kind.value},
     )
+
+
+@app.post("/rotation/pool/groups/remove")
+def rotation_pool_remove_group_post(
+    payload: RotationPoolGroupRemoveRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    parsed_pool_kind = parse_rotation_pool_kind(payload.pool_kind)
+    remove_rotation_pool_group(payload.group_id, parsed_pool_kind)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "group_id": str(payload.group_id),
+            "pool_kind": parsed_pool_kind.value,
+        },
+    )
+
+
+def remove_rotation_pool_group(group_id: Any, pool_kind: RotationPoolKind) -> None:
+    get_rotation_service().remove_group_from_pool(group_id, pool_kind)
 
 
 @app.post("/rotation/manual")

@@ -89,7 +89,7 @@ class RotationService:
             self._normalize_key(group.group_id): group
             for group in self.store.list_rotation_pool_groups(RotationPoolKind.landing)
         }
-        groups = self._latest_groups_snapshot()
+        groups = self._pool_candidate_groups(rotation_selected, landing_selected)
         candidates: list[dict[str, Any]] = []
         for group in groups:
             group_key = self._normalize_key(group["id"])
@@ -117,8 +117,12 @@ class RotationService:
         candidates.sort(
             key=lambda item: (
                 0 if item["is_exclusive"] else 1,
-                0 if item["selected"] else 1,
-                item["priority"] if item["priority"] is not None else 999999,
+                0 if item["selected"] or item["landing_selected"] else 1,
+                item["priority"]
+                if item["priority"] is not None
+                else item["landing_priority"]
+                if item["landing_priority"] is not None
+                else 999999,
                 str(item["name"]),
             )
         )
@@ -131,13 +135,20 @@ class RotationService:
         pool_kind: RotationPoolKind = RotationPoolKind.rotation,
     ) -> RotationPoolGroup:
         group = self._get_upstream_group(group_id)
-        rotation_supported, _ = self._rotation_support(group)
-        if not rotation_supported:
-            if group.get("is_subscription", False):
+        if pool_kind == RotationPoolKind.rotation:
+            supported, _ = self._rotation_support(group)
+            if not supported:
+                if group.get("is_subscription", False):
+                    raise RotationTargetValidationError(
+                        "Subscription groups cannot be added to the rotation pool; replace-group supports only dedicated standard groups"
+                    )
+                raise RotationTargetValidationError("Only exclusive groups can be added to the rotation pool")
+        else:
+            supported, _ = self._landing_support(group)
+            if not supported:
                 raise RotationTargetValidationError(
-                    "Subscription groups cannot be added to the rotation pool; replace-group supports only dedicated standard groups"
+                    "Subscription groups cannot be added to the landing pool"
                 )
-            raise RotationTargetValidationError("Only exclusive groups can be added to the rotation pool")
 
         now = datetime.now(timezone.utc)
         existing = self.store.get_rotation_pool_group(group_id, pool_kind)
@@ -149,7 +160,7 @@ class RotationService:
             group_kind=group.get("group_kind"),
             platform=group.get("platform"),
             status=group.get("status"),
-            is_exclusive=True,
+            is_exclusive=bool(group.get("is_exclusive", False)),
             is_subscription=bool(group.get("is_subscription", False)),
             priority=next_priority,
             created_at=existing.created_at if existing else now,
@@ -1211,6 +1222,9 @@ class RotationService:
         for group in self._latest_groups_snapshot():
             if self._normalize_key(group["id"]) == target_key:
                 return group
+        for group in self.sub2api_client.list_groups(platform="openai"):
+            if self._normalize_key(group["id"]) == target_key:
+                return group
         raise RotationTargetValidationError("Group was not found in upstream Sub2API")
 
     def _rotation_support(self, group: dict[str, Any]) -> tuple[bool, str | None]:
@@ -1219,6 +1233,51 @@ class RotationService:
         if group.get("is_subscription", False):
             return False, "subscription groups cannot be rotated with replace-group"
         return True, None
+
+    def _landing_support(self, group: dict[str, Any]) -> tuple[bool, str | None]:
+        if group.get("is_subscription", False):
+            return False, "subscription groups cannot be used as landing groups"
+        return True, None
+
+    def _pool_candidate_groups(
+        self,
+        rotation_selected: dict[str, RotationPoolGroup],
+        landing_selected: dict[str, RotationPoolGroup],
+    ) -> list[dict[str, Any]]:
+        groups = self._latest_groups_snapshot()
+        if not groups:
+            groups = self.sub2api_client.list_groups(platform="openai")
+
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for group in groups:
+            group_id = group.get("id")
+            if group_id in (None, ""):
+                continue
+            group_key = self._normalize_key(group_id)
+            if group_key in seen:
+                continue
+            seen.add(group_key)
+            result.append(group)
+
+        for pool_group in [*rotation_selected.values(), *landing_selected.values()]:
+            group_key = self._normalize_key(pool_group.group_id)
+            if group_key in seen:
+                continue
+            seen.add(group_key)
+            result.append(
+                {
+                    "id": pool_group.group_id,
+                    "name": pool_group.group_name,
+                    "group_kind": pool_group.group_kind,
+                    "platform": pool_group.platform,
+                    "status": pool_group.status,
+                    "is_exclusive": pool_group.is_exclusive,
+                    "is_subscription": pool_group.is_subscription,
+                }
+            )
+
+        return result
 
     def _next_priority(self, pool_kind: RotationPoolKind = RotationPoolKind.rotation) -> int:
         groups = self.store.list_rotation_pool_groups(pool_kind)

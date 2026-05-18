@@ -806,10 +806,23 @@ pre {
 
 .credit-filter-grid {
   display: grid;
-  grid-template-columns: minmax(180px, 1.4fr) minmax(120px, 0.7fr) repeat(6, minmax(98px, 0.68fr)) auto;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.credit-filter-row {
+  min-width: 0;
+  display: grid;
   gap: 8px;
   align-items: center;
-  margin-bottom: 12px;
+}
+
+.credit-filter-row-primary {
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, 150px) minmax(100px, 120px) minmax(120px, 140px) auto;
+}
+
+.credit-filter-row-range {
+  grid-template-columns: repeat(4, minmax(112px, 1fr));
 }
 
 .credit-aggregate-grid {
@@ -3855,8 +3868,13 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .credit-filter-grid {
+  .credit-filter-row-primary,
+  .credit-filter-row-range {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .credit-filter-row-primary .ant-btn {
+    grid-column: span 2;
   }
 
   .credit-aggregate-grid,
@@ -3969,8 +3987,9 @@ pre {
 
   .segmented,
   .filter-grid,
-  .credit-filter-grid,
   .credit-aggregate-grid,
+  .credit-filter-row-primary,
+  .credit-filter-row-range,
   .credit-editor-grid,
   .form-grid-2,
   .webhook-list,

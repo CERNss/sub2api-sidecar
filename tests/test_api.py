@@ -1193,7 +1193,10 @@ def test_landing_and_rotation_pools_are_independent(client) -> None:
             json={"group_id": 11, "pool_kind": "rotation", "priority": 0},
         )
         candidates = client.get("/rotation/pool/candidates")
-        removed_landing = client.delete("/rotation/pool/groups/11?pool_kind=landing")
+        removed_landing = client.post(
+            "/rotation/pool/groups/remove",
+            json={"group_id": 11, "pool_kind": "landing"},
+        )
         candidates_after_remove = client.get("/rotation/pool/candidates")
 
     assert landing.status_code == 200
@@ -1209,6 +1212,108 @@ def test_landing_and_rotation_pools_are_independent(client) -> None:
     }[11]
     assert item_after_remove["landing_selected"] is False
     assert item_after_remove["rotation_selected"] is True
+
+
+def test_rotation_pool_delete_is_idempotent(client) -> None:
+    login(client)
+
+    landing_response = client.delete("/rotation/pool/groups/999999?pool_kind=landing")
+    rotation_response = client.delete("/rotation/pool/groups/999999")
+    landing_post_response = client.post(
+        "/rotation/pool/groups/remove",
+        json={"group_id": 999999, "pool_kind": "landing"},
+    )
+
+    assert landing_response.status_code == 200
+    assert landing_response.json() == {
+        "success": True,
+        "group_id": "999999",
+        "pool_kind": "landing",
+    }
+    assert rotation_response.status_code == 200
+    assert rotation_response.json() == {
+        "success": True,
+        "group_id": "999999",
+        "pool_kind": "rotation",
+    }
+    assert landing_post_response.status_code == 200
+    assert landing_post_response.json() == {
+        "success": True,
+        "group_id": "999999",
+        "pool_kind": "landing",
+    }
+
+
+def test_landing_pool_accepts_public_non_subscription_group(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/rotation/pool/groups",
+            json={"group_id": 33, "pool_kind": "landing", "priority": 0},
+        )
+        candidates = client.get("/rotation/pool/candidates")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pool_kind"] == "landing"
+    assert payload["is_exclusive"] is False
+    assert payload["rotation_supported"] is False
+    item = {group["group_id"]: group for group in candidates.json()["items"]}[33]
+    assert item["landing_selected"] is True
+    assert item["rotation_selected"] is False
+    assert item["rotation_supported"] is False
+
+
+def test_landing_pool_rejects_subscription_group(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/rotation/pool/groups",
+            json={"group_id": 44, "pool_kind": "landing"},
+        )
+
+    assert response.status_code == 400
+    assert "Subscription groups cannot be added to the landing pool" in response.json()["detail"]
+
+
+def test_pool_candidates_fallback_to_upstream_groups_without_snapshot(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.get("/rotation/pool/candidates")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    selected = {item["group_id"]: item for item in items}
+    assert set(selected) == {11, 22, 33, 44}
+    assert selected[33]["is_exclusive"] is False
+    assert selected[33]["is_subscription"] is False
+    assert selected[33]["rotation_supported"] is False
+    assert selected[44]["is_subscription"] is True
+
+
+def test_landing_pool_add_fallback_to_upstream_without_snapshot(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/rotation/pool/groups",
+            json={"group_id": 33, "pool_kind": "landing"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pool_kind"] == "landing"
+    assert payload["group_id"] == "33"
+    assert payload["is_exclusive"] is False
 
 
 def test_rotation_pool_rejects_public_group(client) -> None:

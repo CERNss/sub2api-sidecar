@@ -4230,55 +4230,59 @@ function CreditControlView({
           <div className="credit-users-layout">
             <section className="credit-main-pane">
               <form className="credit-filter-grid" onSubmit={applyUserFilters}>
-                <Input
-                  prefix={<Search size={15} />}
-                  value={filters.search}
-                  placeholder="用户 / email / ID"
-                  onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
-                />
-                <Select
-                  value={filters.window}
-                  onChange={(value) => setFilters((current) => ({ ...current, window: value }))}
-                  options={[
-                    { label: "最近 5 小时", value: "5h" },
-                    { label: "最近 1 天", value: "1d" },
-                    { label: "最近 7 天", value: "7d" },
-                    { label: "最近 30 天", value: "30d" }
-                  ]}
-                />
-                <Input
-                  value={filters.status}
-                  placeholder="状态"
-                  onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
-                />
-                <Input
-                  value={filters.groupId}
-                  placeholder="Group ID"
-                  onChange={(event) => setFilters((current) => ({ ...current, groupId: event.target.value }))}
-                />
-                <Input
-                  value={filters.balanceMin}
-                  placeholder="余额 ≥"
-                  onChange={(event) => setFilters((current) => ({ ...current, balanceMin: event.target.value }))}
-                />
-                <Input
-                  value={filters.balanceMax}
-                  placeholder="余额 ≤"
-                  onChange={(event) => setFilters((current) => ({ ...current, balanceMax: event.target.value }))}
-                />
-                <Input
-                  value={filters.consumptionMin}
-                  placeholder="消耗 ≥"
-                  onChange={(event) => setFilters((current) => ({ ...current, consumptionMin: event.target.value }))}
-                />
-                <Input
-                  value={filters.consumptionMax}
-                  placeholder="消耗 ≤"
-                  onChange={(event) => setFilters((current) => ({ ...current, consumptionMax: event.target.value }))}
-                />
-                <AntButton type="primary" htmlType="submit" icon={<Search size={15} />} loading={loadingUsers}>
-                  查询
-                </AntButton>
+                <div className="credit-filter-row credit-filter-row-primary">
+                  <Input
+                    prefix={<Search size={15} />}
+                    value={filters.search}
+                    placeholder="用户 / email / ID"
+                    onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
+                  />
+                  <Select
+                    value={filters.window}
+                    onChange={(value) => setFilters((current) => ({ ...current, window: value }))}
+                    options={[
+                      { label: "最近 5 小时", value: "5h" },
+                      { label: "最近 1 天", value: "1d" },
+                      { label: "最近 7 天", value: "7d" },
+                      { label: "最近 30 天", value: "30d" }
+                    ]}
+                  />
+                  <Input
+                    value={filters.status}
+                    placeholder="状态"
+                    onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
+                  />
+                  <Input
+                    value={filters.groupId}
+                    placeholder="Group ID"
+                    onChange={(event) => setFilters((current) => ({ ...current, groupId: event.target.value }))}
+                  />
+                  <AntButton type="primary" htmlType="submit" icon={<Search size={15} />} loading={loadingUsers}>
+                    查询
+                  </AntButton>
+                </div>
+                <div className="credit-filter-row credit-filter-row-range">
+                  <Input
+                    value={filters.balanceMin}
+                    placeholder="余额 ≥"
+                    onChange={(event) => setFilters((current) => ({ ...current, balanceMin: event.target.value }))}
+                  />
+                  <Input
+                    value={filters.balanceMax}
+                    placeholder="余额 ≤"
+                    onChange={(event) => setFilters((current) => ({ ...current, balanceMax: event.target.value }))}
+                  />
+                  <Input
+                    value={filters.consumptionMin}
+                    placeholder="消耗 ≥"
+                    onChange={(event) => setFilters((current) => ({ ...current, consumptionMin: event.target.value }))}
+                  />
+                  <Input
+                    value={filters.consumptionMax}
+                    placeholder="消耗 ≤"
+                    onChange={(event) => setFilters((current) => ({ ...current, consumptionMax: event.target.value }))}
+                  />
+                </div>
               </form>
 
               <div className="credit-aggregate-grid">
@@ -5003,15 +5007,19 @@ function DynamicOrchestrationView({
 
   const selectedGroups = candidates.filter((group) => group.rotation_selected || group.selected);
   const selectedLandingGroups = candidates.filter((group) => group.landing_selected);
-  const supportedGroups = candidates.filter((group) => group.rotation_supported);
-  const selectedPoolCandidates = supportedGroups.filter((group) =>
+  const landingEligibleGroups = candidates.filter((group) => !group.is_subscription);
+  const rotationEligibleGroups = candidates.filter((group) => group.rotation_supported);
+  const selectedLandingCandidateGroups = landingEligibleGroups.filter((group) =>
     selectedPoolCandidateIds.includes(idValue(group.group_id))
   );
-  const landingPoolCandidates = selectedPoolCandidates.filter((group) => !group.landing_selected);
-  const rotationPoolCandidates = selectedPoolCandidates.filter(
+  const selectedRotationCandidateGroups = rotationEligibleGroups.filter((group) =>
+    selectedPoolCandidateIds.includes(idValue(group.group_id))
+  );
+  const landingPoolCandidates = selectedLandingCandidateGroups.filter((group) => !group.landing_selected);
+  const rotationPoolCandidates = selectedRotationCandidateGroups.filter(
     (group) => !(group.rotation_selected || group.selected)
   );
-  const poolCandidateOptions = supportedGroups.map((group) =>
+  const poolCandidateOptions = candidates.map((group) =>
     buildGroupOption({
       group_id: group.group_id,
       name: group.name,
@@ -5029,7 +5037,7 @@ function DynamicOrchestrationView({
       daily_limit_usd: null,
       weekly_limit_usd: null,
       monthly_limit_usd: null
-    })
+    }, group.is_subscription)
   );
   async function loadDynamicConfig() {
     setLoading(true);
@@ -5039,12 +5047,12 @@ function DynamicOrchestrationView({
         requestJson<AutoRotationConfigPayload>("/rotation/auto/config", { method: "GET" }, "加载动态配置失败")
       ]);
       setCandidates(poolPayload.items);
-      const supportedIds = new Set(
+      const eligibleIds = new Set(
         poolPayload.items
-          .filter((group) => group.rotation_supported)
+          .filter((group) => !group.is_subscription || group.rotation_supported)
           .map((group) => idValue(group.group_id))
       );
-      setSelectedPoolCandidateIds((current) => current.filter((id) => supportedIds.has(id)));
+      setSelectedPoolCandidateIds((current) => current.filter((id) => eligibleIds.has(id)));
       setConfig(configPayload.config);
       setStatus({ message: `已加载 ${poolPayload.items.length} 个分组候选`, tone: "success" });
     } catch (error: unknown) {
@@ -5096,8 +5104,14 @@ function DynamicOrchestrationView({
     try {
       if (selected) {
         await requestJson<ApiPayload>(
-          `/rotation/pool/groups/${encodeURIComponent(idValue(group.group_id))}?pool_kind=${poolKind}`,
-          { method: "DELETE" },
+          "/rotation/pool/groups/remove",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              group_id: group.group_id,
+              pool_kind: poolKind
+            })
+          },
           poolKind === "landing" ? "移出 Landing 池失败" : "移出轮转池失败"
         );
       } else {
@@ -5283,9 +5297,6 @@ function DynamicOrchestrationView({
               <Typography.Text strong>Landing 池</Typography.Text>
               <Tag color="blue">{selectedLandingGroups.length}</Tag>
             </div>
-            <Typography.Text type="secondary">
-              新用户或 managed-pool provisioning 的默认落点。自动分配只会从这里接入。
-            </Typography.Text>
             {renderSelectedPoolList(selectedLandingGroups, "landing")}
           </section>
 
@@ -5294,9 +5305,6 @@ function DynamicOrchestrationView({
               <Typography.Text strong>轮转池</Typography.Text>
               <Tag color="green">{selectedGroups.length}</Tag>
             </div>
-            <Typography.Text type="secondary">
-              已接入用户的动态轮转目标。执行时会把所选时间窗口内的用量尽量摊平到这些组里。
-            </Typography.Text>
             {renderSelectedPoolList(selectedGroups, "rotation")}
           </section>
         </div>
@@ -5348,9 +5356,6 @@ function DynamicOrchestrationView({
               }
               options={[...usageWindowOptions]}
             />
-            <Typography.Text type="secondary">
-              动态编排会按这个时间范围汇总用户 API Key 用量，并把轮转池各组的总用量尽量拉平。
-            </Typography.Text>
           </div>
           <div className="ant-field">
             <Typography.Text strong>Cooldown Minutes</Typography.Text>
@@ -5363,9 +5368,6 @@ function DynamicOrchestrationView({
                 cooldown_minutes: Math.max(0, Number(event.target.value) || 0)
               }))}
             />
-            <Typography.Text type="secondary">
-              用户刚被搬过之后这段时间内不会再动他。0 表示不设。
-            </Typography.Text>
           </div>
           <div className="ant-field">
             <Typography.Text strong>Imbalance Epsilon (ε)</Typography.Text>
@@ -5379,9 +5381,6 @@ function DynamicOrchestrationView({
                 imbalance_epsilon: Math.max(0, Number(event.target.value) || 0)
               }))}
             />
-            <Typography.Text type="secondary">
-              各组用量差小于这个值就当作已平衡，本轮不动任何人。0 表示不启用。
-            </Typography.Text>
           </div>
           <div className="ant-field">
             <Typography.Text strong>Improvement Delta (δ)</Typography.Text>
@@ -5395,9 +5394,6 @@ function DynamicOrchestrationView({
                 improvement_delta: Math.max(0, Number(event.target.value) || 0)
               }))}
             />
-            <Typography.Text type="secondary">
-              迁完后差距至少再缩小这么多才动手，防止反复横跳。0 表示不启用。
-            </Typography.Text>
           </div>
           <div className="dynamic-allocation-summary">
             <Tag color={config.enabled ? "green" : "default"}>{config.enabled ? "允许执行" : "仅配置/预览"}</Tag>

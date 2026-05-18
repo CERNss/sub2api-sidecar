@@ -434,6 +434,11 @@ class RotationPoolGroupRequest(BaseModel):
     pool_kind: str = "rotation"
 
 
+class RotationPoolGroupRemoveRequest(BaseModel):
+    group_id: Any
+    pool_kind: str = "rotation"
+
+
 class RotationPoolCandidateResponse(BaseModel):
     group_id: Any
     name: str
