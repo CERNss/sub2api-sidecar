@@ -54,6 +54,7 @@ const KNOWN_WEBHOOK_KEYS = new Set<keyof NotificationWebhook>([
   "provider",
   "method",
   "payloadFields",
+  "feishuCardTemplate",
   "url",
   "secret"
 ]);
@@ -126,6 +127,19 @@ function requireStringArray(source: ApiPayload, key: string, path: string): stri
     );
   }
   return value;
+}
+
+function optionalObject(source: ApiPayload, key: string, path: string): Record<string, unknown> | null {
+  const value = source[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new NotificationApiError(
+      `${path}.${key} 必须是 JSON 对象`,
+      0,
+      { detail: `${path}.${key} must be a JSON object` }
+    );
+  }
+  return value as Record<string, unknown>;
 }
 
 function requireEnum<T extends string>(
@@ -254,6 +268,7 @@ function hydrateWebhook(raw: unknown, index: number): NotificationWebhook {
     provider,
     method: provider === "generic" ? method : "POST",
     payloadFields: payloadFields.length > 0 ? payloadFields : defaultWebhookPayloadFields,
+    feishuCardTemplate: optionalObject(source, "feishuCardTemplate", path),
     url: requireString(source, "url", path),
     secret: requireString(source, "secret", path)
   };

@@ -44,6 +44,9 @@ def evaluate_rule(
     no_data_reason: str | None = None,
 ) -> RuleDecision:
     state = _clone_state(prior_state, rule.id)
+    if sample is not None:
+        state.scope_key = sample.scope_key
+        state.scope_label = sample.scope_label
     state.last_evaluated_at = now
     state.updated_at = now
 

@@ -14,13 +14,13 @@ KNOWN_SIGNAL_KEYS: tuple[str, ...] = (
     "platform_key_quota",
     "platform_key_expiry",
     "subscription_usage",
-    "api_key_usage_spike",
+    "admin_cost_spike",
+    "admin_error_spike",
     "user_balance_low",
     "user_api_key_state",
     "user_usage_summary",
     "user_subscription",
     "admin_dashboard",
-    "admin_usage_anomaly",
     "admin_group_channel",
     "admin_payment",
     "admin_ops_alert",
@@ -87,12 +87,12 @@ def sub2api_registry(client: Sub2APIClient) -> CollectorRegistry:
     registry.register("platform_key_quota", collectors.platform_key_quota)
     registry.register("platform_key_expiry", collectors.platform_key_expiry)
     registry.register("subscription_usage", collectors.subscription_usage)
-    registry.register("api_key_usage_spike", collectors.admin_usage_anomaly)
+    registry.register("admin_cost_spike", collectors.admin_cost_spike)
+    registry.register("admin_error_spike", collectors.admin_error_spike)
     registry.register("user_balance_low", collectors.user_balance_low)
     registry.register("user_api_key_state", collectors.user_api_key_state)
     registry.register("user_usage_summary", collectors.user_usage_summary)
     registry.register("user_subscription", collectors.subscription_usage)
-    registry.register("admin_usage_anomaly", collectors.admin_usage_anomaly)
     registry.register("admin_dashboard", collectors.admin_ops_alert)
     registry.register("admin_group_channel", collectors.admin_group_channel)
     registry.register("admin_payment", collectors.admin_payment)
@@ -280,7 +280,13 @@ class Sub2APINotificationCollectors:
         ]
         return CollectorSample(
             value=min(present),
-            snapshot={"min_balance": min(present), "low_users": low_users[:10]},
+            scope_key=_sample_scope_key(low_users[0]) if len(low_users) == 1 else "",
+            scope_label=str(low_users[0].get("name") or "") if len(low_users) == 1 else "",
+            snapshot={
+                "min_balance": min(present),
+                "low_user_count": len(low_users),
+                "low_users": low_users[:10],
+            },
         )
 
     def user_api_key_state(self, _: NotificationRule) -> CollectorSample | None:
@@ -300,24 +306,35 @@ class Sub2APINotificationCollectors:
             raise CollectorNoData("usage summary fields are missing")
         return CollectorSample(value=value, snapshot={"usage": _usage_snapshot(stats)})
 
-    def admin_usage_anomaly(self, _: NotificationRule) -> CollectorSample | None:
+    def admin_cost_spike(self, _: NotificationRule) -> CollectorSample | None:
         today = date.today()
         current = self._usage_for_day(today)
         previous = self._usage_for_day(today - timedelta(days=1))
-        current_value = _number(current, "total_actual_cost", "total_cost", "total_requests")
-        previous_value = _number(previous, "total_actual_cost", "total_cost", "total_requests")
-        if current_value is None or previous_value is None or previous_value <= 0:
-            raise CollectorNoData("usage stats for current or previous day are missing")
-        change = (current_value - previous_value) / previous_value * 100
-        return CollectorSample(
-            value=change,
-            snapshot={
-                "metric": "total_actual_cost",
-                "current": current_value,
-                "previous": previous_value,
-                "current_date": today.isoformat(),
-                "previous_date": (today - timedelta(days=1)).isoformat(),
-            },
+        return _cost_spike_sample(
+            current,
+            previous,
+            current_date=today,
+            previous_date=today - timedelta(days=1),
+        )
+
+    def admin_error_spike(self, _: NotificationRule) -> CollectorSample | None:
+        today = date.today()
+        current = self.client.list_usage_logs(
+            start_date=today,
+            end_date=today,
+            timezone_name=LOCAL_TIMEZONE,
+        )
+        previous_day = today - timedelta(days=1)
+        previous = self.client.list_usage_logs(
+            start_date=previous_day,
+            end_date=previous_day,
+            timezone_name=LOCAL_TIMEZONE,
+        )
+        return _usage_log_error_spike_sample(
+            current,
+            previous,
+            current_date=today,
+            previous_date=previous_day,
         )
 
     def admin_group_channel(self, _: NotificationRule) -> CollectorSample | None:
@@ -411,9 +428,17 @@ def _entity_snapshot(item: dict) -> dict:
     return {
         "id": item.get("id"),
         "name": item.get("name") or item.get("email") or item.get("username"),
+        "provider": item.get("provider") or item.get("platform"),
         "status": item.get("status") or item.get("availability_status"),
         "reason": item.get("availability_reason") or item.get("last_error"),
     }
+
+
+def _sample_scope_key(item: dict) -> str:
+    item_id = item.get("id")
+    if item_id in (None, ""):
+        return ""
+    return f"user:{item_id}"
 
 
 def _capacity_snapshot(item: dict, used: float, limit: float) -> dict:
@@ -459,6 +484,132 @@ def _number(payload: object, *paths: str) -> float | None:
             except ValueError:
                 continue
     return None
+
+
+def _cost_value(stats: dict) -> float | None:
+    return _number(stats, "total_actual_cost", "actual_cost", "total_cost", "cost")
+
+
+def _cost_spike_sample(
+    current: dict,
+    previous: dict,
+    *,
+    current_date: date,
+    previous_date: date,
+) -> CollectorSample:
+    current_value = _cost_value(current)
+    previous_value = _cost_value(previous)
+    if current_value is None or previous_value is None or previous_value <= 0:
+        raise CollectorNoData("cost stats for current or previous day are missing")
+    change = (current_value - previous_value) / previous_value * 100
+    return CollectorSample(
+        value=change,
+        snapshot={
+            "metric": "total_actual_cost",
+            "current": current_value,
+            "previous": previous_value,
+            "current_date": current_date.isoformat(),
+            "previous_date": previous_date.isoformat(),
+        },
+    )
+
+
+def _usage_log_error_spike_sample(
+    current: dict,
+    previous: dict,
+    *,
+    current_date: date,
+    previous_date: date,
+) -> CollectorSample:
+    current_count, current_total, current_evaluated, current_errors = _usage_log_error_counts(current)
+    previous_count, previous_total, previous_evaluated, _ = _usage_log_error_counts(previous)
+    if previous_count <= 0:
+        if current_count <= 0:
+            change = 0.0
+        else:
+            raise CollectorNoData("previous day error count is zero; error spike percent is undefined")
+    else:
+        change = (current_count - previous_count) / previous_count * 100
+    return CollectorSample(
+        value=change,
+        snapshot={
+            "metric": "error_count_change_percent",
+            "current": current_count,
+            "previous": previous_count,
+            "current_date": current_date.isoformat(),
+            "previous_date": previous_date.isoformat(),
+            "current_evaluated_log_count": current_evaluated,
+            "previous_evaluated_log_count": previous_evaluated,
+            "current_total_log_count": current_total,
+            "previous_total_log_count": previous_total,
+            "errors": [_usage_error_snapshot(item) for item in current_errors[:10]],
+        },
+    )
+
+
+def _usage_log_error_counts(logs: dict) -> tuple[int, int, int, list[dict]]:
+    items = logs.get("items", [])
+    if not isinstance(items, list):
+        raise CollectorNoData("usage log items are missing")
+    states: list[tuple[dict, bool | None]] = [
+        (item, _usage_log_error_state(item))
+        for item in items
+        if isinstance(item, dict)
+    ]
+    if states and all(state is None for _, state in states):
+        raise CollectorNoData("usage log error fields are missing")
+    error_items = [item for item, state in states if state is True]
+    evaluated_count = sum(1 for _, state in states if state is not None)
+    return len(error_items), len(states), evaluated_count, error_items
+
+
+def _usage_log_error_state(item: dict) -> bool | None:
+    for key in ("is_error", "failed", "is_failed", "has_error"):
+        value = item.get(key)
+        if isinstance(value, bool):
+            return value
+    for key in ("success", "is_success", "ok"):
+        value = item.get(key)
+        if isinstance(value, bool):
+            return not value
+
+    status = _status_key(item.get("status") or item.get("state") or item.get("result"))
+    if status in {"success", "succeeded", "completed", "ok", "active", "done"}:
+        return False
+    if status in {"error", "failed", "failure", "timeout", "timed_out", "rejected", "cancelled"}:
+        return True
+
+    code = _number(item, "status_code", "http_status", "response_status")
+    if code is not None:
+        return code >= 400
+
+    api_code = _number(item, "code")
+    if api_code is not None:
+        return api_code != 0
+
+    error_code = item.get("error_code") or item.get("last_error_code") or item.get("upstream_error_code")
+    if error_code not in (None, "", 0, "0"):
+        return True
+
+    for key in ("error", "error_message", "last_error", "upstream_error", "provider_error"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if value not in (None, "", False):
+            return True
+    return None
+
+
+def _usage_error_snapshot(item: dict) -> dict:
+    return {
+        "id": item.get("id"),
+        "user_id": item.get("user_id"),
+        "created_at": item.get("created_at"),
+        "status": item.get("status") or item.get("state") or item.get("result"),
+        "status_code": item.get("status_code") or item.get("http_status") or item.get("response_status"),
+        "error_code": item.get("error_code") or item.get("last_error_code") or item.get("upstream_error_code"),
+        "error_message": item.get("error_message") or item.get("last_error") or item.get("upstream_error"),
+    }
 
 
 def _account_capacity(account: dict) -> tuple[float, float] | None:

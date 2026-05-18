@@ -602,10 +602,15 @@ class SQLiteFlowStore(FlowStore):
             NotificationDeliveryRecord,
         )
 
-    def get_notification_rule_state(self, rule_id: str) -> NotificationRuleState | None:
+    def get_notification_rule_state(
+        self, rule_id: str, scope_key: str = ""
+    ) -> NotificationRuleState | None:
         return self._load_single_model(
-            "SELECT payload FROM notification_rule_states WHERE rule_id = ?",
-            (rule_id,),
+            """
+            SELECT payload FROM notification_rule_states
+            WHERE rule_id = ? AND scope_key = ?
+            """,
+            (rule_id, scope_key),
             NotificationRuleState,
         )
 
@@ -617,13 +622,19 @@ class SQLiteFlowStore(FlowStore):
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO notification_rule_states (rule_id, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(rule_id) DO UPDATE SET
+                INSERT INTO notification_rule_states (rule_id, scope_key, payload, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(rule_id, scope_key) DO UPDATE SET
                     payload = excluded.payload,
                     updated_at = excluded.updated_at
                 """,
-                (state.rule_id, payload, state.created_at.isoformat(), now),
+                (
+                    state.rule_id,
+                    state.scope_key,
+                    payload,
+                    state.created_at.isoformat(),
+                    now,
+                ),
             )
             connection.commit()
         return state
@@ -638,11 +649,12 @@ class SQLiteFlowStore(FlowStore):
                 connection.execute(
                     """
                     INSERT INTO operational_metric_samples (
-                        metric_key, observed_at, collected_at, value, payload
-                    ) VALUES (?, ?, ?, ?, ?)
+                        metric_key, scope_key, observed_at, collected_at, value, payload
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         sample.metric_key,
+                        sample.scope_key,
                         sample.observed_at.isoformat(),
                         sample.collected_at.isoformat(),
                         sample.value,
@@ -653,14 +665,34 @@ class SQLiteFlowStore(FlowStore):
         return samples
 
     def get_latest_operational_metric_sample(
-        self, metric_key: str
+        self, metric_key: str, scope_key: str = ""
     ) -> OperationalMetricSample | None:
         return self._load_single_model(
             """
             SELECT payload FROM operational_metric_samples
-            WHERE metric_key = ?
+            WHERE metric_key = ? AND scope_key = ?
             ORDER BY observed_at DESC, collected_at DESC, sample_id DESC
             LIMIT 1
+            """,
+            (metric_key, scope_key),
+            OperationalMetricSample,
+        )
+
+    def list_latest_operational_metric_samples(
+        self, metric_key: str
+    ) -> list[OperationalMetricSample]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM operational_metric_samples current
+            WHERE current.metric_key = ?
+              AND current.sample_id = (
+                SELECT latest.sample_id FROM operational_metric_samples latest
+                WHERE latest.metric_key = current.metric_key
+                  AND latest.scope_key = current.scope_key
+                ORDER BY latest.observed_at DESC, latest.collected_at DESC, latest.sample_id DESC
+                LIMIT 1
+              )
+            ORDER BY current.scope_key
             """,
             (metric_key,),
             OperationalMetricSample,
@@ -1315,11 +1347,14 @@ class SQLiteFlowStore(FlowStore):
                 )
                 """
             )
+            self._ensure_column(connection, "notification_rule_states", "scope_key", "TEXT NOT NULL DEFAULT ''")
+            self._migrate_notification_rule_state_primary_key(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS operational_metric_samples (
                     sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     metric_key TEXT NOT NULL,
+                    scope_key TEXT NOT NULL DEFAULT '',
                     observed_at TEXT NOT NULL,
                     collected_at TEXT NOT NULL,
                     value REAL NOT NULL,
@@ -1327,10 +1362,11 @@ class SQLiteFlowStore(FlowStore):
                 )
                 """
             )
+            self._ensure_column(connection, "operational_metric_samples", "scope_key", "TEXT NOT NULL DEFAULT ''")
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_operational_metric_samples_latest
-                ON operational_metric_samples(metric_key, observed_at DESC, collected_at DESC)
+                ON operational_metric_samples(metric_key, scope_key, observed_at DESC, collected_at DESC)
                 """
             )
             connection.execute(
@@ -1446,6 +1482,47 @@ class SQLiteFlowStore(FlowStore):
         connection.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
         )
+
+    def _migrate_notification_rule_state_primary_key(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        indexes = connection.execute(
+            "PRAGMA index_list(notification_rule_states)"
+        ).fetchall()
+        for index in indexes:
+            if index["origin"] != "pk":
+                continue
+            columns = connection.execute(
+                f"PRAGMA index_info({index['name']})"
+            ).fetchall()
+            pk_columns = [column["name"] for column in columns]
+            if pk_columns == ["rule_id", "scope_key"]:
+                return
+            break
+        else:
+            return
+
+        connection.execute("ALTER TABLE notification_rule_states RENAME TO notification_rule_states_old")
+        connection.execute(
+            """
+            CREATE TABLE notification_rule_states (
+                rule_id TEXT NOT NULL,
+                scope_key TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (rule_id, scope_key)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO notification_rule_states (rule_id, scope_key, payload, created_at, updated_at)
+            SELECT rule_id, COALESCE(scope_key, ''), payload, created_at, updated_at
+            FROM notification_rule_states_old
+            """
+        )
+        connection.execute("DROP TABLE notification_rule_states_old")
 
     def _load_single_flow(self, query: str, params: tuple[Any, ...]) -> ProvisionFlow | None:
         return self._load_single_model(query, params, ProvisionFlow)
