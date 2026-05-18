@@ -460,7 +460,6 @@ type AutoRotationConfig = {
   usage_thresholds: number[];
   imbalance_epsilon: number;
   improvement_delta: number;
-  schedule_source_group_ids: unknown[];
 };
 
 type AutoRotationConfigPayload = ApiPayload & {
@@ -4994,8 +4993,7 @@ function DynamicOrchestrationView({
     usage_window: "1d",
     usage_thresholds: [],
     imbalance_epsilon: 0,
-    improvement_delta: 0,
-    schedule_source_group_ids: []
+    improvement_delta: 0
   });
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [loading, setLoading] = useState(false);
@@ -5062,7 +5060,7 @@ function DynamicOrchestrationView({
     void loadDynamicConfig();
   }, []);
 
-  async function saveConfig(nextConfig = config) {
+  async function saveConfig(nextConfig = config, { showStatus = true } = {}) {
     setSaving(true);
     try {
       const payload = await requestJson<AutoRotationConfigPayload>(
@@ -5071,14 +5069,15 @@ function DynamicOrchestrationView({
           method: "PUT",
           body: JSON.stringify({
             ...nextConfig,
-            schedule_source_group_ids: [],
             usage_thresholds: []
           })
         },
         "保存动态配置失败"
       );
       setConfig(payload.config);
-      setStatus({ message: "动态配置已保存", tone: "success" });
+      if (showStatus) {
+        setStatus({ message: "动态配置已保存", tone: "success" });
+      }
       return true;
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
@@ -5198,13 +5197,14 @@ function DynamicOrchestrationView({
   );
 
   async function runDynamic(dryRun: boolean) {
-    const saved = await saveConfig();
-    if (!saved) {
-      return;
-    }
     setRunning(dryRun ? "preview" : "run");
-    setStatus({ message: dryRun ? "正在预览动态编排" : "正在执行动态编排", tone: "info" });
+    setStatus({ message: dryRun ? "正在保存并预览动态编排" : "正在保存并执行动态编排", tone: "info" });
     try {
+      const saved = await saveConfig(config, { showStatus: false });
+      if (!saved) {
+        return;
+      }
+      setStatus({ message: dryRun ? "正在预览动态编排" : "正在执行动态编排", tone: "info" });
       const payload = await requestJson<AutoRotationRunPayload>(
         "/rotation/auto/run",
         {
