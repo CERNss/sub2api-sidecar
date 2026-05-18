@@ -97,8 +97,10 @@ class AutoRotationScheduler:
         )
 
     def _run(self) -> None:
-        while not self._stop_event.wait(self.cadence_seconds):
+        while not self._stop_event.is_set():
             self._tick_once()
+            if self._stop_event.wait(self.cadence_seconds):
+                break
 
     def _tick_once(self) -> None:
         try:

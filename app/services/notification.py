@@ -56,6 +56,9 @@ class RuleEvaluationOutcome:
     deliveries: list[DeliveryOutcome]
 
 
+SCOPED_SIGNAL_KEYS = {"user_balance_low"}
+
+
 class NotificationService:
     def __init__(
         self,
@@ -189,6 +192,9 @@ class NotificationService:
             )
             return RuleEvaluationOutcome(rule=rule, decision=decision, deliveries=[])
 
+        if rule.signal_key in SCOPED_SIGNAL_KEYS:
+            return self._evaluate_scoped(rule, config, now=moment, persist=persist)
+
         sample, reason = self._sample_for_rule(rule, now=moment)
         prior_state = self.store.get_notification_rule_state(rule.id)
         decision = evaluate_rule(
@@ -203,19 +209,52 @@ class NotificationService:
 
         deliveries: list[DeliveryOutcome] = []
         if decision.action in {NotificationRuleAction.fire, NotificationRuleAction.recover}:
-            receivers_by_id = {receiver.id: receiver for receiver in config.webhooks}
-            sendable = select_sendable_receivers(rule, receivers_by_id)
-            trigger = (
-                NotificationDeliveryTrigger.recovery
-                if decision.action == NotificationRuleAction.recover
-                else NotificationDeliveryTrigger.rule
-            )
-            message = self._build_message(
-                rule, trigger, self._summary_for(decision, rule), sample=sample
-            )
-            deliveries = [self.delivery.deliver(receiver, message) for receiver in sendable]
+            deliveries = self._deliver_decision(rule, config, decision, sample=sample)
 
         return RuleEvaluationOutcome(rule=rule, decision=decision, deliveries=deliveries)
+
+    def _evaluate_scoped(
+        self,
+        rule: NotificationRule,
+        config: NotificationSettings,
+        *,
+        now: datetime,
+        persist: bool,
+    ) -> RuleEvaluationOutcome:
+        samples, reason = self._samples_for_scoped_rule(rule, now=now)
+        if not samples:
+            prior_state = self.store.get_notification_rule_state(rule.id)
+            decision = evaluate_rule(
+                rule,
+                None,
+                prior_state,
+                now,
+                no_data_reason=reason,
+            )
+            if persist:
+                self.store.upsert_notification_rule_state(decision.next_state)
+            return RuleEvaluationOutcome(rule=rule, decision=decision, deliveries=[])
+
+        deliveries: list[DeliveryOutcome] = []
+        decisions: list[RuleDecision] = []
+        for sample in samples:
+            prior_state = self.store.get_notification_rule_state(rule.id, sample.scope_key)
+            decision = evaluate_rule(rule, sample, prior_state, now)
+            decisions.append(decision)
+            if persist:
+                self.store.upsert_notification_rule_state(decision.next_state)
+            if decision.action in {NotificationRuleAction.fire, NotificationRuleAction.recover}:
+                deliveries.extend(
+                    self._deliver_decision(rule, config, decision, sample=sample)
+                )
+
+        if persist:
+            self.store.upsert_notification_rule_state(_aggregate_scoped_state(rule.id, decisions, now))
+        return RuleEvaluationOutcome(
+            rule=rule,
+            decision=_aggregate_scoped_decision(rule, decisions, now),
+            deliveries=deliveries,
+        )
 
     def _sample_for_rule(
         self, rule: NotificationRule, *, now: datetime
@@ -230,6 +269,23 @@ class NotificationService:
             )
         return sample_record.collector_sample(), None
 
+    def _samples_for_scoped_rule(
+        self, rule: NotificationRule, *, now: datetime
+    ) -> tuple[list[CollectorSample], str | None]:
+        sample_records = self.store.list_latest_operational_metric_samples(rule.signal_key)
+        samples: list[CollectorSample] = []
+        for sample_record in sample_records:
+            if not sample_record.scope_key:
+                continue
+            if self._sample_is_expired(sample_record, now=now):
+                continue
+            samples.append(sample_record.collector_sample())
+        if samples:
+            return samples, None
+        if not sample_records:
+            return [], f"no local samples found for signal '{rule.signal_key}'"
+        return [], f"latest local samples for signal '{rule.signal_key}' are expired"
+
     def _sample_is_expired(
         self, sample: OperationalMetricSample, *, now: datetime
     ) -> bool:
@@ -241,9 +297,34 @@ class NotificationService:
         return moment - observed_at > timedelta(seconds=expiration)
 
     def _summary_for(self, decision: RuleDecision, rule: NotificationRule) -> str:
+        target = (
+            f" scope={decision.next_state.scope_label}"
+            if decision.next_state.scope_label
+            else ""
+        )
         if decision.action == NotificationRuleAction.recover:
-            return f"Rule '{rule.name or rule.signal_key}' recovered: {decision.reason}"
-        return f"Rule '{rule.name or rule.signal_key}' firing: {decision.reason}"
+            return f"Rule '{rule.name or rule.signal_key}'{target} recovered: {decision.reason}"
+        return f"Rule '{rule.name or rule.signal_key}'{target} firing: {decision.reason}"
+
+    def _deliver_decision(
+        self,
+        rule: NotificationRule,
+        config: NotificationSettings,
+        decision: RuleDecision,
+        *,
+        sample: CollectorSample | None,
+    ) -> list[DeliveryOutcome]:
+        receivers_by_id = {receiver.id: receiver for receiver in config.webhooks}
+        sendable = select_sendable_receivers(rule, receivers_by_id)
+        trigger = (
+            NotificationDeliveryTrigger.recovery
+            if decision.action == NotificationRuleAction.recover
+            else NotificationDeliveryTrigger.rule
+        )
+        message = self._build_message(
+            rule, trigger, self._summary_for(decision, rule), sample=sample
+        )
+        return [self.delivery.deliver(receiver, message) for receiver in sendable]
 
     def _build_message(
         self,
@@ -258,6 +339,9 @@ class NotificationService:
             snapshot = {"trigger": trigger.value}
             if sample is not None:
                 snapshot["value"] = sample.value
+                if sample.scope_key:
+                    snapshot["scope_key"] = sample.scope_key
+                    snapshot["scope_label"] = sample.scope_label
                 if sample.snapshot:
                     snapshot["data"] = sample.snapshot
         return NotificationMessage(
@@ -336,6 +420,66 @@ def _default_receiver() -> NotificationWebhook:
 
 def _default_settings() -> NotificationSettings:
     return NotificationSettings(webhooks=[_default_receiver()], rules=[])
+
+
+def _aggregate_scoped_state(
+    rule_id: str, decisions: list[RuleDecision], now: datetime
+) -> NotificationRuleState:
+    firing = [decision.next_state for decision in decisions if decision.next_state.is_firing]
+    alerted = [
+        decision.next_state.last_alert_at
+        for decision in decisions
+        if decision.next_state.last_alert_at is not None
+    ]
+    evaluated = [
+        decision.next_state.last_evaluated_at
+        for decision in decisions
+        if decision.next_state.last_evaluated_at is not None
+    ]
+    values = [
+        decision.next_state.last_value
+        for decision in decisions
+        if decision.next_state.last_value is not None
+    ]
+    return NotificationRuleState(
+        rule_id=rule_id,
+        last_evaluated_at=max(evaluated) if evaluated else now,
+        last_value=min(values) if values else None,
+        breach_started_at=min(
+            (
+                state.breach_started_at
+                for state in firing
+                if state.breach_started_at is not None
+            ),
+            default=None,
+        ),
+        last_alert_at=max(alerted) if alerted else None,
+        is_firing=bool(firing),
+        last_error=None,
+        updated_at=now,
+    )
+
+
+def _aggregate_scoped_decision(
+    rule: NotificationRule, decisions: list[RuleDecision], now: datetime
+) -> RuleDecision:
+    priority = {
+        NotificationRuleAction.fire: 0,
+        NotificationRuleAction.recover: 1,
+        NotificationRuleAction.no_data: 2,
+        NotificationRuleAction.hold: 3,
+    }
+    selected = min(decisions, key=lambda item: priority[item.action])
+    action_counts: dict[str, int] = {}
+    for decision in decisions:
+        action_counts[decision.action.value] = action_counts.get(decision.action.value, 0) + 1
+    reason = ", ".join(f"{key}={value}" for key, value in sorted(action_counts.items()))
+    return RuleDecision(
+        action=selected.action,
+        reason=reason or selected.reason,
+        sample=selected.sample,
+        next_state=_aggregate_scoped_state(rule.id, decisions, now),
+    )
 
 
 def redact_settings(settings: NotificationSettings) -> dict[str, Any]:

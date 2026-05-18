@@ -20,6 +20,7 @@ from app.services.notification_collector import (
     _capacity_count_sample,
     _capacity_is_full,
     _count_sample,
+    _cost_spike_sample,
     _date_value,
     _entity_snapshot,
     _group_name_for_account,
@@ -27,6 +28,7 @@ from app.services.notification_collector import (
     _number,
     _quota_remaining_percent,
     _status_key,
+    _usage_log_error_spike_sample,
     _usage_snapshot,
 )
 from app.stores.sqlite import SQLiteFlowStore
@@ -38,6 +40,8 @@ SOURCE_GROUPS = "groups"
 SOURCE_USERS = "users"
 SOURCE_USER_USAGE = "user_usage"
 SOURCE_USER_API_KEYS = "user_api_keys"
+SOURCE_USAGE_LOGS_CURRENT_DAY = "usage_logs_current_day"
+SOURCE_USAGE_LOGS_PREVIOUS_DAY = "usage_logs_previous_day"
 SOURCE_USAGE_CURRENT_DAY = "usage_current_day"
 SOURCE_USAGE_PREVIOUS_DAY = "usage_previous_day"
 USER_USAGE_WINDOWS = ("5h", "1d", "7d", "30d")
@@ -90,9 +94,32 @@ class OperationalDataCollector:
             self.client.list_users,
             item_count=lambda value: len(value),
         )
+        current_usage_logs, current_usage_logs_status = self._fetch_source(
+            SOURCE_USAGE_LOGS_CURRENT_DAY,
+            lambda: self.client.list_usage_logs(
+                start_date=local_today,
+                end_date=local_today,
+                timezone_name=self.timezone_name,
+            ),
+            item_count=_usage_log_item_count,
+        )
+        previous_day = local_today - timedelta(days=1)
+        previous_usage_logs, previous_usage_logs_status = self._fetch_source(
+            SOURCE_USAGE_LOGS_PREVIOUS_DAY,
+            lambda: self.client.list_usage_logs(
+                start_date=previous_day,
+                end_date=previous_day,
+                timezone_name=self.timezone_name,
+            ),
+            item_count=_usage_log_item_count,
+        )
         user_usage, user_usage_status = self._fetch_source(
             SOURCE_USER_USAGE,
-            lambda: self._fetch_user_usage(users, local_now=local_now),
+            lambda: self._fetch_user_usage(
+                users,
+                recent_logs=current_usage_logs,
+                local_now=local_now,
+            ),
             item_count=_mapping_item_count,
         )
         user_api_keys, user_api_keys_status = self._fetch_source(
@@ -110,7 +137,6 @@ class OperationalDataCollector:
             ),
             item_count=_usage_item_count,
         )
-        previous_day = local_today - timedelta(days=1)
         previous_usage, previous_usage_status = self._fetch_source(
             SOURCE_USAGE_PREVIOUS_DAY,
             lambda: self.client.get_usage_stats(
@@ -126,6 +152,8 @@ class OperationalDataCollector:
             accounts_status,
             groups_status,
             users_status,
+            current_usage_logs_status,
+            previous_usage_logs_status,
             user_usage_status,
             user_api_keys_status,
             current_usage_status,
@@ -144,6 +172,8 @@ class OperationalDataCollector:
             accounts=accounts,
             groups=groups,
             users=users,
+            current_usage_logs=current_usage_logs,
+            previous_usage_logs=previous_usage_logs,
             user_usage=user_usage,
             user_api_keys=user_api_keys,
             current_usage=current_usage,
@@ -153,6 +183,8 @@ class OperationalDataCollector:
             accounts=accounts,
             groups=groups,
             users=users,
+            current_usage_logs=current_usage_logs,
+            previous_usage_logs=previous_usage_logs,
             current_usage=current_usage,
             previous_usage=previous_usage,
             observed_at=started_at,
@@ -216,17 +248,13 @@ class OperationalDataCollector:
         self,
         users: list[dict[str, Any]] | None,
         *,
+        recent_logs: dict[str, Any] | None,
         local_now: datetime,
     ) -> dict[str, dict[str, Any]]:
         if not users:
             return {}
         today_start_date, today_end_date = _user_usage_date_range("1d", local_now)
-        recent_logs = self.client.list_usage_logs(
-            start_date=today_start_date,
-            end_date=today_end_date,
-            timezone_name=self.timezone_name,
-        )
-        recent_logs_by_user_id = _usage_logs_by_user_id(recent_logs)
+        recent_logs_by_user_id = _usage_logs_by_user_id(recent_logs or {})
         rankings_by_window = self._fetch_user_usage_rankings(local_now=local_now)
         result: dict[str, dict[str, Any]] = {}
         for user in users:
@@ -313,6 +341,8 @@ class OperationalDataCollector:
         accounts: list[dict[str, Any]] | None,
         groups: list[dict[str, Any]] | None,
         users: list[dict[str, Any]] | None,
+        current_usage_logs: dict[str, Any] | None,
+        previous_usage_logs: dict[str, Any] | None,
         current_usage: dict[str, Any] | None,
         previous_usage: dict[str, Any] | None,
         observed_at: datetime,
@@ -320,6 +350,21 @@ class OperationalDataCollector:
     ) -> tuple[list[OperationalMetricSample], list[str]]:
         samples: list[OperationalMetricSample] = []
         errors: list[str] = []
+
+        def add_sample(metric_key: str, sample: CollectorSample | None) -> None:
+            if sample is None:
+                return
+            samples.append(
+                OperationalMetricSample(
+                    metric_key=metric_key,
+                    value=sample.value,
+                    scope_key=sample.scope_key,
+                    scope_label=sample.scope_label,
+                    observed_at=observed_at,
+                    collected_at=collected_at,
+                    snapshot=sample.snapshot,
+                )
+            )
 
         def add(metric_key: str, fn: Callable[[], CollectorSample | None]) -> None:
             try:
@@ -330,17 +375,19 @@ class OperationalDataCollector:
                 logger.exception("Operational metric derivation failed | metric=%s", metric_key)
                 errors.append(f"{metric_key}: {exc}")
                 return
-            if sample is None:
+            add_sample(metric_key, sample)
+
+        def add_many(metric_key: str, fn: Callable[[], list[CollectorSample]]) -> None:
+            try:
+                collected = fn()
+            except CollectorNoData:
                 return
-            samples.append(
-                OperationalMetricSample(
-                    metric_key=metric_key,
-                    value=sample.value,
-                    observed_at=observed_at,
-                    collected_at=collected_at,
-                    snapshot=sample.snapshot,
-                )
-            )
+            except Exception as exc:
+                logger.exception("Operational metric derivation failed | metric=%s", metric_key)
+                errors.append(f"{metric_key}: {exc}")
+                return
+            for sample in collected:
+                add_sample(metric_key, sample)
 
         if accounts is not None:
             add("account_invalid", lambda: _account_invalid_sample(accounts))
@@ -355,7 +402,7 @@ class OperationalDataCollector:
             add("platform_key_expiry", lambda: _platform_key_expiry_sample(accounts))
 
         if users is not None:
-            add("user_balance_low", lambda: _user_balance_low_sample(users))
+            add_many("user_balance_low", lambda: _user_balance_low_samples(users))
             add("user_api_key_state", lambda: _user_api_key_state_sample(users))
 
         if current_usage is not None:
@@ -366,12 +413,20 @@ class OperationalDataCollector:
 
         if current_usage is not None and previous_usage is not None:
             add(
-                "admin_usage_anomaly",
-                lambda: _admin_usage_anomaly_sample(current_usage, previous_usage, observed_at),
+                "admin_cost_spike",
+                lambda: _admin_cost_spike_sample(current_usage, previous_usage, observed_at),
             )
+
+        if current_usage_logs is not None and previous_usage_logs is not None:
             add(
-                "api_key_usage_spike",
-                lambda: _admin_usage_anomaly_sample(current_usage, previous_usage, observed_at),
+                "admin_error_spike",
+                lambda: _usage_log_error_spike_sample(
+                    current_usage_logs,
+                    previous_usage_logs,
+                    current_date=observed_at.astimezone(ZoneInfo(LOCAL_TIMEZONE)).date(),
+                    previous_date=observed_at.astimezone(ZoneInfo(LOCAL_TIMEZONE)).date()
+                    - timedelta(days=1),
+                ),
             )
 
         if groups is not None:
@@ -391,6 +446,8 @@ class OperationalDataCollector:
         accounts: list[dict[str, Any]] | None,
         groups: list[dict[str, Any]] | None,
         users: list[dict[str, Any]] | None,
+        current_usage_logs: dict[str, Any] | None,
+        previous_usage_logs: dict[str, Any] | None,
         user_usage: dict[str, dict[str, Any]] | None,
         user_api_keys: dict[str, dict[str, Any]] | None,
         current_usage: dict[str, Any] | None,
@@ -400,6 +457,8 @@ class OperationalDataCollector:
             SOURCE_ACCOUNTS: accounts,
             SOURCE_GROUPS: groups,
             SOURCE_USERS: users,
+            SOURCE_USAGE_LOGS_CURRENT_DAY: current_usage_logs,
+            SOURCE_USAGE_LOGS_PREVIOUS_DAY: previous_usage_logs,
             SOURCE_USER_USAGE: user_usage,
             SOURCE_USER_API_KEYS: user_api_keys,
             SOURCE_USAGE_CURRENT_DAY: current_usage,
@@ -421,6 +480,14 @@ class OperationalDataCollector:
 def _usage_item_count(value: Any) -> int:
     if isinstance(value, dict) and value:
         return 1
+    return 0
+
+
+def _usage_log_item_count(value: Any) -> int:
+    if isinstance(value, dict):
+        items = value.get("items")
+        if isinstance(items, list):
+            return len(items)
     return 0
 
 
@@ -758,20 +825,40 @@ def _subscription_usage_sample(stats: dict[str, Any]) -> CollectorSample:
     return CollectorSample(value=percent, snapshot={"usage": _usage_snapshot(stats)})
 
 
-def _user_balance_low_sample(users: list[dict[str, Any]]) -> CollectorSample:
+def _user_balance_low_samples(users: list[dict[str, Any]]) -> list[CollectorSample]:
     balances = [_number(user, "balance", "raw.balance") for user in users]
     present = [balance for balance in balances if balance is not None]
     if not present:
         raise CollectorNoData("balance fields are missing from user data")
-    low_users = [
-        _entity_snapshot(user)
-        for user in users
-        if _number(user, "balance", "raw.balance") == min(present)
-    ]
-    return CollectorSample(
-        value=min(present),
-        snapshot={"min_balance": min(present), "low_users": low_users[:10]},
-    )
+    samples: list[CollectorSample] = []
+    for user in users:
+        balance = _number(user, "balance", "raw.balance")
+        if balance is None:
+            continue
+        user_id = user.get("id") or user.get("user_id") or user.get("email") or user.get("username")
+        if user_id in (None, ""):
+            continue
+        entity = _entity_snapshot(user)
+        samples.append(
+            CollectorSample(
+                value=balance,
+                scope_key=f"user:{user_id}",
+                scope_label=str(entity.get("name") or user_id),
+                snapshot={
+                    "min_balance": balance,
+                    "low_user_count": 1,
+                    "low_users": [entity],
+                },
+            )
+        )
+    if not samples:
+        raise CollectorNoData("user identity fields are missing from user balance data")
+    return samples
+
+
+def _user_balance_low_sample(users: list[dict[str, Any]]) -> CollectorSample:
+    samples = _user_balance_low_samples(users)
+    return min(samples, key=lambda sample: sample.value)
 
 
 def _user_api_key_state_sample(users: list[dict[str, Any]]) -> CollectorSample:
@@ -791,26 +878,17 @@ def _usage_summary_sample(stats: dict[str, Any]) -> CollectorSample:
     return CollectorSample(value=value, snapshot={"usage": _usage_snapshot(stats)})
 
 
-def _admin_usage_anomaly_sample(
+def _admin_cost_spike_sample(
     current: dict[str, Any],
     previous: dict[str, Any],
     observed_at: datetime,
 ) -> CollectorSample:
-    current_value = _number(current, "total_actual_cost", "total_cost", "total_requests")
-    previous_value = _number(previous, "total_actual_cost", "total_cost", "total_requests")
-    if current_value is None or previous_value is None or previous_value <= 0:
-        raise CollectorNoData("usage stats for current or previous day are missing")
-    change = (current_value - previous_value) / previous_value * 100
     local_day = observed_at.astimezone(ZoneInfo(LOCAL_TIMEZONE)).date()
-    return CollectorSample(
-        value=change,
-        snapshot={
-            "metric": "total_actual_cost",
-            "current": current_value,
-            "previous": previous_value,
-            "current_date": local_day.isoformat(),
-            "previous_date": (local_day - timedelta(days=1)).isoformat(),
-        },
+    return _cost_spike_sample(
+        current,
+        previous,
+        current_date=local_day,
+        previous_date=local_day - timedelta(days=1),
     )
 
 

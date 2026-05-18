@@ -16,6 +16,7 @@ export function makeDefaultWebhook(): NotificationWebhook {
     provider: "generic",
     method: "POST",
     payloadFields: defaultWebhookPayloadFields,
+    feishuCardTemplate: null,
     url: "",
     secret: ""
   };

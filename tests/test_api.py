@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
@@ -23,6 +24,8 @@ from app.models.operational_data import (
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
     AutoRotationUsageWindow,
+    OrchestrationRunKind,
+    OrchestrationRunRecord,
     RotationPoolGroup,
     RotationPoolKind,
     UserGroupAssignment,
@@ -1776,6 +1779,106 @@ def test_auto_rotation_scheduler_reports_tick_errors() -> None:
     assert snapshot.tick_count == 0
     assert snapshot.last_tick_started_at is not None
     assert "boom: automatic_interval" in (snapshot.last_tick_error or "")
+
+
+def test_auto_rotation_scheduler_runs_startup_tick_and_reports_snapshot() -> None:
+    class _FakeRotationService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_auto_rotation(self, trigger_type):
+            self.calls += 1
+            return OrchestrationRunRecord(
+                run_kind=OrchestrationRunKind.automatic,
+                tag="automatic_execution",
+                trigger_type=trigger_type,
+                status="empty",
+            )
+
+    service = _FakeRotationService()
+    scheduler = AutoRotationScheduler(service, cadence_seconds=60)
+
+    scheduler.start()
+    deadline = time.monotonic() + 1
+    snapshot = scheduler.snapshot()
+    while snapshot.tick_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+        snapshot = scheduler.snapshot()
+    scheduler.stop()
+
+    assert service.calls == 1
+    assert snapshot.enabled is True
+    assert snapshot.cadence_seconds == 60
+    assert snapshot.tick_count == 1
+    assert snapshot.last_tick_started_at is not None
+    assert snapshot.last_tick_error is None
+
+
+def test_app_startup_refreshes_operational_data_before_auto_rotation(
+    app_env, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    class _FakeOperationalDataCollector:
+        def collect(self, *, now=None):
+            calls.append("collect")
+
+            class _Result:
+                started_at = datetime.now(timezone.utc)
+                finished_at = started_at
+                error_message = None
+                samples = []
+                source_statuses = []
+
+                @property
+                def sampled_signal_count(self):
+                    return 0
+
+            return _Result()
+
+    class _FakeNotificationService:
+        def __init__(self) -> None:
+            self.operational_data_collector = _FakeOperationalDataCollector()
+            self.last_collection_result = None
+
+        def refresh_samples(self, *, now=None):
+            self.last_collection_result = self.operational_data_collector.collect(now=now)
+
+        def operational_data_runtime_settings(self):
+            return OperationalDataRuntimeSettings(enabled=True)
+
+    class _FakeRotationService:
+        def get_auto_rotation_config(self):
+            return AutoRotationRuntimeConfig(enabled=True)
+
+        def run_auto_rotation(self, trigger_type):
+            calls.append("rotate")
+            return OrchestrationRunRecord(
+                run_kind=OrchestrationRunKind.automatic,
+                tag="automatic_execution",
+                trigger_type=trigger_type,
+                status="empty",
+            )
+
+    def fake_notification_service():
+        return _FakeNotificationService()
+
+    def fake_rotation_service():
+        return _FakeRotationService()
+
+    fake_notification_service.cache_clear = lambda: None
+    fake_rotation_service.cache_clear = lambda: None
+    main.get_notification_service.cache_clear()
+    main.get_rotation_service.cache_clear()
+    monkeypatch.setattr(main, "get_notification_service", fake_notification_service)
+    monkeypatch.setattr(main, "get_rotation_service", fake_rotation_service)
+
+    with TestClient(main.app):
+        deadline = time.monotonic() + 1
+        while calls != ["collect", "rotate"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert calls[:2] == ["collect", "rotate"]
 
 
 def test_manual_rotation_success_skip_and_failure(client) -> None:

@@ -31,6 +31,12 @@ MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 URL_TEMPLATE_VARIABLE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+CARD_TEMPLATE_VARIABLE_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+)
+FULL_CARD_TEMPLATE_VARIABLE_RE = re.compile(
+    r"^\s*(?:\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}|\$([A-Za-z_][A-Za-z0-9_]*))\s*$"
+)
 
 
 @dataclass
@@ -116,6 +122,16 @@ def _stringify_url_value(value: object) -> str:
     return str(value)
 
 
+def _stringify_template_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def _render_url_template(url: str, fields: dict[str, object]) -> tuple[str, bool]:
     matched = False
 
@@ -128,6 +144,80 @@ def _render_url_template(url: str, fields: dict[str, object]) -> tuple[str, bool
         return quote(_stringify_url_value(fields[field]), safe="")
 
     return URL_TEMPLATE_VARIABLE_RE.sub(replace, url), matched
+
+
+def _template_context(message: NotificationMessage) -> dict[str, object]:
+    context = _build_generic_payload(message)
+    snapshot = message.snapshot if isinstance(message.snapshot, dict) else {}
+    if snapshot:
+        context["snapshot"] = snapshot
+        if "value" in snapshot:
+            context["value"] = snapshot["value"]
+        data = snapshot.get("data")
+        if isinstance(data, dict):
+            context["data"] = data
+            for key, value in data.items():
+                context.setdefault(key, value)
+    return context
+
+
+def _lookup_template_value(context: dict[str, object], path: str) -> object | None:
+    current: object = context
+    for part in path.split("."):
+        if isinstance(current, dict):
+            if part not in current:
+                return None
+            current = current[part]
+            continue
+        if isinstance(current, list) and part.isdigit():
+            index = int(part)
+            if index >= len(current):
+                return None
+            current = current[index]
+            continue
+        return None
+    return current
+
+
+def _render_template_string(value: str, context: dict[str, object]) -> str | object:
+    full = FULL_CARD_TEMPLATE_VARIABLE_RE.match(value)
+    if full:
+        path = full.group(1) or full.group(2)
+        resolved = _lookup_template_value(context, path)
+        if resolved is not None:
+            return resolved
+        return ""
+
+    def replace(match: re.Match[str]) -> str:
+        path = match.group(1) or match.group(2)
+        resolved = _lookup_template_value(context, path)
+        if resolved is None:
+            return ""
+        return _stringify_template_value(resolved)
+
+    return CARD_TEMPLATE_VARIABLE_RE.sub(replace, value)
+
+
+def _render_template_payload(value: object, context: dict[str, object]) -> object:
+    if isinstance(value, str):
+        return _render_template_string(value, context)
+    if isinstance(value, list):
+        return [_render_template_payload(item, context) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _render_template_payload(item, context)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _render_feishu_card_template(
+    template: dict[str, object], message: NotificationMessage
+) -> dict[str, object]:
+    rendered = _render_template_payload(template, _template_context(message))
+    if not isinstance(rendered, dict):
+        raise TypeError("feishuCardTemplate must render to a JSON object")
+    return rendered
 
 
 def _adapter_generic(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
@@ -163,10 +253,16 @@ def _adapter_wecom(receiver: NotificationWebhook, message: NotificationMessage) 
 
 
 def _adapter_feishu(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
-    payload: dict[str, object] = {
-        "msg_type": "text",
-        "content": {"text": _format_text(message)},
-    }
+    if receiver.feishu_card_template is not None:
+        payload: dict[str, object] = {
+            "msg_type": "interactive",
+            "card": _render_feishu_card_template(receiver.feishu_card_template, message),
+        }
+    else:
+        payload = {
+            "msg_type": "text",
+            "content": {"text": _format_text(message)},
+        }
     if receiver.secret:
         timestamp = str(int(time.time()))
         sign_string = f"{timestamp}\n{receiver.secret}"

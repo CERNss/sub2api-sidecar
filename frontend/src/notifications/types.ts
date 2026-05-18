@@ -48,6 +48,7 @@ export type NotificationWebhook = {
   provider: WebhookProvider;
   method: WebhookMethod;
   payloadFields: WebhookPayloadField[];
+  feishuCardTemplate: Record<string, unknown> | null;
   url: string;
   secret: string;
 };
@@ -189,7 +190,8 @@ export const notificationSignalGroups: NotificationSignalGroup[] = [
       { key: "account_quota_low", label: "Quota/Credits 低", description: "总/日/周 quota、AI credits。", source: "account usage", unit: "% remaining", defaultThreshold: "15", defaultOperator: "lte", defaultSeverity: "warning", defaultReadIntervalMinutes: 15 },
       { key: "platform_key_quota", label: "Key 额度低", description: "quota、rate limits、remaining。", source: "/v1/usage", unit: "% remaining", defaultThreshold: "20", defaultOperator: "lte", defaultSeverity: "warning", defaultReadIntervalMinutes: 10 },
       { key: "subscription_usage", label: "订阅用量/过期", description: "日/周/月用量、限额。", source: "/v1/usage", unit: "% used", defaultThreshold: "85", defaultOperator: "gte", defaultSeverity: "warning", defaultReadIntervalMinutes: 30 },
-      { key: "admin_usage_anomaly", label: "成本/错误突增", description: "usage log、错误率、上游错误。", source: "admin routes", unit: "% change", defaultThreshold: "150", defaultOperator: "gte", defaultSeverity: "critical", defaultReadIntervalMinutes: 5 }
+      { key: "admin_cost_spike", label: "成本突增", description: "今日总成本相对昨日总成本的涨幅。", source: "usage stats", unit: "% change", defaultThreshold: "150", defaultOperator: "gte", defaultSeverity: "critical", defaultReadIntervalMinutes: 5 },
+      { key: "admin_error_spike", label: "错误突增", description: "今日 usage log 错误数相对昨日错误数的涨幅。", source: "usage logs", unit: "% change", defaultThreshold: "150", defaultOperator: "gte", defaultSeverity: "critical", defaultReadIntervalMinutes: 5 }
     ]
   }
 ];

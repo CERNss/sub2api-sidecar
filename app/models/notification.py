@@ -61,6 +61,10 @@ class NotificationWebhook(BaseModel):
         default_factory=lambda: list(DEFAULT_WEBHOOK_PAYLOAD_FIELDS),
         alias="payloadFields",
     )
+    feishu_card_template: dict[str, Any] | None = Field(
+        default=None,
+        alias="feishuCardTemplate",
+    )
     url: str = ""
     secret: str = ""
 
@@ -144,6 +148,8 @@ class NotificationRuleState(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     rule_id: str
+    scope_key: str = ""
+    scope_label: str = ""
     last_evaluated_at: datetime | None = None
     last_value: float | None = None
     breach_started_at: datetime | None = None
@@ -158,6 +164,8 @@ class CollectorSample(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     value: float
+    scope_key: str = ""
+    scope_label: str = ""
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     snapshot: dict[str, Any] | None = None
 

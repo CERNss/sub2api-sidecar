@@ -142,13 +142,19 @@ def _metric_sample(
     value: float = 20,
     *,
     observed_at: datetime | None = None,
+    scope_key: str = "",
+    scope_label: str = "",
+    snapshot: dict[str, Any] | None = None,
 ) -> OperationalMetricSample:
     moment = observed_at or datetime.now(timezone.utc)
     return OperationalMetricSample(
         metric_key=metric_key,
         value=value,
+        scope_key=scope_key,
+        scope_label=scope_label,
         observed_at=moment,
         collected_at=moment,
+        snapshot=snapshot,
     )
 
 
@@ -211,6 +217,19 @@ class _FakeSub2APIClient:
         page_size=1000,
     ):
         tz = ZoneInfo(timezone_name)
+        if str(start_date) == "2026-05-09":
+            return {
+                "items": [
+                    {
+                        "id": "prev-error-log",
+                        "user_id": "u1",
+                        "created_at": datetime(2026, 5, 9, 19, 30, tzinfo=tz).isoformat(),
+                        "status": "failed",
+                        "status_code": 500,
+                    }
+                ],
+                "total": 1,
+            }
         return {
             "items": [
                 {
@@ -235,9 +254,20 @@ class _FakeSub2APIClient:
                     "created_at": datetime(2026, 5, 10, 18, 0, tzinfo=tz).isoformat(),
                     "total_cost": 0.5,
                     "actual_cost": 0.75,
+                    "status": "failed",
+                    "status_code": 503,
+                    "error_message": "upstream unavailable",
+                },
+                {
+                    "id": "log-u2-2",
+                    "user_id": "u2",
+                    "created_at": datetime(2026, 5, 10, 18, 10, tzinfo=tz).isoformat(),
+                    "status": "failed",
+                    "status_code": 429,
+                    "error_message": "rate limited",
                 },
             ],
-            "total": 3,
+            "total": 4,
         }
 
     def get_user_api_keys(self, user_id):
@@ -258,8 +288,8 @@ class _FakeSub2APIClient:
 
     def get_usage_stats(self, *, user_id, start_date, end_date, timezone_name):
         if str(start_date) == "2026-05-10":
-            return {"total_actual_cost": 200, "daily_limit_usd": 250}
-        return {"total_actual_cost": 100, "daily_limit_usd": 250}
+            return {"total_actual_cost": 200, "total_requests": 1000, "daily_limit_usd": 250}
+        return {"total_actual_cost": 100, "total_requests": 10, "daily_limit_usd": 250}
 
     def get_user_spending_ranking(
         self,
@@ -364,12 +394,17 @@ def test_sub2api_collectors_group_capacity_full_counts_grouped_capacity() -> Non
 def test_sub2api_collectors_usage_and_balance_signals() -> None:
     collectors = Sub2APINotificationCollectors(_FakeSub2APIClient())
 
-    assert collectors.user_balance_low(_rule()).value == 3
+    balance_sample = collectors.user_balance_low(_rule())
+    assert balance_sample.value == 3
+    assert balance_sample.scope_key == "user:u2"
+    assert balance_sample.snapshot is not None
+    assert balance_sample.snapshot["low_user_count"] == 1
     with patch("app.services.notification_collector.date") as fake_date:
         fake_date.today.return_value = date(2026, 5, 10)
         fake_date.fromisoformat.side_effect = date.fromisoformat
         assert collectors.subscription_usage(_rule()).value == 80
-        assert collectors.admin_usage_anomaly(_rule()).value == 100
+        assert collectors.admin_cost_spike(_rule()).value == 100
+        assert collectors.admin_error_spike(_rule()).value == 100
 
 
 def test_collector_registry_runs_registered_collector() -> None:
@@ -475,6 +510,7 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "groups:openai",
         "users",
         "usage_logs:None:2026-05-10:2026-05-10",
+        "usage_logs:None:2026-05-09:2026-05-09",
         "user_ranking:2026-05-10:2026-05-10",
         "user_ranking:2026-05-04:2026-05-10",
         "user_ranking:2026-04-11:2026-05-10",
@@ -489,6 +525,8 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "accounts",
         "groups",
         "users",
+        "usage_logs_current_day",
+        "usage_logs_previous_day",
         "user_usage",
         "user_api_keys",
         "usage_current_day",
@@ -505,6 +543,89 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
     assert usage_snapshot.payload["u1"]["5h"]["total_actual_cost"] == 1.5
     assert usage_snapshot.payload["u1"]["1d"]["total_actual_cost"] == 200
     assert usage_snapshot.payload["u2"]["5h"]["total_actual_cost"] == 0.75
+    balance_samples = main.get_flow_store().list_latest_operational_metric_samples("user_balance_low")
+    assert {sample.scope_key for sample in balance_samples} == {"user:u1", "user:u2"}
+    by_scope = {sample.scope_key: sample for sample in balance_samples}
+    assert by_scope["user:u1"].value == 10
+    assert by_scope["user:u2"].value == 3
+    assert by_scope["user:u2"].snapshot is not None
+    assert by_scope["user:u2"].snapshot["low_users"][0]["name"] == "b@example.com"
+    cost_sample = main.get_flow_store().get_latest_operational_metric_sample("admin_cost_spike")
+    error_sample = main.get_flow_store().get_latest_operational_metric_sample("admin_error_spike")
+    assert cost_sample is not None
+    assert cost_sample.value == 100
+    assert error_sample is not None
+    assert error_sample.value == 100
+
+
+def test_admin_cost_spike_requires_cost_fields_not_request_fallback() -> None:
+    collectors = Sub2APINotificationCollectors(_FakeSub2APIClient())
+
+    class _RequestOnlyClient(_FakeSub2APIClient):
+        def get_usage_stats(self, *, user_id, start_date, end_date, timezone_name):
+            if str(start_date) == "2026-05-10":
+                return {"total_requests": 1000}
+            return {"total_requests": 10}
+
+    with patch("app.services.notification_collector.date") as fake_date:
+        fake_date.today.return_value = date(2026, 5, 10)
+        fake_date.fromisoformat.side_effect = date.fromisoformat
+        try:
+            Sub2APINotificationCollectors(_RequestOnlyClient()).admin_cost_spike(_rule())
+        except Exception as exc:
+            assert "cost stats" in str(exc)
+        else:
+            raise AssertionError("request-only usage stats must not produce a cost spike")
+
+        assert collectors.admin_cost_spike(_rule()).snapshot["metric"] == "total_actual_cost"
+
+
+def test_admin_error_spike_requires_error_fields() -> None:
+    class _CleanLogClient(_FakeSub2APIClient):
+        def list_usage_logs(
+            self,
+            *,
+            user_id=None,
+            start_date,
+            end_date,
+            timezone_name,
+            page_size=1000,
+        ):
+            tz = ZoneInfo(timezone_name)
+            return {
+                "items": [
+                    {
+                        "id": "clean-log",
+                        "user_id": "u1",
+                        "created_at": datetime(2026, 5, 10, 19, 30, tzinfo=tz).isoformat(),
+                        "status": "succeeded",
+                    }
+                ],
+                "total": 1,
+            }
+
+    class _MissingErrorFieldsClient(_FakeSub2APIClient):
+        def list_usage_logs(
+            self,
+            *,
+            user_id=None,
+            start_date,
+            end_date,
+            timezone_name,
+            page_size=1000,
+        ):
+            return {"items": [{"id": "unknown-log", "user_id": "u1"}], "total": 1}
+
+    with patch("app.services.notification_collector.date") as fake_date:
+        fake_date.today.return_value = date(2026, 5, 10)
+        clean = Sub2APINotificationCollectors(_CleanLogClient()).admin_error_spike(_rule())
+        assert clean.value == 0
+        try:
+            Sub2APINotificationCollectors(_MissingErrorFieldsClient()).admin_error_spike(_rule())
+        except Exception as exc:
+            assert "error fields" in str(exc)
+        else:
+            raise AssertionError("logs without error fields must not produce an error sample")
 
 
 def test_operational_data_collector_records_source_failures(client) -> None:
@@ -803,6 +924,148 @@ def test_tick_does_not_alert_when_breach_drops_before_sustained_window(client) -
     assert state.is_firing is False
     assert state.breach_started_at is None
     assert state.last_alert_at is None
+
+
+def test_tick_keeps_user_balance_alerts_scoped_by_user(client) -> None:
+    login(client)
+    settings = _settings(
+        [
+            _rule(
+                signal_key="user_balance_low",
+                threshold="10",
+                operator=NotificationOperator.lte,
+                for_minutes=0,
+                cooldown_minutes=60,
+                read_interval_minutes=1,
+            )
+        ]
+    )
+    store = main.get_flow_store()
+    store.save_notification_settings(settings)
+    service = main.get_notification_service()
+    service.operational_data_collector = None
+
+    start = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.save_operational_metric_samples(
+        [
+            _metric_sample(
+                metric_key="user_balance_low",
+                value=7.18,
+                observed_at=start,
+                scope_key="user:alice",
+                scope_label="alice@example.com",
+                snapshot={
+                    "min_balance": 7.18,
+                    "low_user_count": 1,
+                    "low_users": [{"id": "alice", "name": "alice@example.com"}],
+                },
+            ),
+            _metric_sample(
+                metric_key="user_balance_low",
+                value=77.05,
+                observed_at=start,
+                scope_key="user:bob",
+                scope_label="bob@example.com",
+                snapshot={
+                    "min_balance": 77.05,
+                    "low_user_count": 1,
+                    "low_users": [{"id": "bob", "name": "bob@example.com"}],
+                },
+            ),
+        ]
+    )
+    sent: list[dict[str, Any]] = []
+
+    class _OkResp:
+        status_code = 200
+        text = "ok"
+
+    def fake_request(self, method, url, data=None, headers=None, timeout=None):
+        sent.append({"method": method, "url": url, "body": data})
+        return _OkResp()
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        first = service.tick(now=start)[0]
+        recovered_at = start + timedelta(minutes=1)
+        store.save_operational_metric_samples(
+            [
+                _metric_sample(
+                    metric_key="user_balance_low",
+                    value=7.18,
+                    observed_at=recovered_at,
+                    scope_key="user:alice",
+                    scope_label="alice@example.com",
+                    snapshot={
+                        "min_balance": 7.18,
+                        "low_user_count": 1,
+                        "low_users": [{"id": "alice", "name": "alice@example.com"}],
+                    },
+                ),
+                _metric_sample(
+                    metric_key="user_balance_low",
+                    value=77.05,
+                    observed_at=recovered_at,
+                    scope_key="user:bob",
+                    scope_label="bob@example.com",
+                    snapshot={
+                        "min_balance": 77.05,
+                        "low_user_count": 1,
+                        "low_users": [{"id": "bob", "name": "bob@example.com"}],
+                    },
+                ),
+            ]
+        )
+        second = service.tick(now=recovered_at)[0]
+        alice_recovered_at = start + timedelta(minutes=2)
+        store.save_operational_metric_samples(
+            [
+                _metric_sample(
+                    metric_key="user_balance_low",
+                    value=11.0,
+                    observed_at=alice_recovered_at,
+                    scope_key="user:alice",
+                    scope_label="alice@example.com",
+                    snapshot={
+                        "min_balance": 11.0,
+                        "low_user_count": 1,
+                        "low_users": [{"id": "alice", "name": "alice@example.com"}],
+                    },
+                ),
+                _metric_sample(
+                    metric_key="user_balance_low",
+                    value=77.05,
+                    observed_at=alice_recovered_at,
+                    scope_key="user:bob",
+                    scope_label="bob@example.com",
+                    snapshot={
+                        "min_balance": 77.05,
+                        "low_user_count": 1,
+                        "low_users": [{"id": "bob", "name": "bob@example.com"}],
+                    },
+                ),
+            ]
+        )
+        third = service.tick(now=alice_recovered_at)[0]
+
+    assert first.decision.action == NotificationRuleAction.fire
+    assert second.decision.action == NotificationRuleAction.hold
+    assert third.decision.action == NotificationRuleAction.recover
+    assert len(sent) == 2
+    first_body = sent[0]["body"].decode()
+    second_body = sent[1]["body"].decode()
+    assert "alice@example.com" in first_body
+    assert "alice@example.com" in second_body
+    assert "bob@example.com" not in first_body
+    assert "bob@example.com" not in second_body
+    alice_state = store.get_notification_rule_state("r1", "user:alice")
+    bob_state = store.get_notification_rule_state("r1", "user:bob")
+    aggregate_state = store.get_notification_rule_state("r1")
+    assert alice_state is not None
+    assert alice_state.is_firing is False
+    assert bob_state is not None
+    assert bob_state.is_firing is False
+    assert aggregate_state is not None
+    assert aggregate_state.is_firing is False
 
 
 def test_tick_does_not_alert_when_no_sample_or_expired_sample(client) -> None:

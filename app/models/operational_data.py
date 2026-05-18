@@ -13,6 +13,8 @@ class OperationalMetricSample(BaseModel):
 
     metric_key: str
     value: float
+    scope_key: str = ""
+    scope_label: str = ""
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     collected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     snapshot: dict[str, Any] | None = None
@@ -22,6 +24,8 @@ class OperationalMetricSample(BaseModel):
 
         return CollectorSample(
             value=self.value,
+            scope_key=self.scope_key,
+            scope_label=self.scope_label,
             observed_at=self.observed_at,
             snapshot=self.snapshot,
         )

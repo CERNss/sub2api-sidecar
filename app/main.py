@@ -140,21 +140,27 @@ async def lifespan(app_instance: FastAPI):
     get_settings()
     get_flow_store()
     get_auth_manager()
-    rotation_scheduler = AutoRotationScheduler(
-        rotation_service=get_rotation_service(),
-        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
-        enabled_provider=lambda: get_rotation_service().get_auto_rotation_config().enabled,
-    )
-    app_instance.state.auto_rotation_scheduler = rotation_scheduler
-    rotation_scheduler.start()
+    notification_service = get_notification_service()
     notification_scheduler = NotificationScheduler(
-        notification_service=get_notification_service(),
+        notification_service=notification_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
         enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
         cadence_provider=lambda: get_operational_data_runtime_settings().collect_interval_seconds,
     )
     app_instance.state.notification_scheduler = notification_scheduler
+    try:
+        notification_service.refresh_samples(now=datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("Initial operational data refresh failed")
     notification_scheduler.start()
+    rotation_service = get_rotation_service()
+    rotation_scheduler = AutoRotationScheduler(
+        rotation_service=rotation_service,
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_rotation_service().get_auto_rotation_config().enabled,
+    )
+    app_instance.state.auto_rotation_scheduler = rotation_scheduler
+    rotation_scheduler.start()
     credit_scheduler = CreditControlScheduler(
         credit_service=get_credit_control_service(),
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,

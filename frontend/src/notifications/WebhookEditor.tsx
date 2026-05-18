@@ -1,6 +1,6 @@
 import { Popconfirm, Select, Tag } from "antd";
-import { ChevronDown, Plus, Trash2 } from "lucide-react";
-import type { ReactNode } from "react";
+import { ChevronDown, Eraser, FileJson, Plus, Trash2 } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import {
   NotificationSettings,
   NotificationWebhook,
@@ -25,6 +25,71 @@ type Props = {
   renderSaveAction: (scope: string) => ReactNode;
 };
 
+const FEISHU_BALANCE_CARD_TEMPLATE: Record<string, unknown> = {
+  config: { wide_screen_mode: true },
+  header: {
+    template: "red",
+    title: {
+      tag: "plain_text",
+      content: "🚨 云账号余额告警"
+    }
+  },
+  elements: [
+    {
+      tag: "div",
+      fields: [
+        {
+          is_short: true,
+          text: {
+            tag: "lark_md",
+            content: "**账号名称**\n${snapshot.data.low_users.0.name}"
+          }
+        },
+        {
+          is_short: true,
+          text: {
+            tag: "lark_md",
+            content: "**云厂商**\n${snapshot.data.low_users.0.provider}"
+          }
+        },
+        {
+          is_short: true,
+          text: {
+            tag: "lark_md",
+            content: "**当前余额**\n${snapshot.data.min_balance}"
+          }
+        },
+        {
+          is_short: true,
+          text: {
+            tag: "lark_md",
+            content: "**本月剩余额预估**\n${snapshot.data.month_remaining_estimate}"
+          }
+        },
+        {
+          is_short: false,
+          text: {
+            tag: "lark_md",
+            content: "**资金缺口**\n${snapshot.data.funding_gap}"
+          }
+        }
+      ]
+    },
+    { tag: "hr" },
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: "共 ${snapshot.data.low_user_count} 个账号余额不足以覆盖本月剩余消耗（参考上月同期），请及时充值"
+      }
+    }
+  ]
+};
+
+function stringifyTemplate(template: Record<string, unknown> | null): string {
+  return template ? JSON.stringify(template, null, 2) : "";
+}
+
 export function WebhookEditor({
   settings,
   selectedWebhookId,
@@ -36,6 +101,9 @@ export function WebhookEditor({
   savingWebhookToggleId,
   renderSaveAction
 }: Props) {
+  const [feishuTemplateDrafts, setFeishuTemplateDrafts] = useState<Record<string, string>>({});
+  const [feishuTemplateErrors, setFeishuTemplateErrors] = useState<Record<string, string>>({});
+
   function syncGetUrlTemplate(url: string, previousFields: WebhookPayloadField[], nextFields: WebhookPayloadField[]): string {
     const addedFields = nextFields.filter((field) => !previousFields.includes(field));
     const removedFields = previousFields.filter((field) => !nextFields.includes(field));
@@ -92,6 +160,39 @@ export function WebhookEditor({
       partial.url = syncGetUrlTemplate(webhook.url, [], webhook.payloadFields);
     }
     onChange(webhook.id, partial);
+  }
+
+  function updateFeishuTemplate(webhook: NotificationWebhook, value: string) {
+    setFeishuTemplateDrafts((current) => ({ ...current, [webhook.id]: value }));
+    if (!value.trim()) {
+      setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+      onChange(webhook.id, { feishuCardTemplate: null });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "飞书卡片必须是 JSON 对象。" }));
+        return;
+      }
+      setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+      onChange(webhook.id, { feishuCardTemplate: parsed as Record<string, unknown> });
+    } catch {
+      setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "JSON 格式不正确，修好后才会保存。" }));
+    }
+  }
+
+  function applyFeishuBalanceTemplate(webhook: NotificationWebhook) {
+    const text = stringifyTemplate(FEISHU_BALANCE_CARD_TEMPLATE);
+    setFeishuTemplateDrafts((current) => ({ ...current, [webhook.id]: text }));
+    setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+    onChange(webhook.id, { feishuCardTemplate: FEISHU_BALANCE_CARD_TEMPLATE });
+  }
+
+  function clearFeishuTemplate(webhook: NotificationWebhook) {
+    setFeishuTemplateDrafts((current) => ({ ...current, [webhook.id]: "" }));
+    setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+    onChange(webhook.id, { feishuCardTemplate: null });
   }
 
   return (
@@ -229,6 +330,34 @@ export function WebhookEditor({
                       onChange={(event) => onChange(webhook.id, { secret: event.target.value })}
                     />
                   </label>
+
+                  {webhook.provider === "feishu" ? (
+                    <div className="notif-template-block">
+                      <div className="notif-template-toolbar">
+                        <span>飞书消息卡片</span>
+                        <div>
+                          <button className="button secondary compact" type="button" onClick={() => applyFeishuBalanceTemplate(webhook)}>
+                            <FileJson size={16} aria-hidden="true" />
+                            余额模板
+                          </button>
+                          <button className="button tertiary compact" type="button" onClick={() => clearFeishuTemplate(webhook)}>
+                            <Eraser size={16} aria-hidden="true" />
+                            清空
+                          </button>
+                        </div>
+                      </div>
+                      <textarea
+                        className="notif-template-textarea"
+                        value={feishuTemplateDrafts[webhook.id] ?? stringifyTemplate(webhook.feishuCardTemplate)}
+                        placeholder={stringifyTemplate(FEISHU_BALANCE_CARD_TEMPLATE)}
+                        spellCheck={false}
+                        onChange={(event) => updateFeishuTemplate(webhook, event.target.value)}
+                      />
+                      <small className={`notif-template-hint ${feishuTemplateErrors[webhook.id] ? "tone-error" : ""}`}>
+                        {feishuTemplateErrors[webhook.id] || "留空时发送普通文本；可用 $rule_name、${snapshot.value}、${snapshot.data.low_users.0.name} 等占位符。"}
+                      </small>
+                    </div>
+                  ) : null}
 
                   <div className="notif-actions notif-webhook-actions">
                     <span className="notif-action-note">

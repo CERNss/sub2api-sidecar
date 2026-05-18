@@ -46,6 +46,34 @@ def _message(severity: NotificationSeverity = NotificationSeverity.warning) -> N
     )
 
 
+def _balance_message() -> NotificationMessage:
+    return NotificationMessage(
+        rule_id="rule-balance-low",
+        rule_name="用户余额低",
+        signal_key="user_balance_low",
+        severity=NotificationSeverity.critical,
+        summary="共 1 个账号余额不足以覆盖本月剩余消耗（参考上月同期），请及时充值",
+        trigger=NotificationDeliveryTrigger.rule,
+        snapshot={
+            "trigger": "rule",
+            "value": 3.0,
+            "data": {
+                "min_balance": 3.0,
+                "low_user_count": 1,
+                "month_remaining_estimate": "¥ 128.50",
+                "funding_gap": "¥ 125.50",
+                "low_users": [
+                    {
+                        "id": "u2",
+                        "name": "idle@example.com",
+                        "provider": "OpenAI",
+                    }
+                ],
+            },
+        },
+    )
+
+
 def _webhook_body(**overrides: Any) -> dict[str, Any]:
     body = {
         "id": "ops",
@@ -53,6 +81,7 @@ def _webhook_body(**overrides: Any) -> dict[str, Any]:
         "enabled": True,
         "provider": "generic",
         "method": "POST",
+        "feishuCardTemplate": None,
         "url": "https://hooks.example.com/incoming",
         "secret": "",
     }
@@ -124,6 +153,7 @@ def test_notification_config_round_trip_redacts_secret(client) -> None:
         "snapshot",
         "occurred_at",
     ]
+    assert payload["webhooks"][0]["feishuCardTemplate"] is None
     assert payload["webhooks"][0]["secret"] == "[redacted]"
     assert payload["rules"][0]["targetWebhookIds"] == ["ops"]
     assert "recoveryThreshold" not in payload["rules"][0]
@@ -186,6 +216,33 @@ def test_notification_config_persists_generic_payload_fields(client) -> None:
     stored = main.get_flow_store().get_notification_settings()
     assert stored is not None
     assert stored.webhooks[0].payload_fields == ["name", "severity", "threshold"]
+
+
+def test_notification_config_persists_feishu_card_template(client) -> None:
+    login(client)
+    template = {
+        "header": {"title": {"tag": "plain_text", "content": "🚨 $rule_name"}},
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "当前余额 ${snapshot.data.min_balance}"},
+            }
+        ],
+    }
+    body = {
+        "webhooks": [
+            _webhook_body(provider="feishu", feishuCardTemplate=template)
+        ],
+        "rules": [_rule_body()],
+    }
+
+    response = client.put("/notifications/config", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["webhooks"][0]["feishuCardTemplate"] == template
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.webhooks[0].feishu_card_template == template
 
 
 def test_notification_config_forces_non_generic_webhook_method_to_post(client) -> None:
@@ -562,6 +619,115 @@ def test_provider_feishu_includes_sign_when_secret_present() -> None:
         hmac.new(f"{body['timestamp']}\nlark-secret".encode(), b"", hashlib.sha256).digest()
     ).decode()
     assert body["sign"] == expected
+
+
+def test_provider_feishu_renders_interactive_card_template() -> None:
+    receiver = NotificationWebhook(
+        id="f",
+        enabled=True,
+        provider=WebhookProvider.feishu,
+        url="https://open.feishu.cn/open-apis/bot/v2/hook/x",
+        secret="lark-secret",
+        feishuCardTemplate={
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "red",
+                "title": {
+                    "tag": "plain_text",
+                    "content": "🚨 $rule_name",
+                },
+            },
+            "elements": [
+                {
+                    "tag": "div",
+                    "fields": [
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": "**账号名称**\n${snapshot.data.low_users.0.name}",
+                            },
+                        },
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": "**云厂商**\n${snapshot.data.low_users.0.provider}",
+                            },
+                        },
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": "**当前余额**\n${snapshot.data.min_balance}",
+                            },
+                        },
+                        {
+                            "is_short": True,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": "**本月剩余额预估**\n${snapshot.data.month_remaining_estimate}",
+                            },
+                        },
+                        {
+                            "is_short": False,
+                            "text": {
+                                "tag": "lark_md",
+                                "content": "**资金缺口**\n${snapshot.data.funding_gap}",
+                            },
+                        },
+                    ],
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "共 ${snapshot.data.low_user_count} 个账号余额不足以覆盖本月剩余消耗（参考上月同期），请及时充值",
+                    },
+                },
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "missing=${snapshot.data.not_present}",
+                    },
+                },
+            ],
+        },
+    )
+
+    prepared = build_request(receiver, _balance_message())
+    body = json.loads(prepared.body)
+
+    assert body["msg_type"] == "interactive"
+    assert body["card"]["header"]["title"]["content"] == "🚨 用户余额低"
+    fields = body["card"]["elements"][0]["fields"]
+    assert fields[0]["text"]["content"] == "**账号名称**\nidle@example.com"
+    assert fields[1]["text"]["content"] == "**云厂商**\nOpenAI"
+    assert fields[2]["text"]["content"] == "**当前余额**\n3.0"
+    assert fields[3]["text"]["content"] == "**本月剩余额预估**\n¥ 128.50"
+    assert fields[4]["text"]["content"] == "**资金缺口**\n¥ 125.50"
+    assert body["card"]["elements"][2]["text"]["content"] == "共 1 个账号余额不足以覆盖本月剩余消耗（参考上月同期），请及时充值"
+    assert body["card"]["elements"][3]["text"]["content"] == "missing="
+    assert "timestamp" in body
+    assert "sign" in body
+
+
+def test_provider_feishu_template_preserves_full_placeholder_type() -> None:
+    receiver = NotificationWebhook(
+        id="f",
+        enabled=True,
+        provider=WebhookProvider.feishu,
+        url="https://open.feishu.cn/open-apis/bot/v2/hook/x",
+        feishuCardTemplate={"value": "${snapshot.value}", "users": "${snapshot.data.low_users}"},
+    )
+
+    prepared = build_request(receiver, _balance_message())
+    card = json.loads(prepared.body)["card"]
+
+    assert card["value"] == 3.0
+    assert card["users"][0]["name"] == "idle@example.com"
 
 
 def test_provider_dingtalk_appends_sign_to_url() -> None:
