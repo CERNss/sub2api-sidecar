@@ -1,6 +1,6 @@
 # Sub2API OpenAI OAuth 编排服务
 
-一个最小可用的本地服务，使用 `FastAPI + requests + SQLite + React/Vite` 完成 Sub2API OpenAI OAuth 编排流程。
+一个最小可用的本地服务，使用 `FastAPI + requests + PostgreSQL + React/Vite` 完成 Sub2API OpenAI OAuth 编排流程。
 
 ## 功能概览
 
@@ -11,7 +11,7 @@
   - 创建专属分组
   - 生成 OpenAI OAuth 登录链接
   - 不向 Sub2API OAuth 接口传入回调地址；上游使用固定回调配置
-  - 将 flow 上下文持久化到 SQLite
+  - 将 flow 上下文持久化到 PostgreSQL
 - `POST /provision/oauth/complete`
   - 接收用户粘贴回来的 localhost callback URL
   - 从 callback URL 中解析 `code` 和 `state`
@@ -63,7 +63,7 @@
   - 按当前窗口和阈值执行自动轮换
   - 无 key 的用户会放到已有 key 用户之后调度
 - 自动化测试
-  - 覆盖 SQLite store 持久化行为
+  - 覆盖 PostgreSQL store 持久化行为
   - 覆盖登录、受保护接口、paste-back OAuth 编排流程和错误分支
   - 覆盖已有用户/分组编排、轮换池发现、managed-pool 预配、手动轮换、自动轮换
 
@@ -182,8 +182,7 @@
 │   ├── stores
 │   │   ├── __init__.py
 │   │   ├── base.py
-│   │   ├── memory.py
-│   │   └── sqlite.py
+│   │   └── postgres.py
 │   └── static
 │       └── ui
 │           └── # React build output
@@ -212,7 +211,7 @@
 └── tests
     ├── conftest.py
     ├── test_api.py
-    └── test_sqlite_store.py
+    └── test_postgres_store.py
 ```
 
 ## 配置文件和环境变量
@@ -224,25 +223,39 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-`config.yaml` 放非敏感、启动前必须确定的部署配置，例如本服务地址、OAuth redirect、SQLite 路径、Sub2API 连接参数、Sub2API 默认 payload 和临时不可调度规则。预配 assignment mode、自动轮换、自动充值、运行态数据采集这类运行时开关和策略在后台页面/API 保存到 SQLite，不再放进 `config.yaml`。
+`config.yaml` 放非敏感、启动前必须确定的部署配置，例如本服务地址、数据库地址和库名、OAuth redirect、Sub2API 连接参数、Sub2API 默认 payload 和临时不可调度规则。Sub2API admin key、PostgreSQL 密码、登录密码这类密钥和密码放 `.env`。预配 assignment mode、自动轮换、自动充值、运行态数据采集这类运行时开关和策略在后台页面/API 保存到 PostgreSQL，不再放进 `config.yaml`。
 
 `.env` 只保留密钥和密码类字段：
 
 ```env
 SUB2API_ADMIN_API_KEY=replace-me
+POSTGRES_PASSWORD=change-me-postgres-password
 APP_AUTH_PASSWORD=change-me
+```
+
+数据库非密钥配置写在 `config.yaml`：
+
+```yaml
+database:
+  url: sidecar-postgres
+  port: 5432
+  username: sub2api_sidecar
+  name: sub2api_sidecar
 ```
 
 说明：
 
 - `SUB2API_ADMIN_API_KEY` 是调用 Sub2API admin API 的密钥。
+- `POSTGRES_PASSWORD` 是 PostgreSQL 密码。数据库 url、port、username、name 写在 `config.yaml` 的 `database` 段；其中 `database.url` 是主机名或 IP，不是整条 DSN。应用会自己拼接连接串，部署时不要提供 `DATABASE_URL`、`POSTGRES_DB` 或 `POSTGRES_USER`。
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
-- `app.base_path` 可选，默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
+- URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、`sub2api.base_url` 和 `database.url`；不要写进 `.env`。
+- 当前运行时只支持 PostgreSQL，不再支持 SQLite，也不做 SQLite 数据迁移。
+- `app.base_path` 默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
 - 预配 assignment mode 通过预配页面或 `/api/provisioning/settings` 运行时配置；新 OAuth flow 创建时会把当时的模式写进 flow，后续切换不会影响已经开始的 OAuth 流程。
 - 自动轮换执行开关和业务策略通过动态编排页面或 `/rotation/auto/config` 运行时配置；已登录管理员可请求 `GET /rotation/auto/scheduler` 查看后台调度线程和当前运行时开关。
 - 自动充值后台执行开关通过额度控制页面或 `/api/credit-control/settings` 运行时配置；已登录管理员可请求 `GET /api/credit-control/scheduler` 查看状态。
-- 运行态数据采集开关、`collect_interval_seconds`、`expiration`、`retention_seconds` 和 `max_storage_mb` 通过全局设置或 `/api/operational-data/settings` 运行时配置，不写进 `config.yaml`。采集线程默认 60 秒一轮，按当前 SQLite 设置调整间隔，按顺序拉取 Sub2API accounts、groups、users、用户 usage、用户 API keys、当天 usage、昨天 usage，先落 SQLite raw snapshots 和派生 metrics，再由告警、自动编排、额度控制读取本地数据。`expiration` 不设置表示本地数据永不过期，设置为正整数秒时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。`retention_seconds` 按时间删除旧 snapshots/metrics，`max_storage_mb` 按大小从最老记录开始清理并保留每个 source/metric 的最新记录。已登录管理员可请求 `GET /api/operational-data/status` 查看采样状态、当前占用、每个数据源状态、最近一次 tick 时间和错误。
+- 运行态数据采集开关、`collect_interval_seconds`、`expiration`、`retention_seconds` 和 `max_storage_mb` 通过全局设置或 `/api/operational-data/settings` 运行时配置，不写进 `config.yaml`。采集线程默认 60 秒一轮，按当前 PostgreSQL 设置调整间隔，按顺序拉取 Sub2API accounts、groups、users、用户 usage、用户 API keys、当天 usage、昨天 usage，先落 PostgreSQL raw snapshots 和派生 metrics，再由告警、自动编排、额度控制读取本地数据。`expiration` 不设置表示本地数据永不过期，设置为正整数秒时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。`retention_seconds` 按时间删除旧 snapshots/metrics，`max_storage_mb` 按大小从最老记录开始清理并保留每个 source/metric 的最新记录。已登录管理员可请求 `GET /api/operational-data/status` 查看采样状态、当前占用、每个数据源状态、最近一次 tick 时间和错误。
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
 
 环境变量可以覆盖 `config.yaml` 中的同名配置项；已移除的运行时环境变量不再兼容，出现时会直接启动失败。新部署建议优先改 `config.yaml`。
@@ -363,7 +376,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-然后按需修改 `config.yaml` 和 `.env`。如果你希望容器内的 SQLite 文件稳定落在挂载卷里，推荐保持 `storage.sqlite_db_path: ./data/sub2api-sidecar.db`。
+然后按需修改 `config.yaml` 和 `.env`，至少要在 `config.yaml` 设置 `app.base_url`、`openai.oauth_redirect_uri`、`sub2api.base_url` 和 `database` 段，在 `.env` 设置 `SUB2API_ADMIN_API_KEY`、`POSTGRES_PASSWORD` 和 `APP_AUTH_PASSWORD`。新部署直接使用 PostgreSQL 空库启动，不需要也不会执行 SQLite 数据迁移。
 
 拉取镜像并启动：
 
@@ -401,8 +414,8 @@ docker compose logs -f
 - `docker-compose.yaml` 默认直接使用 `cernss/sub2api-sidecar:latest`，不会依赖本地 Dockerfile 构建
 - 发布流程默认推送 `linux/amd64,linux/arm64` 多架构镜像，Docker 会按宿主机架构自动选择
 - `docker-compose.yaml` 会读取项目根目录下的 `.env`，并把 `config.yaml` 挂载到容器内
-- `docker-compose.yaml` 会显式创建并使用 `sub2api-sidecar` bridge network，方便与其它 Compose 服务按固定网络名互通
-- `./data:/app/data` 会把 SQLite 数据库持久化到宿主机 `data/` 目录
+- `docker-compose.yaml` 会启动服务名和容器名均为 `sidecar-postgres` 的 `postgres:17-alpine`，默认创建 `sub2api_sidecar` 用户和同名数据库，用 `POSTGRES_PASSWORD` 设置密码，并用 `postgres-data` volume 持久化 PostgreSQL 数据
+- `docker-compose.yaml` 使用外部 `npm-network`，启动前请确保该网络已存在
 - 如果你的 `sub2api.base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
 
 ## 镜像构建
@@ -513,7 +526,7 @@ curl -X POST 'http://127.0.0.1:8000/provision/oauth/complete' \
 - OAuth 授权本身由用户手动点击返回的 `oauth_url` 完成。
 - OAuth 最终完成步骤依赖用户把 localhost callback URL 粘贴回来。
 - 除 OAuth 授权本身外，其余步骤通过 Sub2API 管理接口完成。
-- flow 状态默认持久化到 SQLite，而不是仅存在内存里。
+- flow 状态持久化到 PostgreSQL，而不是仅存在内存里。
 
 ## Sub2API 对接说明
 
@@ -533,13 +546,13 @@ Sub2API 管理接口集中封装在：
 
 当前测试包括：
 
-- SQLite store 建表、保存、跨实例读取
-- SQLite store 更新后重新读取
+- PostgreSQL store 建表、保存、跨实例读取
+- PostgreSQL store 更新后重新读取
 - 未登录访问 `/` 时跳转到 `/login`
 - React 登录入口、`/ui/config`、登录成功、错误密码失败
 - 编排看板列表/详情接口、过滤、分页、缺失 flow、事件时间线和敏感字段脱敏
 - 受保护接口在未登录时拒绝访问
-- `/provision/start` 在 cookie 和 access key header 模式下都可成功创建并写入 SQLite
-- `/provision/oauth/complete` 在清空缓存并重新登录后仍可完成，验证 SQLite 持久化和 paste-back 流程生效
+- `/provision/start` 在 cookie 和 access key header 模式下都可成功创建并写入 PostgreSQL
+- `/provision/oauth/complete` 在清空缓存并重新登录后仍可完成，验证 PostgreSQL 持久化和 paste-back 流程生效
 - 非法 email 返回 422
 - 粘贴了不完整 callback URL 时返回 400

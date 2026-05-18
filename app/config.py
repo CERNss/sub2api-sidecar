@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -19,6 +20,8 @@ DEFAULT_CONFIG_PATH = "config.yaml"
 OPERATIONAL_RUNTIME_INTERVAL_SECONDS = 60
 
 REMOVED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
+    ("storage",),
+    ("storage", "sqlite_db_path"),
     ("auto_rotation",),
     ("credit_control",),
     ("operational_data",),
@@ -39,6 +42,10 @@ REMOVED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
 )
 
 REMOVED_ENV_NAMES: tuple[str, ...] = (
+    "DATABASE_URL",
+    "POSTGRES_DB",
+    "POSTGRES_USER",
+    "SQLITE_DB_PATH",
     "AUTO_ROTATION_ENABLED",
     "AUTO_ROTATION_INTERVAL_SECONDS",
     "AUTO_ROTATION_COOLDOWN_MINUTES",
@@ -110,6 +117,7 @@ class Sub2APIProvisioningDefaults:
 
 @dataclass(frozen=True)
 class Settings:
+    database_url: str
     sub2api_base_url: str
     sub2api_admin_api_key: str
     app_base_url: str
@@ -119,7 +127,6 @@ class Settings:
     app_auth_username: str = "admin"
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
-    sqlite_db_path: str = "data/sub2api-sidecar.db"
     request_timeout_seconds: int = 30
 
     @classmethod
@@ -138,11 +145,15 @@ class Settings:
                 ("openai", "oauth_redirect_uri"),
             ),
         ):
-            value = _string_setting(config, env_name, config_path)
+            value = _env_string(env_name) if not config_path else _string_setting(config, env_name, config_path)
             if value is None:
-                missing.append(f"{_config_label(config_path)} or {env_name}")
+                missing.append(env_name if not config_path else f"{_config_label(config_path)} or {env_name}")
             else:
                 values[field_name] = value
+
+        database_url = _database_url_setting(config, missing)
+        if database_url is not None:
+            values["database_url"] = database_url
 
         for field_name, env_name in (
             ("sub2api_admin_api_key", "SUB2API_ADMIN_API_KEY"),
@@ -158,12 +169,6 @@ class Settings:
                 "Missing required configuration: " + ", ".join(sorted(missing))
             )
 
-        values["sqlite_db_path"] = _string_setting(
-            config,
-            "SQLITE_DB_PATH",
-            ("storage", "sqlite_db_path"),
-            default="data/sub2api-sidecar.db",
-        )
         values["app_auth_username"] = _string_setting(
             config,
             "APP_AUTH_USERNAME",
@@ -310,6 +315,85 @@ def _reject_removed_settings(config: Mapping[str, Any]) -> None:
         f"{removed}. Configure runtime switches and operational data expiration "
         "through the authenticated web UI/API."
     )
+
+
+def _database_url_setting(
+    config: Mapping[str, Any], missing: list[str]
+) -> str | None:
+    url = _string_config_setting(config, ("database", "url"))
+    username = _string_config_setting(config, ("database", "username"))
+    name = _string_config_setting(config, ("database", "name"))
+    password = _env_string("POSTGRES_PASSWORD")
+    for label, value in (
+        ("database.url", url),
+        ("database.username", username),
+        ("database.name", name),
+        ("POSTGRES_PASSWORD", password),
+    ):
+        if value is None:
+            missing.append(label)
+    if url is None or username is None or name is None or password is None:
+        return None
+
+    port = _int_config_setting(config, ("database", "port"), default=5432)
+
+    if port <= 0 or port > 65535:
+        raise ConfigurationError("database.port must be between 1 and 65535")
+
+    normalized_host = url.strip()
+    normalized_username = username.strip()
+    normalized_name = name.strip()
+    if not normalized_host:
+        raise ConfigurationError("database.url must not be empty")
+    if not normalized_username:
+        raise ConfigurationError("database.username must not be empty")
+    if not normalized_name:
+        raise ConfigurationError("database.name must not be empty")
+    if (
+        "://" in normalized_host
+        or "/" in normalized_host
+        or "?" in normalized_host
+        or "#" in normalized_host
+        or any(char.isspace() for char in normalized_host)
+    ):
+        raise ConfigurationError("database.url must be a host name or IP address")
+
+    if ":" in normalized_host and not normalized_host.startswith("["):
+        normalized_host = f"[{normalized_host}]"
+
+    return (
+        f"postgresql://{quote(normalized_username, safe='')}:{quote(password, safe='')}"
+        f"@{normalized_host}:{port}/{quote(normalized_name, safe='')}"
+    )
+
+
+def _string_config_setting(
+    config: Mapping[str, Any],
+    config_path: tuple[str, ...],
+    *,
+    default: str | None = None,
+) -> str | None:
+    raw_value = _config_value(config, config_path)
+    if raw_value is None or raw_value == "":
+        return default
+    if isinstance(raw_value, str):
+        return raw_value
+    if isinstance(raw_value, (int, float, bool)):
+        return str(raw_value)
+
+    raise ConfigurationError(f"{_config_label(config_path)} must be a string")
+
+
+def _int_config_setting(
+    config: Mapping[str, Any],
+    config_path: tuple[str, ...],
+    *,
+    default: int,
+) -> int:
+    raw_value = _config_value(config, config_path)
+    if raw_value is None or raw_value == "":
+        return default
+    return _parse_int_value(raw_value, source=_config_label(config_path))
 
 
 def _string_setting(

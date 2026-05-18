@@ -6,7 +6,7 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 #### Scenario: Operational data runtime settings control collection
 - **GIVEN** the service starts after this change
 - **WHEN** operational data runtime settings are loaded
-- **THEN** the system reads operational data enabled state and optional expiration seconds from SQLite runtime settings
+- **THEN** the system reads operational data enabled state and optional expiration seconds from PostgreSQL runtime settings
 - **THEN** there is no deployment config field for changing the collection interval
 - **THEN** an unset operational data expiration means persisted local data does not expire
 
@@ -17,10 +17,10 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **THEN** the collection stage fetches Sub2API groups from `Sub2APIClient.list_groups(platform="openai")`
 - **THEN** the collection stage fetches Sub2API users from `Sub2APIClient.list_users()`
 - **THEN** the collection stage fetches current-day and previous-day usage from `Sub2APIClient.get_usage_stats(...)`
-- **THEN** the persistence stage stores raw source snapshots in SQLite operational data snapshot tables
-- **THEN** the persistence stage stores derived metric samples in SQLite operational metric sample tables
-- **THEN** the persistence stage stores per-source collection status in SQLite notification source-status tables
-- **THEN** the evaluation stage evaluates due enabled rules using SQLite notification config, local metric samples, and notification rule state
+- **THEN** the persistence stage stores raw source snapshots in PostgreSQL operational data snapshot tables
+- **THEN** the persistence stage stores derived metric samples in PostgreSQL operational metric sample tables
+- **THEN** the persistence stage stores per-source collection status in PostgreSQL notification source-status tables
+- **THEN** the evaluation stage evaluates due enabled rules using PostgreSQL notification config, local metric samples, and notification rule state
 - **THEN** the system persists the updated rule state regardless of decision
 
 #### Scenario: Rule cadence reads local samples
@@ -56,8 +56,8 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **GIVEN** a maintainer reads the operational data pipeline specification or status output
 - **WHEN** they inspect how data moves through the pipeline
 - **THEN** the collection stage identifies Sub2API accounts, groups, users, current-day usage, and previous-day usage as upstream data sources
-- **THEN** the persistence stage identifies local SQLite snapshot, metric sample, and source-status tables as storage destinations
-- **THEN** the evaluation stage identifies local SQLite notification config, metric sample, and rule-state tables as its only data sources
+- **THEN** the persistence stage identifies local PostgreSQL snapshot, metric sample, and source-status tables as storage destinations
+- **THEN** the evaluation stage identifies local PostgreSQL notification config, metric sample, and rule-state tables as its only data sources
 
 ### Requirement: On-demand rule evaluation
 The system SHALL expose an authenticated API for evaluating a single rule once and reporting the decision and outbound deliveries. On-demand evaluation SHALL refresh the local operational data first, then evaluate the requested rule from the same local metric sample store used by scheduled evaluation.

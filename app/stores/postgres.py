@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import psycopg
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
+from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
@@ -40,13 +40,11 @@ from app.models.rotation import (
 from app.stores.base import FlowStore
 
 
-class SQLiteFlowStore(FlowStore):
-    """SQLite-backed store for flows, rotation pool membership, assignments, and audit events."""
+class PostgresFlowStore(FlowStore):
+    """PostgreSQL-backed store for flows, rotation pool membership, assignments, and audit events."""
 
-    def __init__(self, database_path: str) -> None:
-        self.database_path = database_path
-        self._use_uri = database_path.startswith("file:")
-        self._prepare_database_path()
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
         self._initialize_schema()
 
     def save(self, flow: ProvisionFlow) -> ProvisionFlow:
@@ -65,7 +63,7 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(flow_id) DO UPDATE SET
                     state = excluded.state,
                     email = excluded.email,
@@ -94,13 +92,13 @@ class SQLiteFlowStore(FlowStore):
 
     def get_by_flow_id(self, flow_id: str) -> ProvisionFlow | None:
         return self._load_single_flow(
-            "SELECT payload FROM provision_flows WHERE flow_id = ?",
+            "SELECT payload FROM provision_flows WHERE flow_id = %s",
             (flow_id,),
         )
 
     def get_by_state(self, state: str) -> ProvisionFlow | None:
         return self._load_single_flow(
-            "SELECT payload FROM provision_flows WHERE state = ?",
+            "SELECT payload FROM provision_flows WHERE state = %s",
             (state,),
         )
 
@@ -108,7 +106,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_flow(
             """
             SELECT payload FROM provision_flows
-            WHERE user_id_key = ? AND status = ?
+            WHERE user_id_key = %s AND status = %s
             ORDER BY updated_at DESC
             LIMIT 1
             """,
@@ -136,7 +134,7 @@ class SQLiteFlowStore(FlowStore):
             SELECT payload FROM provision_flows
             {where_clause}
             ORDER BY updated_at DESC, created_at DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         """
         return self._load_many_models(
             query,
@@ -177,7 +175,7 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     event.event_id,
@@ -196,7 +194,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_many_models(
             """
             SELECT payload FROM provision_events
-            WHERE flow_id = ?
+            WHERE flow_id = %s
             ORDER BY created_at ASC, event_id ASC
             """,
             (flow_id,),
@@ -217,7 +215,7 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(pool_kind, group_id_key) DO UPDATE SET
                     priority = excluded.priority,
                     group_name = excluded.group_name,
@@ -247,7 +245,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM rotation_pool_groups
-            WHERE pool_kind = ? AND group_id_key = ?
+            WHERE pool_kind = %s AND group_id_key = %s
             """,
             (pool_kind.value, self._serialize_rotation_pool_group_id_key(group_id)),
             RotationPoolGroup,
@@ -260,7 +258,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_many_models(
             """
             SELECT payload FROM rotation_pool_groups
-            WHERE pool_kind = ?
+            WHERE pool_kind = %s
             ORDER BY priority ASC, created_at ASC
             """,
             (pool_kind.value,),
@@ -281,7 +279,7 @@ class SQLiteFlowStore(FlowStore):
     ) -> None:
         with self._connect() as connection:
             connection.execute(
-                "DELETE FROM rotation_pool_groups WHERE pool_kind = ? AND group_id_key = ?",
+                "DELETE FROM rotation_pool_groups WHERE pool_kind = %s AND group_id_key = %s",
                 (pool_kind.value, self._serialize_rotation_pool_group_id_key(group_id)),
             )
             connection.commit()
@@ -311,7 +309,7 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES ('default', ?, ?, ?, ?, ?)
+                ) VALUES ('default', %s, %s, %s, %s, %s)
                 ON CONFLICT(config_key) DO UPDATE SET
                     enabled = excluded.enabled,
                     usage_window = excluded.usage_window,
@@ -389,7 +387,7 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(user_id_key) DO UPDATE SET
                     email = excluded.email,
                     group_id_key = excluded.group_id_key,
@@ -418,7 +416,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM user_group_assignments
-            WHERE user_id_key = ?
+            WHERE user_id_key = %s
             """,
             (self._serialize_key(user_id),),
             UserGroupAssignment,
@@ -447,7 +445,7 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     event.event_id,
@@ -490,7 +488,7 @@ class SQLiteFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(run_id) DO UPDATE SET
                     run_kind = excluded.run_kind,
                     tag = excluded.tag,
@@ -519,7 +517,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM orchestration_runs
-            WHERE run_id = ?
+            WHERE run_id = %s
             """,
             (run_id,),
             OrchestrationRunRecord,
@@ -530,7 +528,7 @@ class SQLiteFlowStore(FlowStore):
             """
             SELECT payload FROM orchestration_runs
             ORDER BY created_at DESC, run_id DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
             OrchestrationRunRecord,
@@ -552,7 +550,7 @@ class SQLiteFlowStore(FlowStore):
             connection.execute(
                 """
                 INSERT INTO notification_config (config_key, payload, created_at, updated_at)
-                VALUES ('default', ?, ?, ?)
+                VALUES ('default', %s, %s, %s)
                 ON CONFLICT(config_key) DO UPDATE SET
                     payload = excluded.payload,
                     updated_at = excluded.updated_at
@@ -572,7 +570,7 @@ class SQLiteFlowStore(FlowStore):
                 INSERT INTO notification_deliveries (
                     delivery_id, receiver_id, rule_id, provider, severity,
                     trigger, status, attempt_index, payload, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     record.delivery_id,
@@ -596,7 +594,7 @@ class SQLiteFlowStore(FlowStore):
             """
             SELECT payload FROM notification_deliveries
             ORDER BY created_at DESC, delivery_id DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
             NotificationDeliveryRecord,
@@ -608,7 +606,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM notification_rule_states
-            WHERE rule_id = ? AND scope_key = ?
+            WHERE rule_id = %s AND scope_key = %s
             """,
             (rule_id, scope_key),
             NotificationRuleState,
@@ -623,7 +621,7 @@ class SQLiteFlowStore(FlowStore):
             connection.execute(
                 """
                 INSERT INTO notification_rule_states (rule_id, scope_key, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT(rule_id, scope_key) DO UPDATE SET
                     payload = excluded.payload,
                     updated_at = excluded.updated_at
@@ -650,7 +648,7 @@ class SQLiteFlowStore(FlowStore):
                     """
                     INSERT INTO operational_metric_samples (
                         metric_key, scope_key, observed_at, collected_at, value, payload
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
                     """,
                     (
                         sample.metric_key,
@@ -670,7 +668,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM operational_metric_samples
-            WHERE metric_key = ? AND scope_key = ?
+            WHERE metric_key = %s AND scope_key = %s
             ORDER BY observed_at DESC, collected_at DESC, sample_id DESC
             LIMIT 1
             """,
@@ -684,7 +682,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_many_models(
             """
             SELECT payload FROM operational_metric_samples current
-            WHERE current.metric_key = ?
+            WHERE current.metric_key = %s
               AND current.sample_id = (
                 SELECT latest.sample_id FROM operational_metric_samples latest
                 WHERE latest.metric_key = current.metric_key
@@ -707,7 +705,7 @@ class SQLiteFlowStore(FlowStore):
                 """
                 INSERT INTO operational_data_snapshots (
                     source_key, observed_at, collected_at, payload
-                ) VALUES (?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s)
                 """,
                 (
                     snapshot.source_key,
@@ -725,7 +723,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM operational_data_snapshots
-            WHERE source_key = ?
+            WHERE source_key = %s
             ORDER BY observed_at DESC, collected_at DESC, snapshot_id DESC
             LIMIT 1
             """,
@@ -738,8 +736,8 @@ class SQLiteFlowStore(FlowStore):
             row = connection.execute(
                 """
                 SELECT
-                    COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_metric_samples), 0)
-                    + COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_data_snapshots), 0)
+                    COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM operational_metric_samples), 0)
+                    + COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM operational_data_snapshots), 0)
                     AS storage_bytes
                 """
             ).fetchone()
@@ -758,12 +756,12 @@ class SQLiteFlowStore(FlowStore):
         with self._connect() as connection:
             if retention_cutoff is not None:
                 cursor = connection.execute(
-                    "DELETE FROM operational_metric_samples WHERE observed_at < ?",
+                    "DELETE FROM operational_metric_samples WHERE observed_at < %s",
                     (retention_cutoff.isoformat(),),
                 )
                 deleted_metric_samples += cursor.rowcount if cursor.rowcount > 0 else 0
                 cursor = connection.execute(
-                    "DELETE FROM operational_data_snapshots WHERE observed_at < ?",
+                    "DELETE FROM operational_data_snapshots WHERE observed_at < %s",
                     (retention_cutoff.isoformat(),),
                 )
                 deleted_snapshots += cursor.rowcount if cursor.rowcount > 0 else 0
@@ -799,7 +797,7 @@ class SQLiteFlowStore(FlowStore):
                 INSERT INTO operational_data_source_statuses (
                     source_key, status, started_at, finished_at, error_message,
                     item_count, payload, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(source_key) DO UPDATE SET
                     status = excluded.status,
                     started_at = excluded.started_at,
@@ -843,7 +841,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM runtime_settings
-            WHERE settings_key = ?
+            WHERE settings_key = %s
             """,
             (settings_key,),
             model_cls,
@@ -858,7 +856,7 @@ class SQLiteFlowStore(FlowStore):
                 """
                 INSERT INTO runtime_settings (
                     settings_key, payload, created_at, updated_at
-                ) VALUES (?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s)
                 ON CONFLICT(settings_key) DO UPDATE SET
                     payload = excluded.payload,
                     updated_at = excluded.updated_at
@@ -872,12 +870,12 @@ class SQLiteFlowStore(FlowStore):
             )
             connection.commit()
 
-    def _operational_data_storage_bytes(self, connection: sqlite3.Connection) -> int:
+    def _operational_data_storage_bytes(self, connection: psycopg.Connection) -> int:
         row = connection.execute(
-            """
-            SELECT
-                COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_metric_samples), 0)
-                + COALESCE((SELECT SUM(LENGTH(payload)) FROM operational_data_snapshots), 0)
+                """
+                SELECT
+                COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM operational_metric_samples), 0)
+                + COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM operational_data_snapshots), 0)
                 AS storage_bytes
             """
         ).fetchone()
@@ -885,7 +883,7 @@ class SQLiteFlowStore(FlowStore):
 
     def _delete_oldest_operational_data_record(
         self,
-        connection: sqlite3.Connection,
+        connection: psycopg.Connection,
     ) -> tuple[str, int] | None:
         metric = connection.execute(
             """
@@ -933,12 +931,12 @@ class SQLiteFlowStore(FlowStore):
             )
         ):
             cursor = connection.execute(
-                "DELETE FROM operational_metric_samples WHERE sample_id = ?",
+                "DELETE FROM operational_metric_samples WHERE sample_id = %s",
                 (metric["id"],),
             )
             return "operational_metric_samples", cursor.rowcount if cursor.rowcount > 0 else 0
         cursor = connection.execute(
-            "DELETE FROM operational_data_snapshots WHERE snapshot_id = ?",
+            "DELETE FROM operational_data_snapshots WHERE snapshot_id = %s",
             (snapshot["id"],),
         )
         return "operational_data_snapshots", cursor.rowcount if cursor.rowcount > 0 else 0
@@ -950,7 +948,7 @@ class SQLiteFlowStore(FlowStore):
                 """
                 INSERT INTO credit_recharge_policies (
                     policy_id, enabled, next_run_at, payload, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT(policy_id) DO UPDATE SET
                     enabled = excluded.enabled,
                     next_run_at = excluded.next_run_at,
@@ -971,7 +969,7 @@ class SQLiteFlowStore(FlowStore):
 
     def get_credit_policy(self, policy_id: str) -> CreditRechargePolicy | None:
         return self._load_single_model(
-            "SELECT payload FROM credit_recharge_policies WHERE policy_id = ?",
+            "SELECT payload FROM credit_recharge_policies WHERE policy_id = %s",
             (policy_id,),
             CreditRechargePolicy,
         )
@@ -989,7 +987,7 @@ class SQLiteFlowStore(FlowStore):
     def delete_credit_policy(self, policy_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                "DELETE FROM credit_recharge_policies WHERE policy_id = ?",
+                "DELETE FROM credit_recharge_policies WHERE policy_id = %s",
                 (policy_id,),
             )
             connection.commit()
@@ -998,7 +996,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_many_models(
             """
             SELECT payload FROM credit_recharge_policies
-            WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+            WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= %s
             ORDER BY next_run_at ASC, policy_id ASC
             """,
             (now.isoformat(),),
@@ -1013,7 +1011,7 @@ class SQLiteFlowStore(FlowStore):
                 INSERT INTO credit_recharge_runs (
                     run_id, policy_id, occurrence_key, operation_type, status,
                     dry_run, payload, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(run_id) DO UPDATE SET
                     policy_id = excluded.policy_id,
                     occurrence_key = excluded.occurrence_key,
@@ -1044,7 +1042,7 @@ class SQLiteFlowStore(FlowStore):
         return self._load_single_model(
             """
             SELECT payload FROM credit_recharge_runs
-            WHERE policy_id = ? AND occurrence_key = ? AND dry_run = 0
+            WHERE policy_id = %s AND occurrence_key = %s AND dry_run = 0
             """,
             (policy_id, occurrence_key),
             CreditRechargeRunRecord,
@@ -1059,7 +1057,7 @@ class SQLiteFlowStore(FlowStore):
         params: tuple[Any, ...]
         where = ""
         if policy_id:
-            where = "WHERE policy_id = ?"
+            where = "WHERE policy_id = %s"
             params = (policy_id, limit)
         else:
             params = (limit,)
@@ -1068,7 +1066,7 @@ class SQLiteFlowStore(FlowStore):
             SELECT payload FROM credit_recharge_runs
             {where}
             ORDER BY created_at DESC, run_id DESC
-            LIMIT ?
+            LIMIT %s
             """,
             params,
             CreditRechargeRunRecord,
@@ -1082,7 +1080,7 @@ class SQLiteFlowStore(FlowStore):
                 INSERT INTO credit_audit_records (
                     audit_id, operation_type, status, user_id_key, policy_id,
                     run_id, payload, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     record.audit_id,
@@ -1113,20 +1111,20 @@ class SQLiteFlowStore(FlowStore):
         if user_id is not None:
             user_id_keys = self._serialize_lookup_keys(user_id)
             clauses.append(
-                "user_id_key IN (" + ",".join("?" for _ in user_id_keys) + ")"
+                "user_id_key IN (" + ",".join("%s" for _ in user_id_keys) + ")"
             )
             params.extend(user_id_keys)
         if policy_id:
-            clauses.append("policy_id = ?")
+            clauses.append("policy_id = %s")
             params.append(policy_id)
         if run_id:
-            clauses.append("run_id = ?")
+            clauses.append("run_id = %s")
             params.append(run_id)
         if operation_type is not None:
-            clauses.append("operation_type = ?")
+            clauses.append("operation_type = %s")
             params.append(operation_type.value)
         if status:
-            clauses.append("status = ?")
+            clauses.append("status = %s")
             params.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
@@ -1135,16 +1133,11 @@ class SQLiteFlowStore(FlowStore):
             SELECT payload FROM credit_audit_records
             {where}
             ORDER BY created_at DESC, audit_id DESC
-            LIMIT ?
+            LIMIT %s
             """,
             tuple(params),
             CreditAuditRecord,
         )
-
-    def _prepare_database_path(self) -> None:
-        if self.database_path == ":memory:" or self._use_uri:
-            return
-        Path(self.database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
@@ -1163,14 +1156,6 @@ class SQLiteFlowStore(FlowStore):
                     updated_at TEXT NOT NULL
                 )
                 """
-            )
-            self._ensure_column(connection, "provision_flows", "user_id_key", "TEXT")
-            self._ensure_column(connection, "provision_flows", "group_id_key", "TEXT")
-            self._ensure_column(
-                connection,
-                "provision_flows",
-                "assignment_mode",
-                "TEXT NOT NULL DEFAULT 'dedicated'",
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_provision_flows_state ON provision_flows(state)"
@@ -1340,19 +1325,19 @@ class SQLiteFlowStore(FlowStore):
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS notification_rule_states (
-                    rule_id TEXT PRIMARY KEY,
+                    rule_id TEXT NOT NULL,
+                    scope_key TEXT NOT NULL DEFAULT '',
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (rule_id, scope_key)
                 )
                 """
             )
-            self._ensure_column(connection, "notification_rule_states", "scope_key", "TEXT NOT NULL DEFAULT ''")
-            self._migrate_notification_rule_state_primary_key(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS operational_metric_samples (
-                    sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sample_id BIGSERIAL PRIMARY KEY,
                     metric_key TEXT NOT NULL,
                     scope_key TEXT NOT NULL DEFAULT '',
                     observed_at TEXT NOT NULL,
@@ -1362,7 +1347,6 @@ class SQLiteFlowStore(FlowStore):
                 )
                 """
             )
-            self._ensure_column(connection, "operational_metric_samples", "scope_key", "TEXT NOT NULL DEFAULT ''")
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_operational_metric_samples_latest
@@ -1372,7 +1356,7 @@ class SQLiteFlowStore(FlowStore):
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS operational_data_snapshots (
-                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id BIGSERIAL PRIMARY KEY,
                     source_key TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
                     collected_at TEXT NOT NULL,
@@ -1468,62 +1452,6 @@ class SQLiteFlowStore(FlowStore):
             )
             connection.commit()
 
-    def _ensure_column(
-        self,
-        connection: sqlite3.Connection,
-        table_name: str,
-        column_name: str,
-        definition: str,
-    ) -> None:
-        rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-        existing = {row["name"] for row in rows}
-        if column_name in existing:
-            return
-        connection.execute(
-            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
-        )
-
-    def _migrate_notification_rule_state_primary_key(
-        self, connection: sqlite3.Connection
-    ) -> None:
-        indexes = connection.execute(
-            "PRAGMA index_list(notification_rule_states)"
-        ).fetchall()
-        for index in indexes:
-            if index["origin"] != "pk":
-                continue
-            columns = connection.execute(
-                f"PRAGMA index_info({index['name']})"
-            ).fetchall()
-            pk_columns = [column["name"] for column in columns]
-            if pk_columns == ["rule_id", "scope_key"]:
-                return
-            break
-        else:
-            return
-
-        connection.execute("ALTER TABLE notification_rule_states RENAME TO notification_rule_states_old")
-        connection.execute(
-            """
-            CREATE TABLE notification_rule_states (
-                rule_id TEXT NOT NULL,
-                scope_key TEXT NOT NULL DEFAULT '',
-                payload TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (rule_id, scope_key)
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO notification_rule_states (rule_id, scope_key, payload, created_at, updated_at)
-            SELECT rule_id, COALESCE(scope_key, ''), payload, created_at, updated_at
-            FROM notification_rule_states_old
-            """
-        )
-        connection.execute("DROP TABLE notification_rule_states_old")
-
     def _load_single_flow(self, query: str, params: tuple[Any, ...]) -> ProvisionFlow | None:
         return self._load_single_model(query, params, ProvisionFlow)
 
@@ -1559,22 +1487,20 @@ class SQLiteFlowStore(FlowStore):
         clauses: list[str] = []
         params: list[Any] = []
         if status is not None:
-            clauses.append("status = ?")
+            clauses.append("status = %s")
             params.append(status.value)
         if assignment_mode is not None:
-            clauses.append("assignment_mode = ?")
+            clauses.append("assignment_mode = %s")
             params.append(assignment_mode.value)
         if email:
-            clauses.append("LOWER(email) LIKE ?")
+            clauses.append("LOWER(email) LIKE %s")
             params.append(f"%{email.lower()}%")
         if not clauses:
             return "", ()
         return "WHERE " + " AND ".join(clauses), tuple(params)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, uri=self._use_uri)
-        connection.row_factory = sqlite3.Row
-        return connection
+    def _connect(self) -> psycopg.Connection:
+        return psycopg.connect(self.database_url, row_factory=dict_row)
 
     def _serialize_key(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=True, separators=(",", ":"))

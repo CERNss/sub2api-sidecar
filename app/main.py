@@ -127,7 +127,7 @@ from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
 from app.services.rotation import RotationExecutionResult, RotationService
 from app.services.rotation_scheduler import AutoRotationScheduler
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -188,9 +188,9 @@ if UI_DIST_DIR.exists():
 
 
 @lru_cache(maxsize=1)
-def get_flow_store() -> SQLiteFlowStore:
+def get_flow_store() -> PostgresFlowStore:
     settings = get_settings()
-    return SQLiteFlowStore(database_path=settings.sqlite_db_path)
+    return PostgresFlowStore(database_url=settings.database_url)
 
 
 @lru_cache(maxsize=1)

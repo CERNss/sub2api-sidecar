@@ -10,7 +10,7 @@ Without this view, manual credit changes and periodic recharge policy are easy t
 - Add authenticated APIs that fetch every upstream user's current credit/balance and consumption data from Sub2API admin surfaces, preserving the units and display semantics provided by Sub2API.
 - Add operator controls for one-off balance increases and decreases across one user or a selected user cohort.
 - Add automatic recharge policy management with configurable schedule timing in `Asia/Shanghai`, recurrence, target cohort, amount, enablement, missed-run catch-up, and dry-run/preview behavior.
-- Persist local automatic recharge policies and recharge run/audit records in SQLite.
+- Persist local automatic recharge policies and recharge run/audit records in PostgreSQL.
 - Keep upstream balance mutation behind explicit operator confirmation and record the before/after balance, actor context, scope, reason, and per-user outcome.
 - Use the confirmed Sub2API admin balance mutation surface `POST /api/v1/admin/users/{id}/balance` with `operation=add` for recharge/increase and `operation=subtract` for deduction.
 
@@ -24,10 +24,10 @@ Without this view, manual credit changes and periodic recharge policy are easy t
 
 ## Impact
 
-- Affected backend code: `app/clients/sub2api.py`, `app/main.py`, `app/models/schemas.py`, `app/stores/base.py`, `app/stores/sqlite.py`, new credit-control service/models as needed.
+- Affected backend code: `app/clients/sub2api.py`, `app/main.py`, `app/models/schemas.py`, `app/stores/base.py`, `app/stores/postgres.py`, new credit-control service/models as needed.
 - Affected frontend code: `frontend/src/App.tsx`, `frontend/src/styles.css`, possibly new feature modules if the dashboard is split further.
 - Affected tests: authenticated API tests for credit summary, manual adjustment, policy CRUD, preview/run behavior, scheduler execution, audit persistence, and frontend build coverage.
-- Data impact: SQLite gains local tables or documents for recharge policies and recharge/audit runs; upstream Sub2API remains the source of truth for actual user balance and consumption.
+- Data impact: PostgreSQL gains local tables or documents for recharge policies and recharge/audit runs; upstream Sub2API remains the source of truth for actual user balance and consumption.
 
 ## Confirmed Decisions
 

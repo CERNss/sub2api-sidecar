@@ -62,7 +62,7 @@ The system SHALL persist each managed user's current group assignment and SHALL 
 #### Scenario: Assignment state survives restart
 - **GIVEN** a user has been assigned or rotated into a dedicated rotation-target group
 - **WHEN** the service restarts
-- **THEN** the system can load the user's current group assignment, assignment mode, last rotation time, and last decision reason from SQLite
+- **THEN** the system can load the user's current group assignment, assignment mode, last rotation time, and last decision reason from PostgreSQL
 
 #### Scenario: Rotation execution writes an audit record
 - **GIVEN** a manual or automatic rotation attempt finishes

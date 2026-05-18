@@ -2,18 +2,18 @@
 
 Notification evaluation currently couples rule timing, upstream data collection, threshold evaluation, and webhook delivery inside `NotificationService.tick()`. Each due rule invokes a collector for its own `signalKey`, so multiple rules can repeat the same Sub2API reads and there is no durable record of what the scheduler has recently observed.
 
-This change intentionally discards that collector-as-rule-input design. The new operational data pipeline owns data collection as a separate runtime concern and exposes neutral runtime settings through SQLite/API/UI.
+This change intentionally discards that collector-as-rule-input design. The new operational data pipeline owns data collection as a separate runtime concern and exposes neutral runtime settings through PostgreSQL/API/UI.
 
 The desired shape is a shared two-stage operational data pipeline:
 
-1. A collection step runs on the pipeline interval, fetches Sub2API datasets in a deterministic order, derives all supported notification signal samples, and writes them to SQLite.
-2. Rule evaluation runs on the rule cadence and reads local samples from SQLite.
+1. A collection step runs on the pipeline interval, fetches Sub2API datasets in a deterministic order, derives all supported notification signal samples, and writes them to PostgreSQL.
+2. Rule evaluation runs on the rule cadence and reads local samples from PostgreSQL.
 
 ## Goals / Non-Goals
 
 **Goals:**
 - Collect Sub2API data once per scheduler tick and reuse it for all notification rules.
-- Persist latest and historical operational snapshots and metric samples in SQLite.
+- Persist latest and historical operational snapshots and metric samples in PostgreSQL.
 - Evaluate scheduled rules from local samples while preserving `readIntervalMinutes`, `forMinutes`, `cooldownMinutes`, recovery, and delivery semantics.
 - Make operational-data status report sampling freshness and per-source errors.
 - Keep on-demand evaluation useful by refreshing samples before evaluating one rule.
@@ -29,15 +29,15 @@ The desired shape is a shared two-stage operational data pipeline:
 
 ## Decisions
 
-### Use SQLite as the sample store
+### Use PostgreSQL as the sample store
 
-Samples will be stored in SQLite tables owned by the existing `SQLiteFlowStore`. This keeps deployment simple and matches the service's existing durable state model.
+Samples will be stored in PostgreSQL tables owned by the existing `PostgresFlowStore`. This keeps deployment simple and matches the service's existing durable state model.
 
 Alternative considered: keep samples in process memory only. That would be faster but would lose restart visibility and would not solve the "prove what was last sampled" problem.
 
 ### Use operational data runtime settings only
 
-Add SQLite-backed runtime settings edited through authenticated API/UI, not through `config.yaml`:
+Add PostgreSQL-backed runtime settings edited through authenticated API/UI, not through `config.yaml`:
 
 ```json
 {
@@ -65,13 +65,13 @@ The first implementation data sources are:
 | Collection | `Sub2APIClient.list_users()` | user balance and user API-key/account-state style signals |
 | Collection | `Sub2APIClient.get_usage_stats(user_id="", start_date=today, end_date=today, timezone_name=Asia/Shanghai)` | subscription usage, user usage summary, payment usage proxy, and current-day admin usage |
 | Collection | `Sub2APIClient.get_usage_stats(user_id="", start_date=yesterday, end_date=yesterday, timezone_name=Asia/Shanghai)` | previous-day comparison for admin usage anomaly |
-| Persistence | SQLite `operational_data_snapshots` | raw source snapshots keyed by source key and collection time for shared consumers |
-| Persistence | SQLite `operational_metric_samples` | historical metric samples keyed by metric key and collection time |
-| Persistence | SQLite latest-query indexes | latest snapshot and metric lookup for consumers |
-| Persistence | SQLite `operational_data_source_statuses` | per-source collection status, item count, timestamps, and error messages |
-| Evaluation | SQLite notification config | rule definitions, receiver routing, and rule cadence |
-| Evaluation | SQLite operational metric samples | latest non-expired metric sample for each rule signal |
-| Evaluation | SQLite notification rule states | sustained-for, cooldown, firing, recovery, and last-evaluation state |
+| Persistence | PostgreSQL `operational_data_snapshots` | raw source snapshots keyed by source key and collection time for shared consumers |
+| Persistence | PostgreSQL `operational_metric_samples` | historical metric samples keyed by metric key and collection time |
+| Persistence | PostgreSQL latest-query indexes | latest snapshot and metric lookup for consumers |
+| Persistence | PostgreSQL `operational_data_source_statuses` | per-source collection status, item count, timestamps, and error messages |
+| Evaluation | PostgreSQL notification config | rule definitions, receiver routing, and rule cadence |
+| Evaluation | PostgreSQL operational metric samples | latest non-expired metric sample for each rule signal |
+| Evaluation | PostgreSQL notification rule states | sustained-for, cooldown, firing, recovery, and last-evaluation state |
 
 ### Keep the evaluator unchanged
 
@@ -90,7 +90,7 @@ The first implementation data sources are:
 ## Migration Plan
 
 1. Add new operational data runtime settings and migrate runtime construction to those settings.
-2. Add SQLite tables for operational snapshots, metric samples, and source statuses with `CREATE TABLE IF NOT EXISTS`.
+2. Add PostgreSQL tables for operational snapshots, metric samples, and source statuses with `CREATE TABLE IF NOT EXISTS`.
 3. Add models and store methods for saving/listing latest snapshots, metric samples, and source statuses.
 4. Add `OperationalDataCollector` and inject it into `NotificationService`.
 5. Change scheduled and on-demand evaluation to refresh/read local samples.

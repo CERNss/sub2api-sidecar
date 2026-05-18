@@ -6,7 +6,7 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 #### Scenario: Operational data configuration controls collection
 - **GIVEN** the service starts after this change
 - **WHEN** operational-data runtime settings are loaded
-- **THEN** the system reads collection enabled state, collection interval seconds, optional expiration seconds, optional retention seconds, and optional maximum storage MB from SQLite runtime settings
+- **THEN** the system reads collection enabled state, collection interval seconds, optional expiration seconds, optional retention seconds, and optional maximum storage MB from PostgreSQL runtime settings
 - **THEN** the collection interval defaults to 60 seconds when no runtime setting has been saved
 - **THEN** unset expiration means persisted local data does not expire
 - **THEN** unset retention seconds means no time-based local data cleanup
@@ -23,13 +23,13 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **THEN** the collection stage fetches per-user usage windows from `Sub2APIClient.get_user_usage(...)`
 - **THEN** the collection stage fetches per-user API keys from `Sub2APIClient.get_user_api_keys(...)`
 - **THEN** the collection stage fetches current-day and previous-day usage from `Sub2APIClient.get_usage_stats(...)`
-- **THEN** the persistence stage stores raw source snapshots in SQLite operational data snapshot tables
-- **THEN** the persistence stage stores derived metric samples in SQLite operational metric sample tables
-- **THEN** the persistence stage stores per-source collection status in SQLite source-status tables
+- **THEN** the persistence stage stores raw source snapshots in PostgreSQL operational data snapshot tables
+- **THEN** the persistence stage stores derived metric samples in PostgreSQL operational metric sample tables
+- **THEN** the persistence stage stores per-source collection status in PostgreSQL source-status tables
 - **THEN** the cleanup stage deletes local snapshot and metric sample records older than the configured retention window when retention seconds is set
 - **THEN** the cleanup stage deletes oldest local snapshot and metric sample records when the operational-data payload size exceeds the configured maximum storage MB
 - **THEN** size-based cleanup keeps the newest record for each source and each metric key
-- **THEN** the evaluation stage evaluates due enabled rules using SQLite notification config, local metric samples, and notification rule state
+- **THEN** the evaluation stage evaluates due enabled rules using PostgreSQL notification config, local metric samples, and notification rule state
 - **THEN** the system persists the updated rule state regardless of decision
 
 #### Scenario: Rule cadence reads local samples
@@ -68,13 +68,13 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **WHEN** they inspect how data moves through the pipeline
 - **THEN** the collection stage identifies Sub2API accounts, groups, users, current-day usage, and previous-day usage as upstream data sources
 - **THEN** the collection stage identifies per-user usage and per-user API keys as upstream data sources for credit control and automatic orchestration
-- **THEN** the persistence stage identifies local SQLite snapshot, metric sample, and source-status tables as storage destinations
-- **THEN** the evaluation stage identifies local SQLite notification config, metric sample, and rule-state tables as its only data sources
+- **THEN** the persistence stage identifies local PostgreSQL snapshot, metric sample, and source-status tables as storage destinations
+- **THEN** the evaluation stage identifies local PostgreSQL notification config, metric sample, and rule-state tables as its only data sources
 
 #### Scenario: Operator updates operational-data runtime settings without restart
 - **GIVEN** an authenticated operator opens the web UI
 - **WHEN** the operator enables or disables operational-data collection, changes collection interval, changes expiration, changes retention seconds, or changes maximum storage MB
-- **THEN** the setting is saved to SQLite through a global settings control backed by an authenticated runtime settings API
+- **THEN** the setting is saved to PostgreSQL through a global settings control backed by an authenticated runtime settings API
 - **THEN** the next scheduler wait or tick uses the updated setting without restarting the service
 - **THEN** scheduler status reports the persisted enabled state, effective collection interval, expiration, cleanup settings, storage size, and source freshness
 
@@ -97,5 +97,5 @@ The system SHALL run credit-control due-policy execution from the shared operati
 #### Scenario: Operator updates credit-control runtime settings without restart
 - **GIVEN** an authenticated operator opens the web UI
 - **WHEN** the operator enables or disables credit-control background execution
-- **THEN** the setting is saved to SQLite through an authenticated runtime settings API
+- **THEN** the setting is saved to PostgreSQL through an authenticated runtime settings API
 - **THEN** the next scheduler tick uses the updated setting without restarting the service

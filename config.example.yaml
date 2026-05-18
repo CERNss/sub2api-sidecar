@@ -5,8 +5,11 @@ app:
   auth_username: admin
   access_key_ttl_hours: 12
 
-storage:
-  sqlite_db_path: ./data/sub2api-sidecar.db
+database:
+  url: sidecar-postgres
+  port: 5432
+  username: sub2api_sidecar
+  name: sub2api_sidecar
 
 openai:
   oauth_redirect_uri: http://localhost:1455/auth/callback

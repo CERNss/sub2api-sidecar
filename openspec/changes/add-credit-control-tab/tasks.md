@@ -8,7 +8,7 @@
 
 ## 2. Persistence and automatic recharge
 
-- [x] 2.1 Add SQLite storage for recharge policies and recharge run/audit records
+- [x] 2.1 Add PostgreSQL storage for recharge policies and recharge run/audit records
 - [x] 2.2 Implement policy CRUD with validation for amount, schedule, timezone, and target scope
 - [x] 2.3 Implement target-scope resolution and preview
 - [x] 2.4 Implement scheduler execution for due one-time and recurring policies

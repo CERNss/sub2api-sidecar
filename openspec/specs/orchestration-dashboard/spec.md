@@ -45,7 +45,7 @@ The system SHALL expose authenticated read-only APIs for listing provisioning fl
 
 #### Scenario: Operator lists recent provisioning flows
 - **GIVEN** the operator has a valid admin session
-- **AND** multiple provisioning flows exist in the SQLite store
+- **AND** multiple provisioning flows exist in the PostgreSQL store
 - **WHEN** the operator requests `GET /provision/flows`
 - **THEN** the system returns a success envelope containing flow summary items
 - **THEN** each item includes `flow_id`, `email`, `group_id`, `status`, `account_name`, `oauth_account_id`, `error_message`, `created_at`, and `updated_at`

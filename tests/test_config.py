@@ -17,6 +17,10 @@ CONFIG_ENV_NAMES = (
     "APP_AUTH_USERNAME",
     "APP_AUTH_PASSWORD",
     "APP_ACCESS_KEY_TTL_HOURS",
+    "POSTGRES_PASSWORD",
+    "DATABASE_URL",
+    "POSTGRES_DB",
+    "POSTGRES_USER",
     "SQLITE_DB_PATH",
     "PROVISIONING_ASSIGNMENT_MODE",
     "AUTO_ROTATION_ENABLED",
@@ -50,20 +54,36 @@ def _clear_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
 
 
+def _database_config_yaml() -> str:
+    return """
+database:
+  url: postgres
+  port: 5432
+  username: sidecar
+  name: sidecar
+""".lstrip()
+
+
+def _write_minimal_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(_database_config_yaml(), encoding="utf-8")
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+
+
 def test_settings_loads_non_secret_config_from_yaml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _clear_config_env(monkeypatch)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        """
+        _database_config_yaml()
+        + """
 app:
   base_url: http://yaml-sidecar.local
   base_path: /sidecar/
   auth_username: ops
   access_key_ttl_hours: 6
-storage:
-  sqlite_db_path: ./data/yaml.db
 openai:
   oauth_redirect_uri: http://localhost:1555/callback
 sub2api:
@@ -87,10 +107,11 @@ sub2api:
           - teapot
           - brew
         description: 茶壶保护 - 暂停 5 分钟
-""".lstrip(),
+""",
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
 
     settings = Settings.from_env()
@@ -101,7 +122,7 @@ sub2api:
     assert settings.openai_oauth_redirect_uri == "http://localhost:1555/callback"
     assert settings.app_auth_username == "ops"
     assert settings.app_access_key_ttl_hours == 6
-    assert settings.sqlite_db_path == "./data/yaml.db"
+    assert settings.database_url == "postgresql://sidecar:secret@postgres:5432/sidecar"
     assert settings.request_timeout_seconds == 12
 
     defaults = settings.sub2api_provisioning_defaults
@@ -121,7 +142,8 @@ def test_settings_env_overrides_config_yaml(
     _clear_config_env(monkeypatch)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        """
+        _database_config_yaml()
+        + """
 app:
   base_url: http://yaml-sidecar.local
   access_key_ttl_hours: 6
@@ -129,10 +151,11 @@ openai:
   oauth_redirect_uri: http://localhost:1555/callback
 sub2api:
   base_url: http://yaml-sub2api.local
-""".lstrip(),
+""",
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
     monkeypatch.setenv("SUB2API_BASE_URL", "http://env-sub2api.local")
     monkeypatch.setenv("APP_ACCESS_KEY_TTL_HOURS", "18")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
@@ -141,6 +164,45 @@ sub2api:
 
     assert settings.sub2api_base_url == "http://env-sub2api.local"
     assert settings.app_access_key_ttl_hours == 18
+
+
+def test_settings_rejects_direct_database_url_env(monkeypatch) -> None:
+    _clear_config_env(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://sidecar:secret@postgres:5432/sidecar")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "DATABASE_URL" in str(exc_info.value)
+
+
+def test_settings_requires_structured_database_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+app:
+  base_url: http://127.0.0.1:8000
+openai:
+  oauth_redirect_uri: http://localhost:1455/callback
+sub2api:
+  base_url: http://mock-sub2api.local
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    message = str(exc_info.value)
+    assert "database.url" in message
+    assert "database.username" in message
+    assert "database.name" in message
 
 
 def test_settings_rejects_removed_operational_data_interval(monkeypatch) -> None:
@@ -228,8 +290,11 @@ def test_settings_rejects_removed_runtime_env(monkeypatch) -> None:
     assert "PROVISIONING_ASSIGNMENT_MODE" in message
 
 
-def test_settings_normalizes_env_base_path(monkeypatch) -> None:
+def test_settings_normalizes_env_base_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
@@ -241,8 +306,11 @@ def test_settings_normalizes_env_base_path(monkeypatch) -> None:
     assert settings.app_base_path == "/sidecar"
 
 
-def test_settings_parse_sub2api_provisioning_overrides(monkeypatch) -> None:
+def test_settings_parse_sub2api_provisioning_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
     monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")

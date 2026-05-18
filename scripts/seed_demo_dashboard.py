@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,9 +18,10 @@ from app.models.flow import (  # noqa: E402
     ProvisionFlow,
 )
 from app.models.rotation import UserGroupAssignment  # noqa: E402
-from app.stores.sqlite import SQLiteFlowStore  # noqa: E402
+from app.config import get_settings  # noqa: E402
+from app.stores.base import FlowStore  # noqa: E402
+from app.stores.postgres import PostgresFlowStore  # noqa: E402
 
-DEFAULT_DB_PATH = "/private/tmp/sub2api-sidecar-dev.db"
 DEMO_PREFIX = "demo-dashboard-"
 
 
@@ -29,25 +29,25 @@ def utc_minutes_ago(minutes: int) -> datetime:
     return datetime.now(timezone.utc) - timedelta(minutes=minutes)
 
 
-def delete_existing_demo_rows(database_path: str) -> None:
-    with sqlite3.connect(database_path) as connection:
+def delete_existing_demo_rows(store: PostgresFlowStore) -> None:
+    with store._connect() as connection:
         connection.execute(
-            "DELETE FROM provision_events WHERE flow_id LIKE ?",
+            "DELETE FROM provision_events WHERE flow_id LIKE %s",
             (f"{DEMO_PREFIX}%",),
         )
         connection.execute(
-            "DELETE FROM provision_flows WHERE flow_id LIKE ?",
+            "DELETE FROM provision_flows WHERE flow_id LIKE %s",
             (f"{DEMO_PREFIX}%",),
         )
         connection.execute(
-            "DELETE FROM user_group_assignments WHERE email LIKE ?",
+            "DELETE FROM user_group_assignments WHERE email LIKE %s",
             ("demo-dashboard-%",),
         )
         connection.commit()
 
 
 def save_event(
-    store: SQLiteFlowStore,
+    store: FlowStore,
     *,
     flow_id: str,
     event_type: ProvisionEventType,
@@ -69,7 +69,7 @@ def save_event(
     )
 
 
-def seed_completed_dedicated(store: SQLiteFlowStore) -> None:
+def seed_completed_dedicated(store: FlowStore) -> None:
     flow_id = f"{DEMO_PREFIX}completed-dedicated"
     created_at = utc_minutes_ago(95)
     updated_at = utc_minutes_ago(84)
@@ -133,7 +133,7 @@ def seed_completed_dedicated(store: SQLiteFlowStore) -> None:
     )
 
 
-def seed_pending_managed_pool(store: SQLiteFlowStore) -> None:
+def seed_pending_managed_pool(store: FlowStore) -> None:
     flow_id = f"{DEMO_PREFIX}pending-managed-pool"
     created_at = utc_minutes_ago(42)
     flow = ProvisionFlow(
@@ -169,7 +169,7 @@ def seed_pending_managed_pool(store: SQLiteFlowStore) -> None:
         )
 
 
-def seed_failed_callback(store: SQLiteFlowStore) -> None:
+def seed_failed_callback(store: FlowStore) -> None:
     flow_id = f"{DEMO_PREFIX}failed-callback"
     created_at = utc_minutes_ago(25)
     updated_at = utc_minutes_ago(20)
@@ -206,7 +206,7 @@ def seed_failed_callback(store: SQLiteFlowStore) -> None:
         )
 
 
-def seed_completed_long_detail(store: SQLiteFlowStore) -> None:
+def seed_completed_long_detail(store: FlowStore) -> None:
     flow_id = f"{DEMO_PREFIX}completed-long-detail"
     created_at = utc_minutes_ago(12)
     updated_at = utc_minutes_ago(7)
@@ -266,9 +266,9 @@ def seed_completed_long_detail(store: SQLiteFlowStore) -> None:
     )
 
 
-def seed(database_path: str) -> None:
-    store = SQLiteFlowStore(database_path)
-    delete_existing_demo_rows(database_path)
+def seed() -> None:
+    store = PostgresFlowStore(get_settings().database_url)
+    delete_existing_demo_rows(store)
     seed_completed_dedicated(store)
     seed_pending_managed_pool(store)
     seed_failed_callback(store)
@@ -277,14 +277,9 @@ def seed(database_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Seed local demo dashboard provisioning history.")
-    parser.add_argument(
-        "--db",
-        default=DEFAULT_DB_PATH,
-        help=f"SQLite database path. Defaults to {DEFAULT_DB_PATH}.",
-    )
-    args = parser.parse_args()
-    seed(args.db)
-    print(f"Seeded demo dashboard history in {args.db}")
+    parser.parse_args()
+    seed()
+    print("Seeded demo dashboard history in PostgreSQL")
 
 
 if __name__ == "__main__":

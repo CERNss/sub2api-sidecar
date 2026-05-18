@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
+import psycopg
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -28,7 +28,7 @@ from app.services.operational_data import (
     SOURCE_USER_USAGE,
     SOURCE_USERS,
 )
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class CreditControlError(Exception):
 
 
 class CreditControlService:
-    def __init__(self, store: SQLiteFlowStore, sub2api_client: Sub2APIClient) -> None:
+    def __init__(self, store: PostgresFlowStore, sub2api_client: Sub2APIClient) -> None:
         self.store = store
         self.sub2api_client = sub2api_client
 
@@ -475,7 +475,7 @@ class CreditControlService:
         )
         try:
             self.store.save_credit_run(placeholder)
-        except sqlite3.IntegrityError:
+        except psycopg.IntegrityError:
             existing = self.store.get_credit_run_by_occurrence(policy.policy_id, occurrence_key)
             if existing is not None:
                 return existing

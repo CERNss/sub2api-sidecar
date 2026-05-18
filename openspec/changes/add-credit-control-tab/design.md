@@ -11,7 +11,7 @@ Add a credit-control backend slice:
 - `Sub2APIClient` methods for listing users with balance fields, fetching usage/consumption for the existing `5h`, `1d`, `7d`, and `30d` windows, and mutating user balance through `POST /api/v1/admin/users/{id}/balance`.
 - Pydantic schemas for credit summary rows, manual adjustment requests/responses, policy CRUD, preview, run records, and audit entries.
 - A service that resolves target cohorts, validates adjustment bounds, invokes upstream mutations, redacts/sanitizes payloads, and records audit entries.
-- SQLite persistence for automatic recharge policies and recharge run/audit records.
+- PostgreSQL persistence for automatic recharge policies and recharge run/audit records.
 - Scheduler integration that evaluates due policies and reuses the same service path as manual adjustments.
 
 Add a React `余额管理` workspace:

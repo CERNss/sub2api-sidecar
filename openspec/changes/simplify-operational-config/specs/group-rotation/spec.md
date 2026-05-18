@@ -12,7 +12,7 @@ The system SHALL support separate operator-managed Landing and Rotation pools so
 #### Scenario: Operator updates provisioning assignment mode without restart
 - **GIVEN** an authenticated operator opens the provisioning UI
 - **WHEN** the operator changes assignment mode between `dedicated` and `managed_pool`
-- **THEN** the setting is saved to SQLite through an authenticated runtime settings API
+- **THEN** the setting is saved to PostgreSQL through an authenticated runtime settings API
 - **THEN** the next `POST /provision/start` uses the updated assignment mode without restarting the service
 - **THEN** the selected assignment mode is persisted on the new provisioning flow
 - **THEN** existing pending OAuth flows keep the assignment mode that was selected when they were started

@@ -3,7 +3,7 @@
 - [x] 1.1 Add new operational data runtime settings for enabled state and optional expiration seconds.
 - [x] 1.2 Deprecate the previous notification scheduler tick config path as a runtime source of truth.
 - [x] 1.3 Add operational data sample, snapshot, and source-status models.
-- [x] 1.4 Add SQLite tables and store methods for saving and reading latest operational samples and snapshots.
+- [x] 1.4 Add PostgreSQL tables and store methods for saving and reading latest operational samples and snapshots.
 - [x] 1.5 Add tests for config parsing, sample persistence, and latest-sample ordering.
 
 ## 2. Sampling Pipeline

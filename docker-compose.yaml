@@ -1,25 +1,48 @@
 services:
+  sidecar-postgres:
+    image: postgres:17-alpine
+    container_name: sidecar-postgres
+    environment:
+      POSTGRES_DB: sub2api_sidecar
+      POSTGRES_USER: sub2api_sidecar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    ports:
+      - "55432:5432"
+    networks:
+      - npm-network
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   sub2api-sidecar:
     image: cernss/sub2api-sidecar:latest
     pull_policy: always
     container_name: sub2api-sidecar
-    env_file:
-      - .env
     environment:
       CONFIG_PATH: /app/config.yaml
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      SUB2API_ADMIN_API_KEY: ${SUB2API_ADMIN_API_KEY:?SUB2API_ADMIN_API_KEY must be set in .env}
+      APP_AUTH_PASSWORD: ${APP_AUTH_PASSWORD:-}
     ports:
       - "8000:8000"
     networks:
-      - sub2api-sidecar
+      - npm-network
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ./data:/app/data
+    depends_on:
+      sidecar-postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test:
         [
           "CMD",
-          "python",
+          "python3",
           "-c",
           "import urllib.request; [urllib.request.urlopen(f'http://127.0.0.1:8000{path}') for path in ('/health', '/ping')]"
         ]
@@ -29,6 +52,8 @@ services:
       start_period: 10s
 
 networks:
-  sub2api-sidecar:
-    name: sub2api-sidecar
-    driver: bridge
+  npm-network:
+    external: true
+
+volumes:
+  postgres-data:

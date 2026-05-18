@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionEventStatus, ProvisionEventType, ProvisionFlow
 from app.models.operational_data import (
@@ -14,7 +12,7 @@ from app.models.operational_data import (
     ProvisioningRuntimeSettings,
 )
 from app.models.rotation import RotationEvent, RotationPoolGroup, RotationResultStatus, RotationTrigger, UserGroupAssignment
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 
 def build_flow() -> ProvisionFlow:
@@ -33,13 +31,12 @@ def build_flow() -> ProvisionFlow:
     )
 
 
-def test_sqlite_store_initializes_schema_and_persists_across_instances(tmp_path: Path) -> None:
-    db_path = tmp_path / "flows.db"
-
-    first_store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_initializes_schema_and_persists_across_instances(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    first_store = PostgresFlowStore(database_url)
     first_store.save(build_flow())
 
-    second_store = SQLiteFlowStore(str(db_path))
+    second_store = PostgresFlowStore(database_url)
     reloaded_by_flow_id = second_store.get_by_flow_id("flow-1")
     reloaded_by_state = second_store.get_by_state("state-1")
 
@@ -47,19 +44,12 @@ def test_sqlite_store_initializes_schema_and_persists_across_instances(tmp_path:
     assert reloaded_by_state is not None
     assert reloaded_by_flow_id.email == "user@example.com"
     assert reloaded_by_state.group_id == 456
-    assert db_path.exists()
-
-    with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'provision_flows'"
-        ).fetchone()
-
-    assert row is not None
+    assert reloaded_by_flow_id.flow_id == "flow-1"
 
 
-def test_sqlite_store_updates_persisted_flow(tmp_path: Path) -> None:
-    db_path = tmp_path / "flows.db"
-    store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_updates_persisted_flow(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    store = PostgresFlowStore(database_url)
     flow = build_flow()
     store.save(flow)
 
@@ -69,7 +59,7 @@ def test_sqlite_store_updates_persisted_flow(tmp_path: Path) -> None:
     flow.updated_at = datetime.now(timezone.utc)
     store.update(flow)
 
-    reloaded_store = SQLiteFlowStore(str(db_path))
+    reloaded_store = PostgresFlowStore(database_url)
     persisted = reloaded_store.get_by_flow_id("flow-1")
 
     assert persisted is not None
@@ -77,9 +67,9 @@ def test_sqlite_store_updates_persisted_flow(tmp_path: Path) -> None:
     assert persisted.oauth_account_id == "oa-1"
 
 
-def test_sqlite_store_lists_flows_and_persists_provision_events(tmp_path: Path) -> None:
-    db_path = tmp_path / "dashboard.db"
-    store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_lists_flows_and_persists_provision_events(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    store = PostgresFlowStore(database_url)
     first = build_flow()
     second = build_flow().model_copy(
         update={
@@ -104,7 +94,7 @@ def test_sqlite_store_lists_flows_and_persists_provision_events(tmp_path: Path) 
         )
     )
 
-    reloaded = SQLiteFlowStore(str(db_path))
+    reloaded = PostgresFlowStore(database_url)
     completed = reloaded.list_flows(status=FlowStatus.completed)
     managed_count = reloaded.count_flows(assignment_mode=AssignmentMode.managed_pool)
     matching_email = reloaded.list_flows(email="other")
@@ -117,10 +107,10 @@ def test_sqlite_store_lists_flows_and_persists_provision_events(tmp_path: Path) 
     assert events[0].event_type == ProvisionEventType.completed
 
 
-def test_sqlite_store_persists_rotation_pool_assignments_and_events(tmp_path: Path) -> None:
-    db_path = tmp_path / "rotation.db"
+def test_postgres_store_persists_rotation_pool_assignments_and_events(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
     now = datetime.now(timezone.utc)
-    first_store = SQLiteFlowStore(str(db_path))
+    first_store = PostgresFlowStore(database_url)
     first_store.upsert_rotation_pool_group(
         RotationPoolGroup(
             group_id=11,
@@ -157,7 +147,7 @@ def test_sqlite_store_persists_rotation_pool_assignments_and_events(tmp_path: Pa
         )
     )
 
-    second_store = SQLiteFlowStore(str(db_path))
+    second_store = PostgresFlowStore(database_url)
     groups = second_store.list_rotation_pool_groups()
     assignment = second_store.get_user_assignment(101)
     events = second_store.list_rotation_events()
@@ -174,9 +164,8 @@ def test_sqlite_store_persists_rotation_pool_assignments_and_events(tmp_path: Pa
     assert events[0].target_group_id == 22
 
 
-def test_sqlite_store_persists_latest_operational_metric_sample(tmp_path: Path) -> None:
-    db_path = tmp_path / "operational-samples.db"
-    store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_persists_latest_operational_metric_sample(app_env: dict[str, str]) -> None:
+    store = PostgresFlowStore(app_env["database_url"])
     older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
     newer = older + timedelta(minutes=1)
 
@@ -212,9 +201,8 @@ def test_sqlite_store_persists_latest_operational_metric_sample(tmp_path: Path) 
     assert latest.snapshot == {"version": "newer"}
 
 
-def test_sqlite_store_persists_latest_operational_data_snapshot(tmp_path: Path) -> None:
-    db_path = tmp_path / "operational-snapshots.db"
-    store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_persists_latest_operational_data_snapshot(app_env: dict[str, str]) -> None:
+    store = PostgresFlowStore(app_env["database_url"])
     older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
     newer = older + timedelta(minutes=1)
 
@@ -241,9 +229,8 @@ def test_sqlite_store_persists_latest_operational_data_snapshot(tmp_path: Path) 
     assert snapshot.payload == [{"id": "newer"}]
 
 
-def test_sqlite_store_cleans_operational_data_by_retention_cutoff(tmp_path: Path) -> None:
-    db_path = tmp_path / "operational-cleanup-retention.db"
-    store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_cleans_operational_data_by_retention_cutoff(app_env: dict[str, str]) -> None:
+    store = PostgresFlowStore(app_env["database_url"])
     older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
     newer = older + timedelta(minutes=10)
 
@@ -288,11 +275,10 @@ def test_sqlite_store_cleans_operational_data_by_retention_cutoff(tmp_path: Path
     assert store.get_latest_operational_data_snapshot("accounts").payload == [{"id": "newer"}]
 
 
-def test_sqlite_store_cleans_operational_data_by_size_without_deleting_latest_per_key(
-    tmp_path: Path,
+def test_postgres_store_cleans_operational_data_by_size_without_deleting_latest_per_key(
+    app_env: dict[str, str],
 ) -> None:
-    db_path = tmp_path / "operational-cleanup-size.db"
-    store = SQLiteFlowStore(str(db_path))
+    store = PostgresFlowStore(app_env["database_url"])
     older = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
     newer = older + timedelta(minutes=10)
 
@@ -347,9 +333,8 @@ def test_sqlite_store_cleans_operational_data_by_size_without_deleting_latest_pe
     assert store.get_latest_operational_data_snapshot("accounts").payload[0]["id"] == "newer"
 
 
-def test_sqlite_store_upserts_operational_source_status(tmp_path: Path) -> None:
-    db_path = tmp_path / "operational-statuses.db"
-    store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_upserts_operational_source_status(app_env: dict[str, str]) -> None:
+    store = PostgresFlowStore(app_env["database_url"])
     started_at = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
 
     store.save_operational_data_source_status(
@@ -380,9 +365,8 @@ def test_sqlite_store_upserts_operational_source_status(tmp_path: Path) -> None:
     assert statuses[0].item_count == 3
 
 
-def test_sqlite_store_persists_runtime_settings(tmp_path: Path) -> None:
-    db_path = tmp_path / "runtime-settings.db"
-    store = SQLiteFlowStore(str(db_path))
+def test_postgres_store_persists_runtime_settings(app_env: dict[str, str]) -> None:
+    store = PostgresFlowStore(app_env["database_url"])
     now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
 
     store.save_operational_data_runtime_settings(

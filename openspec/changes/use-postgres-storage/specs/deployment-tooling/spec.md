@@ -9,7 +9,8 @@ The project SHALL include Docker Compose configuration for running the service l
 - **THEN** the compose configuration reads secrets from `.env`
 - **THEN** the compose configuration mounts `config.yaml` into the container
 - **THEN** host port `8000` maps to container port `8000`
+- **THEN** the compose configuration starts a PostgreSQL Alpine container
+- **THEN** the sidecar reads PostgreSQL url, port, username, and database name from `config.yaml`
+- **THEN** the sidecar reads `POSTGRES_PASSWORD` from `.env`
+- **THEN** the sidecar assembles its PostgreSQL connection string internally
 - **THEN** PostgreSQL data persists through a named Docker volume
-- **THEN** deployment config contains no `auto_rotation`, `credit_control`, or `operational_data` runtime sections
-- **THEN** deployment config contains no `provisioning.assignment_mode` runtime setting
-- **THEN** removed runtime scheduler, switch, expiration, or policy fields in deployment config prevent startup instead of being ignored

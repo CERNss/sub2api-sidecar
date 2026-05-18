@@ -6,7 +6,7 @@ Notification evaluation currently pulls upstream Sub2API data inside each rule e
 
 - Replace the previous per-rule live collector design with a shared operational data pipeline: collect upstream data, persist local snapshots and metrics, then let notifications evaluate rules from local samples.
 - Use neutral operational data runtime settings for collection enablement and data expiration.
-- Add a periodic operational data collection stage that fetches the required Sub2API datasets on a fixed cadence and persists raw snapshots plus normalized metric samples into SQLite.
+- Add a periodic operational data collection stage that fetches the required Sub2API datasets on a fixed cadence and persists raw snapshots plus normalized metric samples into PostgreSQL.
 - Change scheduled rule evaluation to read the latest persisted local samples instead of calling upstream collectors per rule.
 - Preserve on-demand evaluation semantics while making it use the same local sample source after an immediate sampling refresh.
 - Expose sampling status, per-source status, and expired/error information through the existing scheduler status path.
@@ -21,8 +21,8 @@ Notification evaluation currently pulls upstream Sub2API data inside each rule e
 
 ## Impact
 
-- Affected code: notification services, the old collector integration, scheduler, SQLite store, API status schemas, tests, and runtime-settings docs.
+- Affected code: notification services, the old collector integration, scheduler, PostgreSQL store, API status schemas, tests, and runtime-settings docs.
 - Affected APIs: `GET /api/operational-data/status` exposes sampling status fields; `POST /notifications/evaluate` refreshes local samples before evaluating a single rule.
-- Runtime settings: the pipeline uses only the SQLite-backed operational data runtime settings.
-- Storage: adds durable operational data snapshot, metric sample, and source-status tables to SQLite.
+- Runtime settings: the pipeline uses only the PostgreSQL-backed operational data runtime settings.
+- Storage: adds durable operational data snapshot, metric sample, and source-status tables to PostgreSQL.
 - No breaking API removals are expected.

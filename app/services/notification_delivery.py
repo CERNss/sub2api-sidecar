@@ -23,7 +23,7 @@ from app.models.notification import (
     WebhookMethod,
     WebhookProvider,
 )
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +315,7 @@ def build_request(
 class NotificationDeliveryService:
     def __init__(
         self,
-        store: SQLiteFlowStore,
+        store: PostgresFlowStore,
         session: requests.Session | None = None,
         timeout_seconds: float = 10.0,
     ) -> None:

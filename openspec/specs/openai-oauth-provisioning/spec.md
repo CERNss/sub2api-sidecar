@@ -68,7 +68,7 @@ The system SHALL complete OpenAI OAuth from the stored flow context by accepting
 #### Scenario: Paste-back still works after application restart
 - **GIVEN** a provisioning flow has been persisted before the user finishes OAuth
 - **WHEN** the application process restarts and the user later submits the pasted localhost callback URL
-- **THEN** the system loads the persisted flow from SQLite
+- **THEN** the system loads the persisted flow from PostgreSQL
 - **THEN** the system completes the OAuth binding workflow without requiring the flow to remain in memory
 
 ### Requirement: Provide a minimal manual OAuth handoff page
@@ -122,8 +122,8 @@ The system SHALL provide a lightweight admin authentication flow for the local s
 - **THEN** the system returns an authentication error
 - **THEN** the provisioning flow does not start or continue
 
-### Requirement: Use centralized admin API integration and pluggable flow storage
-The system SHALL centralize Sub2API admin API calls behind a client abstraction, SHALL authenticate those requests with `x-api-key`, and SHALL persist flow context in SQLite by default while preserving a store abstraction for future backend changes.
+### Requirement: Use centralized admin API integration and PostgreSQL flow storage
+The system SHALL centralize Sub2API admin API calls behind a client abstraction, SHALL authenticate those requests with `x-api-key`, and SHALL persist flow context in PostgreSQL.
 
 #### Scenario: File config and environment secrets drive admin API requests and OAuth redirect selection
 - **GIVEN** the service starts with configured `config.yaml` settings and environment secrets
@@ -132,24 +132,25 @@ The system SHALL centralize Sub2API admin API calls behind a client abstraction,
 - **THEN** the client reads the configured OpenAI group/account defaults and temporary-unschedulable rules from config-backed settings
 - **THEN** the client sends admin requests with `x-api-key`
 - **THEN** the OAuth login URL generation and OAuth code exchange do not send a redirect URI to Sub2API
-- **THEN** the flow store reads the SQLite database path from configuration
+- **THEN** the flow store receives an internally assembled PostgreSQL connection string from structured `database` config and `POSTGRES_PASSWORD`
 
-#### Scenario: SQLite persistence survives new store instances
-- **GIVEN** the provisioning service stores a flow record in SQLite
-- **WHEN** a new store instance opens the same SQLite database file
+#### Scenario: PostgreSQL persistence survives new store instances
+- **GIVEN** the provisioning service stores a flow record in PostgreSQL
+- **WHEN** a new store instance connects to the same PostgreSQL database
 - **THEN** the new store instance can load the saved flow by `flow_id`
 - **THEN** the new store instance can load the saved flow by `state`
 - **THEN** the stored status and orchestration context remain intact
 
 #### Scenario: Database schema initializes automatically
-- **GIVEN** the configured SQLite database file does not yet contain the flow table
-- **WHEN** the application initializes the SQLite flow store
+- **GIVEN** the configured PostgreSQL database does not yet contain the flow table
+- **WHEN** the application initializes the PostgreSQL flow store
 - **THEN** the required schema is created automatically before the store is used
 
-#### Scenario: Store abstraction remains replaceable
-- **GIVEN** the provisioning service stores and loads flow records through a store interface
-- **WHEN** the project later switches from SQLite to Redis or another database backend
-- **THEN** the orchestration flow can be preserved by replacing the store implementation without rewriting the controller or provisioning workflow requirements
+#### Scenario: Removed database configuration is not accepted
+- **GIVEN** a deployment still provides `storage.sqlite_db_path`, `SQLITE_DB_PATH`, `DATABASE_URL`, `POSTGRES_DB`, or `POSTGRES_USER`
+- **WHEN** the application loads settings
+- **THEN** startup fails with a configuration error
+- **THEN** the system does not fall back to SQLite
 
 ### Requirement: Surface basic provisioning failures to the caller
 The system SHALL log key orchestration steps and SHALL return basic error responses when validation, configuration, or Sub2API admin calls fail.
@@ -162,14 +163,14 @@ The system SHALL log key orchestration steps and SHALL return basic error respon
 - **THEN** the manual handoff page can surface completion errors returned by the JSON APIs for browser users
 
 ### Requirement: Automated tests cover provisioning workflows
-The system SHALL include automated tests that verify SQLite flow persistence, ephemeral admin authentication, and the primary provisioning HTTP workflows with Sub2API admin interactions mocked.
+The system SHALL include automated tests that verify PostgreSQL flow persistence, ephemeral admin authentication, and the primary provisioning HTTP workflows with Sub2API admin interactions mocked.
 
 #### Scenario: Automated tests verify login, protected APIs, and paste-back completion behavior
 - **GIVEN** the test suite runs against the application with mocked Sub2API admin responses
 - **WHEN** the suite exercises login, protected API access, `POST /provision/start`, and `POST /provision/oauth/complete`
 - **THEN** the tests verify successful login, unauthenticated failure handling, provisioning responses, paste-back OAuth completion behavior, and failure handling
 
-#### Scenario: Automated tests verify SQLite persistence behavior
-- **GIVEN** the test suite runs against the SQLite flow store
+#### Scenario: Automated tests verify PostgreSQL persistence behavior
+- **GIVEN** the test suite runs against the PostgreSQL flow store
 - **WHEN** the suite saves and reloads flow records through separate store instances
 - **THEN** the tests verify flow state remains available across instances and updates persist correctly

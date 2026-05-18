@@ -24,7 +24,7 @@ from app.models.flow import (
 )
 from app.models.rotation import RotationPoolKind
 from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class ProvisioningService:
     def __init__(
         self,
-        flow_store: SQLiteFlowStore,
+        flow_store: PostgresFlowStore,
         sub2api_client: Sub2APIClient,
         openai_oauth_redirect_uri: str,
         assignment_mode_provider: Callable[[], AssignmentMode] | None = None,

@@ -31,7 +31,7 @@ from app.services.notification_collector import (
     _usage_log_error_spike_sample,
     _usage_snapshot,
 )
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class OperationalDataCollector:
         self,
         *,
         client: Sub2APIClient,
-        store: SQLiteFlowStore,
+        store: PostgresFlowStore,
         timezone_name: str = LOCAL_TIMEZONE,
     ) -> None:
         self.client = client

@@ -938,7 +938,7 @@ def test_provision_start_requires_auth(client) -> None:
     assert payload["detail"] == "Authentication required"
 
 
-def test_provision_start_persists_flow_in_sqlite_with_cookie_auth(client) -> None:
+def test_provision_start_persists_flow_in_postgres_with_cookie_auth(client) -> None:
     login(client)
 
     with patch.object(requests.Session, "request", new=fake_sub2api_request):

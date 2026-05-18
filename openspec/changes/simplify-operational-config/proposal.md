@@ -5,11 +5,11 @@ The deployment config still exposes runtime scheduler switches, provisioning ass
 ## What Changes
 
 - **BREAKING** Remove deployment-config support for `auto_rotation`, `credit_control`, `operational_data`, and `provisioning.assignment_mode` runtime settings entirely.
-- Store provisioning runtime settings (`assignment_mode`) in SQLite and expose them through authenticated API/UI.
-- Store operational-data runtime settings (`enabled`, `collect_interval_seconds`, optional `expiration`, optional `retention_seconds`, optional `max_storage_mb`) in SQLite and expose them through authenticated API/UI.
-- Store credit-control scheduler runtime settings (`enabled`) in SQLite and expose them through authenticated API/UI.
+- Store provisioning runtime settings (`assignment_mode`) in PostgreSQL and expose them through authenticated API/UI.
+- Store operational-data runtime settings (`enabled`, `collect_interval_seconds`, optional `expiration`, optional `retention_seconds`, optional `max_storage_mb`) in PostgreSQL and expose them through authenticated API/UI.
+- Store credit-control scheduler runtime settings (`enabled`) in PostgreSQL and expose them through authenticated API/UI.
 - Keep automatic-rotation execution enabled state and policy fields on the authenticated dynamic orchestration API/UI.
-- Use a default 60 second operational cadence for background scheduler loops, with operational-data collection cadence adjustable only through the authenticated runtime settings API/UI. Schedulers are process services; each tick reads current SQLite runtime settings before doing work.
+- Use a default 60 second operational cadence for background scheduler loops, with operational-data collection cadence adjustable only through the authenticated runtime settings API/UI. Schedulers are process services; each tick reads current PostgreSQL runtime settings before doing work.
 - Route notification, credit-control, and automatic-orchestration read/decision inputs through the neutral operational-data snapshot/metric layer wherever upstream state is required. Upstream mutation APIs remain direct write operations.
 - Update docs, examples, and tests so removed fields are absent rather than silently ignored.
 
@@ -25,6 +25,6 @@ The deployment config still exposes runtime scheduler switches, provisioning ass
 
 ## Impact
 
-- Affected code: settings parsing, SQLite runtime settings, FastAPI runtime settings endpoints, scheduler startup/status, provisioning assignment lookup, notification expiration lookup, credit-control scheduling, rotation runtime defaults, UI settings controls, tests, README, and `config.example.yaml`.
+- Affected code: settings parsing, PostgreSQL runtime settings, FastAPI runtime settings endpoints, scheduler startup/status, provisioning assignment lookup, notification expiration lookup, credit-control scheduling, rotation runtime defaults, UI settings controls, tests, README, and `config.example.yaml`.
 - Affected config: removed sections include `auto_rotation`, `credit_control`, `operational_data`, and `provisioning`; removed env vars include their previous scheduler/policy/runtime equivalents.
 - Affected operators: existing `config.yaml` files must remove those sections and configure runtime switches from the authenticated web UI/API.

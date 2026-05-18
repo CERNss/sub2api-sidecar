@@ -385,7 +385,7 @@ jobs:
 
               trap cleanup EXIT
 
-              python -m compileall app tests
+              python3 -m compileall app tests
               pytest
             '
 
@@ -675,8 +675,8 @@ jobs:
           WORKDIR /app
 
           COPY release/requirements.txt ./
-          RUN python -m pip install --no-cache-dir --upgrade pip \
-              && python -m pip install --no-cache-dir -r requirements.txt
+          RUN python3 -m pip install --no-cache-dir --upgrade pip \
+              && python3 -m pip install --no-cache-dir -r requirements.txt
 
           COPY release/app ./app
           COPY release/config.example.yaml ./config.example.yaml

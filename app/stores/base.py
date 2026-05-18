@@ -6,7 +6,7 @@ from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, Provisio
 
 
 class FlowStore(ABC):
-    """Abstract flow persistence interface. SQLite is the default implementation."""
+    """Abstract flow persistence interface for the PostgreSQL-backed runtime store."""
 
     @abstractmethod
     def save(self, flow: ProvisionFlow) -> ProvisionFlow:

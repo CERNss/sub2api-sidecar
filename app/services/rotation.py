@@ -27,7 +27,7 @@ from app.services.operational_data import (
     SOURCE_USER_USAGE,
     SOURCE_USERS,
 )
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class _PreconditionBlock:
 class RotationService:
     def __init__(
         self,
-        store: SQLiteFlowStore,
+        store: PostgresFlowStore,
         sub2api_client: Sub2APIClient,
         settings: Settings,
     ) -> None:

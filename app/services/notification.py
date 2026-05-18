@@ -33,7 +33,7 @@ from app.services.operational_data import (
     OperationalDataCollectionResult,
     OperationalDataCollector,
 )
-from app.stores.sqlite import SQLiteFlowStore
+from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ SCOPED_SIGNAL_KEYS = {"user_balance_low"}
 class NotificationService:
     def __init__(
         self,
-        store: SQLiteFlowStore,
+        store: PostgresFlowStore,
         delivery: NotificationDeliveryService,
         operational_data_collector: OperationalDataCollector | None = None,
     ) -> None:
