@@ -368,10 +368,51 @@ jobs:
           set -euo pipefail
 
           IMAGE="${VALIDATION_IMAGE}"
+          POSTGRES_IMAGE="postgres:17-alpine"
+          VALIDATION_NETWORK="sub2api-sidecar-validate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          POSTGRES_CONTAINER="sub2api-sidecar-validate-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          cleanup_validation() {
+            docker rm -f "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
+            docker network rm "${VALIDATION_NETWORK}" >/dev/null 2>&1 || true
+          }
+
+          trap cleanup_validation EXIT
+
           docker pull "${IMAGE}"
+          docker pull "${POSTGRES_IMAGE}"
+          docker network create "${VALIDATION_NETWORK}"
+
+          docker run -d \
+            --name "${POSTGRES_CONTAINER}" \
+            --network "${VALIDATION_NETWORK}" \
+            -e POSTGRES_DB=sub2api_sidecar_test \
+            -e POSTGRES_USER=sub2api_sidecar \
+            -e POSTGRES_PASSWORD=sub2api_sidecar_test \
+            "${POSTGRES_IMAGE}"
+
+          for attempt in $(seq 1 30); do
+            if docker exec "${POSTGRES_CONTAINER}" pg_isready -U sub2api_sidecar -d sub2api_sidecar_test >/dev/null 2>&1; then
+              break
+            fi
+            if [ "${attempt}" -eq 30 ]; then
+              docker logs "${POSTGRES_CONTAINER}" || true
+              echo "PostgreSQL did not become ready for validation."
+              exit 1
+            fi
+            sleep 1
+          done
 
           docker run --rm \
             -u "$(id -u):$(id -g)" \
+            --network "${VALIDATION_NETWORK}" \
+            -e HOME=/tmp/python-home \
+            -e PIP_CACHE_DIR=/tmp/pip-cache \
+            -e TEST_POSTGRES_URL="${POSTGRES_CONTAINER}" \
+            -e TEST_POSTGRES_PORT=5432 \
+            -e TEST_POSTGRES_USERNAME=sub2api_sidecar \
+            -e TEST_POSTGRES_NAME=sub2api_sidecar_test \
+            -e TEST_POSTGRES_PASSWORD=sub2api_sidecar_test \
             -v "${PWD}:/work" \
             -w /work \
             "${IMAGE}" \
@@ -385,8 +426,10 @@ jobs:
 
               trap cleanup EXIT
 
+              python3 -m pip install --user --upgrade pip
+              python3 -m pip install --user -r requirements.txt -r requirements-dev.txt
               python3 -m compileall app tests
-              pytest
+              python3 -m pytest
             '
 
   build_linux:
