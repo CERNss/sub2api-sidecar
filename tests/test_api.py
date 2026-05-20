@@ -31,6 +31,7 @@ from app.models.rotation import (
     UserGroupAssignment,
 )
 from app.services.credit_scheduler import CreditControlScheduler
+from app.services.group_usage import GroupUsageService
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.services.usage_segmentation import UsageSegmentationService
 
@@ -217,6 +218,68 @@ class FakeRotationSub2API:
         self.api_key_group_calls: list[dict[str, object]] = []
         self.balance_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
+        self.group_usage_by_window = {
+            "1d": [
+                {
+                    "group_id": 11,
+                    "group_name": "rotation-low",
+                    "requests": 5,
+                    "total_tokens": 1000,
+                    "cost": 1.0,
+                    "actual_cost": 1.0,
+                    "account_cost": 1.0,
+                },
+                {
+                    "group_id": 22,
+                    "group_name": "rotation-high",
+                    "requests": 20,
+                    "total_tokens": 4000,
+                    "cost": 4.0,
+                    "actual_cost": 4.0,
+                    "account_cost": 4.0,
+                },
+            ],
+            "7d": [
+                {
+                    "group_id": 11,
+                    "group_name": "rotation-low",
+                    "requests": 35,
+                    "total_tokens": 7000,
+                    "cost": 7.0,
+                    "actual_cost": 7.0,
+                    "account_cost": 7.0,
+                },
+                {
+                    "group_id": 22,
+                    "group_name": "rotation-high",
+                    "requests": 70,
+                    "total_tokens": 14000,
+                    "cost": 14.0,
+                    "actual_cost": 14.0,
+                    "account_cost": 14.0,
+                },
+            ],
+            "30d": [
+                {
+                    "group_id": 11,
+                    "group_name": "rotation-low",
+                    "requests": 150,
+                    "total_tokens": 30000,
+                    "cost": 30.0,
+                    "actual_cost": 30.0,
+                    "account_cost": 30.0,
+                },
+                {
+                    "group_id": 22,
+                    "group_name": "rotation-high",
+                    "requests": 300,
+                    "total_tokens": 60000,
+                    "cost": 60.0,
+                    "actual_cost": 60.0,
+                    "account_cost": 60.0,
+                },
+            ],
+        }
 
     def request(self, method: str, url: str, json=None, params=None, timeout=None):
         path = urlparse(url).path
@@ -370,6 +433,39 @@ class FakeRotationSub2API:
                     "data": {"total_actual_cost": 88.5, "total_requests": 10},
                 },
             )
+        if method == "GET" and path == "/api/v1/admin/dashboard/groups":
+            window_days = {
+                "1d": 1,
+                "7d": 7,
+                "30d": 30,
+            }
+            start_date = str((params or {}).get("start_date") or "")
+            end_date = str((params or {}).get("end_date") or "")
+            days = None
+            try:
+                parsed_start = datetime.fromisoformat(start_date).date()
+                parsed_end = datetime.fromisoformat(end_date).date()
+                days = (parsed_end - parsed_start).days + 1
+            except ValueError:
+                days = None
+            window = next(
+                (key for key, value in window_days.items() if value == days),
+                "1d",
+            )
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "groups": self.group_usage_by_window.get(window, []),
+                        "total_actual_cost": sum(
+                            float(item.get("actual_cost") or 0.0)
+                            for item in self.group_usage_by_window.get(window, [])
+                        ),
+                    },
+                },
+            )
         return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
 
     def _api_keys_response(self, user_id: int) -> FakeResponse:
@@ -413,6 +509,7 @@ def clear_caches() -> None:
     main.get_notification_service.cache_clear()
     main.get_credit_control_service.cache_clear()
     main.get_usage_segmentation_service.cache_clear()
+    main.get_group_usage_service.cache_clear()
 
 
 def save_auto_rotation_config(
@@ -508,6 +605,92 @@ def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
         "groups": groups,
         "users": users,
         "user_usage": user_usage,
+        "group_usage": {
+            "11": {
+                "5h": {
+                    "group_id": 11,
+                    "window": "5h",
+                    "total_requests": 1,
+                    "total_tokens": 100,
+                    "total_cost": 0.2,
+                    "total_actual_cost": 0.2,
+                    "total_account_cost": 0.2,
+                    "source": "usage_logs",
+                },
+                "1d": {
+                    "group_id": 11,
+                    "window": "1d",
+                    "total_requests": 5,
+                    "total_tokens": 1000,
+                    "total_cost": 1.0,
+                    "total_actual_cost": 1.0,
+                    "total_account_cost": 1.0,
+                    "source": "dashboard_groups",
+                },
+                "7d": {
+                    "group_id": 11,
+                    "window": "7d",
+                    "total_requests": 35,
+                    "total_tokens": 7000,
+                    "total_cost": 7.0,
+                    "total_actual_cost": 7.0,
+                    "total_account_cost": 7.0,
+                    "source": "dashboard_groups",
+                },
+                "30d": {
+                    "group_id": 11,
+                    "window": "30d",
+                    "total_requests": 150,
+                    "total_tokens": 30000,
+                    "total_cost": 30.0,
+                    "total_actual_cost": 30.0,
+                    "total_account_cost": 30.0,
+                    "source": "dashboard_groups",
+                },
+            },
+            "22": {
+                "5h": {
+                    "group_id": 22,
+                    "window": "5h",
+                    "total_requests": 2,
+                    "total_tokens": 200,
+                    "total_cost": 1.7,
+                    "total_actual_cost": 1.7,
+                    "total_account_cost": 1.7,
+                    "source": "usage_logs",
+                },
+                "1d": {
+                    "group_id": 22,
+                    "window": "1d",
+                    "total_requests": 20,
+                    "total_tokens": 4000,
+                    "total_cost": 4.0,
+                    "total_actual_cost": 4.0,
+                    "total_account_cost": 4.0,
+                    "source": "dashboard_groups",
+                },
+                "7d": {
+                    "group_id": 22,
+                    "window": "7d",
+                    "total_requests": 70,
+                    "total_tokens": 14000,
+                    "total_cost": 14.0,
+                    "total_actual_cost": 14.0,
+                    "total_account_cost": 14.0,
+                    "source": "dashboard_groups",
+                },
+                "30d": {
+                    "group_id": 22,
+                    "window": "30d",
+                    "total_requests": 300,
+                    "total_tokens": 60000,
+                    "total_cost": 60.0,
+                    "total_actual_cost": 60.0,
+                    "total_account_cost": 60.0,
+                    "source": "dashboard_groups",
+                },
+            },
+        },
         "user_api_keys": user_api_keys,
     }.items():
         store.save_operational_data_snapshot(
@@ -1460,6 +1643,31 @@ def test_usage_segmentation_apis_require_auth_and_refresh(client) -> None:
     assert scheduler.status_code == 200
 
 
+def test_group_usage_apis_require_auth_and_refresh(client) -> None:
+    backend = FakeRotationSub2API()
+    unauthenticated = client.get("/api/group-usage/groups")
+    login(client)
+    save_operational_snapshots(backend)
+
+    refresh = client.post("/api/group-usage/refresh")
+    groups = client.get("/api/group-usage/groups")
+    scheduler = client.get("/api/group-usage/scheduler")
+
+    assert unauthenticated.status_code == 401
+    assert refresh.status_code == 200
+    assert refresh.json()["group_count"] == 4
+    assert refresh.json()["window_counts"]["5h"] >= 2
+    assert groups.status_code == 200
+    payload = groups.json()
+    assert payload["total"] == 4
+    by_id = {str(item["group_id"]): item for item in payload["items"]}
+    assert by_id["11"]["group_name"] == "rotation-low"
+    assert by_id["11"]["usage_by_window"]["5h"] == 0.2
+    assert by_id["11"]["source_by_window"]["1d"] == "dashboard_groups"
+    assert scheduler.status_code == 200
+    assert scheduler.json()["cadence_seconds"] > 0
+
+
 def test_credit_control_manual_adjustment_preview_execute_and_audit(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
@@ -2344,6 +2552,110 @@ def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -
     assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
     assert backend.replace_calls == [
         {"user_id": 101, "old_group_id": 22, "new_group_id": "11"}
+    ]
+
+
+def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 11
+    backend.users[0]["group_name"] = "rotation-low"
+    backend.users[1]["group_id"] = 11
+    backend.users[1]["group_name"] = "rotation-low"
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        store.save_operational_data_snapshot(
+            OperationalDataSnapshot(
+                source_key="group_usage",
+                observed_at=datetime.now(timezone.utc),
+                collected_at=datetime.now(timezone.utc),
+                payload={
+                    "11": {
+                        "5h": {
+                            "group_id": 11,
+                            "window": "5h",
+                            "total_actual_cost": 3.0,
+                            "total_requests": 30,
+                            "total_tokens": 3000,
+                            "source": "usage_logs",
+                        }
+                    },
+                    "22": {
+                        "5h": {
+                            "group_id": 22,
+                            "window": "5h",
+                            "total_actual_cost": 0.2,
+                            "total_requests": 2,
+                            "total_tokens": 200,
+                            "source": "usage_logs",
+                        }
+                    },
+                },
+            )
+        )
+        UsageSegmentationService(store).refresh()
+        GroupUsageService(store).refresh()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=202,
+                email="idle@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["moved"]) == 1
+    assert payload["moved"][0]["source_group_id"] == 11
+    assert payload["moved"][0]["target_group_id"] == "22"
+    assert payload["moved"][0]["metadata"]["source_group_load_before"] == 3.0
+    assert payload["moved"][0]["metadata"]["target_group_load_before"] == 0.2
+    assert payload["moved"][0]["metadata"]["source_group_load_source"] == "group_usage:usage_logs"
+    assert payload["moved"][0]["metadata"]["target_group_load_source"] == "group_usage:usage_logs"
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 11, "new_group_id": "22"}
     ]
 
 

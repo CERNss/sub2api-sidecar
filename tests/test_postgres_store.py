@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionEventStatus, ProvisionEventType, ProvisionFlow
+from app.models.group_usage import GroupUsageSegmentRecord
 from app.models.operational_data import (
     CreditControlRuntimeSettings,
     OperationalDataRuntimeSettings,
@@ -228,6 +229,39 @@ def test_postgres_store_persists_latest_operational_data_snapshot(app_env: dict[
 
     assert snapshot is not None
     assert snapshot.payload == [{"id": "newer"}]
+
+
+def test_postgres_store_persists_group_usage_segments(app_env: dict[str, str]) -> None:
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store = PostgresFlowStore(app_env["database_url"])
+    store.upsert_group_usage_segment(
+        GroupUsageSegmentRecord(
+            group_id=11,
+            group_name="rotation-low",
+            member_count=2,
+            usage_by_window={"5h": 1.5, "1d": 4.0},
+            daily_average_by_window={"5h": 7.2, "1d": 4.0},
+            request_count_by_window={"5h": 2, "1d": 10},
+            source_by_window={"5h": "usage_logs", "1d": "dashboard_groups"},
+            observed_at=now,
+            refreshed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    reloaded = PostgresFlowStore(app_env["database_url"])
+    record = reloaded.get_group_usage_segment("11")
+    records = reloaded.list_group_usage_segments()
+
+    assert record is not None
+    assert record.group_id == 11
+    assert record.group_name == "rotation-low"
+    assert record.member_count == 2
+    assert record.usage_by_window["5h"] == 1.5
+    assert record.source_by_window["1d"] == "dashboard_groups"
+    assert reloaded.count_group_usage_segments() == 1
+    assert [item.group_id for item in records] == [11]
 
 
 def test_postgres_store_cleans_operational_data_by_retention_cutoff(app_env: dict[str, str]) -> None:

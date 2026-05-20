@@ -40,6 +40,7 @@ SOURCE_GROUPS = "groups"
 SOURCE_USERS = "users"
 SOURCE_USER_USAGE = "user_usage"
 SOURCE_USER_API_KEYS = "user_api_keys"
+SOURCE_GROUP_USAGE = "group_usage"
 SOURCE_USAGE_LOGS_CURRENT_DAY = "usage_logs_current_day"
 SOURCE_USAGE_LOGS_PREVIOUS_DAY = "usage_logs_previous_day"
 SOURCE_USAGE_CURRENT_DAY = "usage_current_day"
@@ -122,6 +123,15 @@ class OperationalDataCollector:
             ),
             item_count=_mapping_item_count,
         )
+        group_usage, group_usage_status = self._fetch_source(
+            SOURCE_GROUP_USAGE,
+            lambda: self._fetch_group_usage(
+                groups,
+                recent_logs=current_usage_logs,
+                local_now=local_now,
+            ),
+            item_count=_mapping_item_count,
+        )
         user_api_keys, user_api_keys_status = self._fetch_source(
             SOURCE_USER_API_KEYS,
             lambda: self._fetch_user_api_keys(users),
@@ -155,6 +165,7 @@ class OperationalDataCollector:
             current_usage_logs_status,
             previous_usage_logs_status,
             user_usage_status,
+            group_usage_status,
             user_api_keys_status,
             current_usage_status,
             previous_usage_status,
@@ -175,6 +186,7 @@ class OperationalDataCollector:
             current_usage_logs=current_usage_logs,
             previous_usage_logs=previous_usage_logs,
             user_usage=user_usage,
+            group_usage=group_usage,
             user_api_keys=user_api_keys,
             current_usage=current_usage,
             previous_usage=previous_usage,
@@ -306,6 +318,74 @@ class OperationalDataCollector:
             )
             result[window] = _ranking_usage_by_user_id(
                 ranking,
+                window=window,
+                start_date=start_date,
+                end_date=end_date,
+                local_now=local_now,
+            )
+        return result
+
+    def _fetch_group_usage(
+        self,
+        groups: list[dict[str, Any]] | None,
+        *,
+        recent_logs: dict[str, Any] | None,
+        local_now: datetime,
+    ) -> dict[str, dict[str, Any]]:
+        if not groups:
+            return {}
+        recent_logs_by_group_id = _usage_logs_by_group_id(recent_logs or {})
+        rankings_by_window = self._fetch_group_usage_rankings(local_now=local_now)
+        result: dict[str, dict[str, Any]] = {}
+        for group in groups:
+            group_id = group.get("id")
+            if group_id in (None, ""):
+                continue
+            usage_by_window: dict[str, Any] = {}
+            for window in USER_USAGE_WINDOWS:
+                try:
+                    if window == "5h":
+                        usage_by_window[window] = _aggregate_group_usage_logs(
+                            recent_logs_by_group_id.get(str(group_id), []),
+                            group_id=group_id,
+                            window=window,
+                            local_now=local_now,
+                        )
+                    else:
+                        usage_by_window[window] = rankings_by_window.get(window, {}).get(
+                            str(group_id),
+                            _empty_group_usage_stats(
+                                group_id=group_id,
+                                window=window,
+                                local_now=local_now,
+                            ),
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Operational group usage fetch failed | group_id=%s window=%s error=%s",
+                        group_id,
+                        window,
+                        exc,
+                    )
+                    usage_by_window[window] = {"error": str(exc)}
+            result[str(group_id)] = usage_by_window
+        return result
+
+    def _fetch_group_usage_rankings(
+        self,
+        *,
+        local_now: datetime,
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        result: dict[str, dict[str, dict[str, Any]]] = {}
+        for window in ("1d", "7d", "30d"):
+            start_date, end_date = _user_usage_date_range(window, local_now)
+            group_stats = self.client.get_group_usage_stats(
+                start_date=start_date,
+                end_date=end_date,
+                timezone_name=self.timezone_name,
+            )
+            result[window] = _group_usage_by_group_id(
+                group_stats,
                 window=window,
                 start_date=start_date,
                 end_date=end_date,
@@ -449,6 +529,7 @@ class OperationalDataCollector:
         current_usage_logs: dict[str, Any] | None,
         previous_usage_logs: dict[str, Any] | None,
         user_usage: dict[str, dict[str, Any]] | None,
+        group_usage: dict[str, dict[str, Any]] | None,
         user_api_keys: dict[str, dict[str, Any]] | None,
         current_usage: dict[str, Any] | None,
         previous_usage: dict[str, Any] | None,
@@ -460,6 +541,7 @@ class OperationalDataCollector:
             SOURCE_USAGE_LOGS_CURRENT_DAY: current_usage_logs,
             SOURCE_USAGE_LOGS_PREVIOUS_DAY: previous_usage_logs,
             SOURCE_USER_USAGE: user_usage,
+            SOURCE_GROUP_USAGE: group_usage,
             SOURCE_USER_API_KEYS: user_api_keys,
             SOURCE_USAGE_CURRENT_DAY: current_usage,
             SOURCE_USAGE_PREVIOUS_DAY: previous_usage,
@@ -526,6 +608,26 @@ def _usage_logs_by_user_id(logs: dict[str, Any]) -> dict[str, list[dict[str, Any
     return grouped
 
 
+def _usage_logs_by_group_id(logs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in logs.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        group_id = item.get("group_id")
+        if group_id in (None, ""):
+            group = item.get("group")
+            if isinstance(group, dict):
+                group_id = group.get("id") or group.get("group_id")
+        if group_id in (None, ""):
+            api_key = item.get("api_key")
+            if isinstance(api_key, dict):
+                group_id = api_key.get("group_id")
+        if group_id in (None, ""):
+            continue
+        grouped.setdefault(str(group_id), []).append(item)
+    return grouped
+
+
 def _ranking_usage_by_user_id(
     ranking: dict[str, Any],
     *,
@@ -564,6 +666,42 @@ def _ranking_usage_by_user_id(
     return result
 
 
+def _group_usage_by_group_id(
+    group_stats: dict[str, Any],
+    *,
+    window: str,
+    start_date: date,
+    end_date: date,
+    local_now: datetime,
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    rows = group_stats.get("groups", [])
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        group_id = row.get("group_id")
+        if group_id in (None, ""):
+            continue
+        result[str(group_id)] = {
+            "group_id": group_id,
+            "group_name": row.get("group_name"),
+            "window": window,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "window_started_at": _user_usage_window_start(window, local_now).isoformat(),
+            "window_finished_at": local_now.isoformat(),
+            "total_requests": int(_number(row, "requests", "total_requests") or 0),
+            "total_tokens": int(_number(row, "total_tokens", "tokens") or 0),
+            "total_cost": _number(row, "cost", "total_cost") or 0.0,
+            "total_actual_cost": _number(row, "actual_cost", "total_actual_cost") or 0.0,
+            "total_account_cost": _number(row, "account_cost", "total_account_cost") or 0.0,
+            "source": "dashboard_groups",
+        }
+    return result
+
+
 def _empty_user_usage_stats(
     *,
     user_id: Any,
@@ -586,6 +724,29 @@ def _empty_user_usage_stats(
         "total_cost": 0.0,
         "total_actual_cost": 0.0,
         "source": "dashboard_users_ranking",
+    }
+
+
+def _empty_group_usage_stats(
+    *,
+    group_id: Any,
+    window: str,
+    local_now: datetime,
+) -> dict[str, Any]:
+    start_date, end_date = _user_usage_date_range(window, local_now)
+    return {
+        "group_id": group_id,
+        "window": window,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "window_started_at": _user_usage_window_start(window, local_now).isoformat(),
+        "window_finished_at": local_now.isoformat(),
+        "total_requests": 0,
+        "total_tokens": 0,
+        "total_cost": 0.0,
+        "total_actual_cost": 0.0,
+        "total_account_cost": 0.0,
+        "source": "dashboard_groups",
     }
 
 
@@ -636,6 +797,50 @@ def _aggregate_usage_logs(
             sum(present_durations) / len(present_durations) if present_durations else 0.0
         ),
         "source_item_count": len(items),
+    }
+
+
+def _aggregate_group_usage_logs(
+    logs: list[dict[str, Any]],
+    *,
+    group_id: Any,
+    window: str,
+    local_now: datetime,
+) -> dict[str, Any]:
+    window_started_at = _user_usage_window_start(window, local_now)
+    window_finished_at = local_now
+    start_date, end_date = _user_usage_date_range(window, local_now)
+    items = [item for item in logs if isinstance(item, dict)]
+    included: list[dict[str, Any]] = []
+    for item in items:
+        created_at = _usage_log_created_at(item, local_now.tzinfo)
+        if created_at is not None and window_started_at <= created_at <= window_finished_at:
+            included.append(item)
+    total_cost = sum(_number(item, "total_cost") or 0.0 for item in included)
+    total_actual_cost = sum(_number(item, "actual_cost", "total_actual_cost") or 0.0 for item in included)
+    total_tokens = sum(
+        int(_number(item, "input_tokens") or 0)
+        + int(_number(item, "output_tokens") or 0)
+        + int(_number(item, "cache_creation_tokens") or 0)
+        + int(_number(item, "cache_read_tokens") or 0)
+        + int(_number(item, "cache_creation_5m_tokens") or 0)
+        + int(_number(item, "cache_creation_1h_tokens") or 0)
+        for item in included
+    )
+    return {
+        "group_id": group_id,
+        "window": window,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "window_started_at": window_started_at.isoformat(),
+        "window_finished_at": window_finished_at.isoformat(),
+        "total_requests": len(included),
+        "total_tokens": total_tokens,
+        "total_cost": total_cost,
+        "total_actual_cost": total_actual_cost,
+        "total_account_cost": total_actual_cost,
+        "source_item_count": len(items),
+        "source": "usage_logs",
     }
 
 
@@ -944,8 +1149,13 @@ __all__ = [
     "OperationalDataCollectionResult",
     "OperationalDataCollector",
     "SOURCE_ACCOUNTS",
+    "SOURCE_GROUP_USAGE",
     "SOURCE_GROUPS",
+    "SOURCE_USER_API_KEYS",
+    "SOURCE_USER_USAGE",
     "SOURCE_USERS",
+    "SOURCE_USAGE_LOGS_CURRENT_DAY",
+    "SOURCE_USAGE_LOGS_PREVIOUS_DAY",
     "SOURCE_USAGE_CURRENT_DAY",
     "SOURCE_USAGE_PREVIOUS_DAY",
 ]

@@ -472,6 +472,59 @@ class UsageSegmentationSchedulerStatusResponse(BaseModel):
     last_segment_counts: dict[str, int] | None = None
 
 
+class GroupUsageSegmentResponse(BaseModel):
+    group_id: Any
+    group_name: str
+    group_kind: str | None = None
+    platform: str | None = None
+    status: str | None = None
+    is_exclusive: bool | None = None
+    is_subscription: bool | None = None
+    member_count: int = 0
+    usage_by_window: dict[str, float | None] = Field(default_factory=dict)
+    daily_average_by_window: dict[str, float | None] = Field(default_factory=dict)
+    request_count_by_window: dict[str, int | None] = Field(default_factory=dict)
+    token_count_by_window: dict[str, int | None] = Field(default_factory=dict)
+    account_cost_by_window: dict[str, float | None] = Field(default_factory=dict)
+    source_by_window: dict[str, str] = Field(default_factory=dict)
+    baseline_window: str | None = None
+    baseline_daily_average: float | None = None
+    short_term_ratio: float | None = None
+    medium_term_ratio: float | None = None
+    known_usage_window_count: int = 0
+    positive_usage_window_count: int = 0
+    observed_at: datetime | None = None
+    refreshed_at: datetime | None = None
+
+
+class GroupUsageSegmentsEnvelope(BaseModel):
+    success: bool = True
+    items: list[GroupUsageSegmentResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class GroupUsageRefreshEnvelope(BaseModel):
+    success: bool = True
+    refreshed_at: datetime
+    group_count: int
+    window_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class GroupUsageSchedulerStatusResponse(BaseModel):
+    success: bool = True
+    enabled: bool
+    running: bool
+    cadence_seconds: int
+    tick_count: int
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
+    last_tick_error: str | None = None
+    last_refreshed_count: int = 0
+    last_window_counts: dict[str, int] | None = None
+
+
 class OrchestrationAssignRequest(BaseModel):
     user_id: Any
     email: str = Field(..., min_length=1)

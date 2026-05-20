@@ -38,6 +38,7 @@ class Sub2APIClient:
     UPDATE_USER_BALANCE_PATH = "/api/v1/admin/users/{user_id}/balance"
     USAGE_LIST_PATH = "/api/v1/admin/usage"
     USAGE_STATS_PATH = "/api/v1/admin/usage/stats"
+    DASHBOARD_GROUPS_PATH = "/api/v1/admin/dashboard/groups"
     DASHBOARD_USERS_RANKING_PATH = "/api/v1/admin/dashboard/users-ranking"
     GENERATE_OPENAI_AUTH_URL_PATH = "/api/v1/admin/openai/generate-auth-url"
     EXCHANGE_OPENAI_CODE_PATH = "/api/v1/admin/openai/exchange-code"
@@ -306,6 +307,29 @@ class Sub2APIClient:
         body = self._unwrap_data(data)
         if not isinstance(body, dict):
             raise Sub2APIError("Sub2API user spending ranking response is not an object")
+        return body
+
+    def get_group_usage_stats(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        timezone_name: str,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        data = self._request(
+            "GET",
+            self.DASHBOARD_GROUPS_PATH,
+            params={
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "timezone": timezone_name,
+                "limit": limit,
+            },
+        )
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API group usage response is not an object")
         return body
 
     def get_account_usage_stats(

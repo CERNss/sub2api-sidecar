@@ -23,6 +23,7 @@ def test_background_schedulers_expose_authenticated_status_endpoints() -> None:
         '"/api/operational-data/status"',
         '"/rotation/auto/scheduler"',
         '"/api/credit-control/scheduler"',
+        '"/api/group-usage/scheduler"',
     }
     main_source = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
 

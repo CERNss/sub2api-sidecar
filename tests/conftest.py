@@ -40,6 +40,7 @@ def clear_app_caches() -> None:
     main.get_notification_service.cache_clear()
     main.get_credit_control_service.cache_clear()
     main.get_usage_segmentation_service.cache_clear()
+    main.get_group_usage_service.cache_clear()
 
 
 def _write_test_config(config_path: Path) -> str:

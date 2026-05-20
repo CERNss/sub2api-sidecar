@@ -36,6 +36,7 @@ from app.models.credit import (
     CreditUsageWindow,
 )
 from app.models.flow import AssignmentMode, FlowStatus
+from app.models.group_usage import GroupUsageSegmentRecord
 from app.models.notification import NotificationSettings
 from app.models.operational_data import (
     CreditControlRuntimeSettings,
@@ -72,6 +73,10 @@ from app.models.schemas import (
     CreditControlUserResponse,
     CreditControlUsersEnvelope,
     ErrorResponse,
+    GroupUsageRefreshEnvelope,
+    GroupUsageSchedulerStatusResponse,
+    GroupUsageSegmentResponse,
+    GroupUsageSegmentsEnvelope,
     LoginRequest,
     LoginResponse,
     ManualRotationRequest,
@@ -120,6 +125,8 @@ from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
 from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.credit_control import CreditControlError, CreditControlService
 from app.services.credit_scheduler import CreditControlScheduler
+from app.services.group_usage import GroupUsageService
+from app.services.group_usage_scheduler import GroupUsageScheduler
 from app.services.notification import (
     NotificationConfigError,
     NotificationService,
@@ -165,13 +172,25 @@ async def lifespan(app_instance: FastAPI):
         usage_segmentation_service.refresh(now=datetime.now(timezone.utc))
     except Exception:
         logger.exception("Initial usage segmentation refresh failed")
+    group_usage_service = get_group_usage_service()
+    try:
+        group_usage_service.refresh(now=datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("Initial group usage refresh failed")
     usage_segmentation_scheduler = UsageSegmentationScheduler(
         segmentation_service=usage_segmentation_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
         enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
     )
     app_instance.state.usage_segmentation_scheduler = usage_segmentation_scheduler
+    group_usage_scheduler = GroupUsageScheduler(
+        group_usage_service=group_usage_service,
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
+    )
+    app_instance.state.group_usage_scheduler = group_usage_scheduler
     usage_segmentation_scheduler.start()
+    group_usage_scheduler.start()
     notification_scheduler.start()
     rotation_service = get_rotation_service()
     rotation_scheduler = AutoRotationScheduler(
@@ -194,6 +213,7 @@ async def lifespan(app_instance: FastAPI):
         rotation_scheduler.stop()
         notification_scheduler.stop()
         credit_scheduler.stop()
+        group_usage_scheduler.stop()
         usage_segmentation_scheduler.stop()
 
 
@@ -279,6 +299,11 @@ def get_credit_control_service() -> CreditControlService:
 @lru_cache(maxsize=1)
 def get_usage_segmentation_service() -> UsageSegmentationService:
     return UsageSegmentationService(store=get_flow_store())
+
+
+@lru_cache(maxsize=1)
+def get_group_usage_service() -> GroupUsageService:
+    return GroupUsageService(store=get_flow_store())
 
 
 def get_operational_data_runtime_settings() -> OperationalDataRuntimeSettings:
@@ -869,6 +894,33 @@ def usage_segment_response(record: UserUsageSegmentRecord) -> UserUsageSegmentRe
         segment=record.segment.value,
         segment_label=record.segment_label,
         reasons=list(record.reasons),
+        observed_at=record.observed_at,
+        refreshed_at=record.refreshed_at,
+    )
+
+
+def group_usage_segment_response(record: GroupUsageSegmentRecord) -> GroupUsageSegmentResponse:
+    return GroupUsageSegmentResponse(
+        group_id=record.group_id,
+        group_name=record.group_name,
+        group_kind=record.group_kind,
+        platform=record.platform,
+        status=record.status,
+        is_exclusive=record.is_exclusive,
+        is_subscription=record.is_subscription,
+        member_count=record.member_count,
+        usage_by_window=record.usage_by_window,
+        daily_average_by_window=record.daily_average_by_window,
+        request_count_by_window=record.request_count_by_window,
+        token_count_by_window=record.token_count_by_window,
+        account_cost_by_window=record.account_cost_by_window,
+        source_by_window=record.source_by_window,
+        baseline_window=record.baseline_window,
+        baseline_daily_average=record.baseline_daily_average,
+        short_term_ratio=record.short_term_ratio,
+        medium_term_ratio=record.medium_term_ratio,
+        known_usage_window_count=record.known_usage_window_count,
+        positive_usage_window_count=record.positive_usage_window_count,
         observed_at=record.observed_at,
         refreshed_at=record.refreshed_at,
     )
@@ -1538,6 +1590,55 @@ def usage_segmentation_scheduler_status(
         )
     else:
         response = UsageSegmentationSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/api/group-usage/groups")
+def group_usage_groups(
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    store = get_flow_store()
+    records = store.list_group_usage_segments(limit=limit, offset=offset)
+    payload = GroupUsageSegmentsEnvelope(
+        items=[group_usage_segment_response(record) for record in records],
+        total=store.count_group_usage_segments(),
+        limit=limit,
+        offset=offset,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.post("/api/group-usage/refresh")
+def group_usage_refresh(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_group_usage_service().refresh()
+    payload = GroupUsageRefreshEnvelope(
+        refreshed_at=result.refreshed_at,
+        group_count=result.group_count,
+        window_counts=result.window_counts,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/api/group-usage/scheduler")
+def group_usage_scheduler_status(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    scheduler = getattr(app.state, "group_usage_scheduler", None)
+    if scheduler is None:
+        runtime_settings = get_operational_data_runtime_settings()
+        response = GroupUsageSchedulerStatusResponse(
+            enabled=runtime_settings.enabled,
+            running=False,
+            cadence_seconds=runtime_settings.collect_interval_seconds,
+            tick_count=0,
+            last_refreshed_count=get_flow_store().count_group_usage_segments(),
+        )
+    else:
+        response = GroupUsageSchedulerStatusResponse(**scheduler.snapshot().__dict__)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 

@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
+from app.models.group_usage import GroupUsageSegmentRecord
 from app.models.credit import (
     CreditAuditOperation,
     CreditAuditRecord,
@@ -1274,6 +1275,103 @@ class PostgresFlowStore(FlowStore):
             ).fetchall()
         return {str(row["segment"]): int(row["total"]) for row in rows}
 
+    def upsert_group_usage_segment(
+        self, record: GroupUsageSegmentRecord
+    ) -> GroupUsageSegmentRecord:
+        payload = record.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO group_usage_segments (
+                    group_id_key, group_name, observed_at, refreshed_at,
+                    payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(group_id_key) DO UPDATE SET
+                    group_name = excluded.group_name,
+                    observed_at = excluded.observed_at,
+                    refreshed_at = excluded.refreshed_at,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    self._serialize_group_usage_group_id_key(record.group_id),
+                    record.group_name,
+                    record.observed_at.isoformat(),
+                    record.refreshed_at.isoformat(),
+                    payload,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return record
+
+    def upsert_group_usage_segments(
+        self, records: list[GroupUsageSegmentRecord]
+    ) -> list[GroupUsageSegmentRecord]:
+        if not records:
+            return records
+        with self._connect() as connection:
+            for record in records:
+                connection.execute(
+                    """
+                    INSERT INTO group_usage_segments (
+                        group_id_key, group_name, observed_at, refreshed_at,
+                        payload, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(group_id_key) DO UPDATE SET
+                        group_name = excluded.group_name,
+                        observed_at = excluded.observed_at,
+                        refreshed_at = excluded.refreshed_at,
+                        payload = excluded.payload,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        self._serialize_group_usage_group_id_key(record.group_id),
+                        record.group_name,
+                        record.observed_at.isoformat(),
+                        record.refreshed_at.isoformat(),
+                        record.model_dump_json(),
+                        record.created_at.isoformat(),
+                        record.updated_at.isoformat(),
+                    ),
+                )
+            connection.commit()
+        return records
+
+    def get_group_usage_segment(self, group_id: Any) -> GroupUsageSegmentRecord | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM group_usage_segments
+            WHERE group_id_key = %s
+            """,
+            (self._serialize_group_usage_group_id_key(group_id),),
+            GroupUsageSegmentRecord,
+        )
+
+    def list_group_usage_segments(
+        self,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[GroupUsageSegmentRecord]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM group_usage_segments
+            ORDER BY refreshed_at DESC, group_name ASC, group_id_key ASC
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset),
+            GroupUsageSegmentRecord,
+        )
+
+    def count_group_usage_segments(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM group_usage_segments"
+            ).fetchone()
+        return int(row["total"] if row else 0)
+
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -1605,6 +1703,25 @@ class PostgresFlowStore(FlowStore):
                 ON user_usage_segments(segment, refreshed_at DESC, email ASC)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_usage_segments (
+                    group_id_key TEXT PRIMARY KEY,
+                    group_name TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    refreshed_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_group_usage_segments_list
+                ON group_usage_segments(refreshed_at DESC, group_name ASC)
+                """
+            )
             connection.commit()
 
     def _load_single_flow(self, query: str, params: tuple[Any, ...]) -> ProvisionFlow | None:
@@ -1672,6 +1789,9 @@ class PostgresFlowStore(FlowStore):
         return tuple(dict.fromkeys(keys))
 
     def _serialize_rotation_pool_group_id_key(self, value: Any) -> str:
+        return self._serialize_key(str(value))
+
+    def _serialize_group_usage_group_id_key(self, value: Any) -> str:
         return self._serialize_key(str(value))
 
     def _serialize_optional_bool(self, value: bool | None) -> int | None:

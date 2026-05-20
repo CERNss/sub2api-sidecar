@@ -319,6 +319,29 @@ class _FakeSub2APIClient:
             "total_actual_cost": 250,
         }
 
+    def get_group_usage_stats(
+        self,
+        *,
+        start_date,
+        end_date,
+        timezone_name,
+        limit=1000,
+    ):
+        return {
+            "groups": [
+                {
+                    "group_id": "g1",
+                    "group_name": "Group One",
+                    "requests": 5,
+                    "total_tokens": 100,
+                    "cost": 12.5,
+                    "actual_cost": 12.5,
+                    "account_cost": 12.0,
+                }
+            ],
+            "total_actual_cost": 12.5,
+        }
+
 
 # --- Collector registry ---
 
@@ -496,6 +519,22 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
                 limit=limit,
             )
 
+        def get_group_usage_stats(
+            self,
+            *,
+            start_date,
+            end_date,
+            timezone_name,
+            limit=1000,
+        ):
+            self.calls.append(f"group_usage:{start_date}:{end_date}")
+            return super().get_group_usage_stats(
+                start_date=start_date,
+                end_date=end_date,
+                timezone_name=timezone_name,
+                limit=limit,
+            )
+
     api_client = _RecordingClient()
     collector = OperationalDataCollector(
         client=api_client,
@@ -514,6 +553,9 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "user_ranking:2026-05-10:2026-05-10",
         "user_ranking:2026-05-04:2026-05-10",
         "user_ranking:2026-04-11:2026-05-10",
+        "group_usage:2026-05-10:2026-05-10",
+        "group_usage:2026-05-04:2026-05-10",
+        "group_usage:2026-04-11:2026-05-10",
         "user_api_keys:u1",
         "user_api_keys:u2",
         "usage::2026-05-10:2026-05-10",
@@ -528,6 +570,7 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "usage_logs_current_day",
         "usage_logs_previous_day",
         "user_usage",
+        "group_usage",
         "user_api_keys",
         "usage_current_day",
         "usage_previous_day",
@@ -543,6 +586,9 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
     assert usage_snapshot.payload["u1"]["5h"]["total_actual_cost"] == 1.5
     assert usage_snapshot.payload["u1"]["1d"]["total_actual_cost"] == 200
     assert usage_snapshot.payload["u2"]["5h"]["total_actual_cost"] == 0.75
+    group_usage_snapshot = main.get_flow_store().get_latest_operational_data_snapshot("group_usage")
+    assert group_usage_snapshot is not None
+    assert group_usage_snapshot.payload["g1"]["1d"]["total_actual_cost"] == 12.5
     balance_samples = main.get_flow_store().list_latest_operational_metric_samples("user_balance_low")
     assert {sample.scope_key for sample in balance_samples} == {"user:u1", "user:u2"}
     by_scope = {sample.scope_key: sample for sample in balance_samples}

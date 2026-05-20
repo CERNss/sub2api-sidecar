@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.clients.sub2api import Sub2APIClient, Sub2APIError
 from app.config import Settings
 from app.errors import RotationExecutionError, RotationPoolEmptyError, RotationTargetValidationError
 from app.models.flow import AssignmentMode
+from app.models.group_usage import GroupUsageSegmentRecord
 from app.models.rotation import (
     AutoRotationRuntimeConfig,
     AutoRotationUsageWindow,
@@ -62,6 +63,13 @@ class UsageRotationCandidate:
     assignment: UserGroupAssignment
     usage_snapshot: dict[str, Any]
     usage_value: float
+
+
+@dataclass
+class GroupLoadState:
+    loads: dict[str, float]
+    sources: dict[str, str]
+    records: dict[str, GroupUsageSegmentRecord]
 
 
 @dataclass
@@ -521,7 +529,8 @@ class RotationService:
         skipped: list[RotationExecutionResult] = []
         failed: list[RotationExecutionResult] = []
         sorted_pool = sorted(pool_groups, key=lambda group: (group.priority, group.created_at))
-        target_loads = self._initial_pool_usage_loads(sorted_pool, ordered_candidates)
+        group_load_state = self._initial_pool_group_loads(sorted_pool, ordered_candidates)
+        target_loads = group_load_state.loads
 
         if runtime_config.auto_assign_new_users:
             for assignment in sync_result.new_user_candidates:
@@ -529,7 +538,20 @@ class RotationService:
                 usage_value = float(usage_snapshot["usage_value"])
                 assignment.has_api_keys = usage_snapshot["has_api_keys"]
                 target_group = self._select_least_loaded_usage_group(sorted_pool, target_loads)
+                target_key = self._normalize_key(target_group.group_id)
                 reason = f"auto assign new user by usage load window={usage_snapshot['usage_window'].value} usage={usage_value}"
+                group_loads_before = self._group_load_metadata(
+                    target_loads,
+                    group_load_state.sources,
+                )
+                metadata = {
+                    "decision_type": "new_user_usage_assignment",
+                    "usage_loads_before": self._serialize_usage_loads(target_loads),
+                    "group_loads_before": group_loads_before,
+                    "group_load_source": group_load_state.sources.get(target_key, "candidate_sum"),
+                    "target_group_load_before": target_loads.get(target_key, 0.0),
+                    "target_group_load_source": group_load_state.sources.get(target_key, "candidate_sum"),
+                }
                 if dry_run:
                     result = self._preview_rotation(
                         assignment=assignment,
@@ -539,10 +561,7 @@ class RotationService:
                         usage_window=usage_snapshot["usage_window"],
                         usage_value=usage_value,
                         usage_snapshot=usage_snapshot,
-                        metadata={
-                            "decision_type": "new_user_usage_assignment",
-                            "usage_loads_before": self._serialize_usage_loads(target_loads),
-                        },
+                        metadata=metadata,
                     )
                 else:
                     result = self._execute_rotation(
@@ -553,16 +572,13 @@ class RotationService:
                         usage_window=usage_snapshot["usage_window"],
                         usage_value=usage_value,
                         usage_snapshot=usage_snapshot,
-                        metadata={
-                            "decision_type": "new_user_usage_assignment",
-                            "usage_loads_before": self._serialize_usage_loads(target_loads),
-                        },
+                        metadata=metadata,
                     )
                 if result.status == RotationResultStatus.moved:
-                    target_loads[self._normalize_key(target_group.group_id)] += usage_value
+                    target_loads[target_key] += usage_value
                     moved.append(result)
                 elif result.status == RotationResultStatus.planned:
-                    target_loads[self._normalize_key(target_group.group_id)] += usage_value
+                    target_loads[target_key] += usage_value
                     planned.append(result)
                 elif result.status == RotationResultStatus.skipped:
                     skipped.append(result)
@@ -579,18 +595,42 @@ class RotationService:
                     dead_band_skipped = True
                     break
             assignment = candidate.assignment
-            target_group = self._select_usage_balancing_target_group(
+            source_key = self._normalize_key(assignment.current_group_id)
+            target_group, selection = self._select_usage_balancing_target_group(
                 candidate,
                 sorted_pool,
                 target_loads,
                 improvement_delta=improvement_delta,
             )
-            source_key = self._normalize_key(assignment.current_group_id)
             target_key = self._normalize_key(target_group.group_id)
             reason = f"auto rotation by usage load window={candidate.usage_snapshot['usage_window'].value} usage={candidate.usage_value}"
+            before_loads = self._group_load_metadata(
+                target_loads,
+                group_load_state.sources,
+            )
+            after_loads = self._simulated_group_load_metadata(
+                target_loads,
+                group_load_state.sources,
+                source_key=source_key,
+                target_key=target_key,
+                usage_value=candidate.usage_value,
+            )
             metadata = {
                 "decision_type": "usage_balancing",
                 "usage_loads_before": self._serialize_usage_loads(target_loads),
+                "group_loads_before": before_loads,
+                "group_loads_after": after_loads,
+                "group_load_source": {
+                    source_key: group_load_state.sources.get(source_key, "candidate_sum"),
+                    target_key: group_load_state.sources.get(target_key, "candidate_sum"),
+                },
+                "source_group_load_before": target_loads.get(source_key, 0.0),
+                "target_group_load_before": target_loads.get(target_key, 0.0),
+                "source_group_load_source": group_load_state.sources.get(source_key, "candidate_sum"),
+                "target_group_load_source": group_load_state.sources.get(target_key, "candidate_sum"),
+                "source_group_key": source_key,
+                "target_group_key": target_key,
+                **selection,
                 "imbalance_epsilon": imbalance_epsilon,
                 "improvement_delta": improvement_delta,
             }
@@ -1298,6 +1338,34 @@ class RotationService:
                 loads[key] += candidate.usage_value
         return loads
 
+    def _initial_pool_group_loads(
+        self,
+        pool_groups: list[RotationPoolGroup],
+        candidates: list[UsageRotationCandidate],
+    ) -> GroupLoadState:
+        fallback_loads = self._initial_pool_usage_loads(pool_groups, candidates)
+        loads: dict[str, float] = {}
+        sources: dict[str, str] = {}
+        records: dict[str, GroupUsageSegmentRecord] = {}
+        window = self._window_enum().value
+        for group in pool_groups:
+            key = self._normalize_key(group.group_id)
+            record = self.store.get_group_usage_segment(group.group_id)
+            usage_value = (
+                record.usage_by_window.get(window)
+                if record is not None
+                else None
+            )
+            if usage_value is not None:
+                loads[key] = float(usage_value)
+                source = record.source_by_window.get(window) or "group_usage"
+                sources[key] = f"group_usage:{source}"
+                records[key] = record
+            else:
+                loads[key] = fallback_loads.get(key, 0.0)
+                sources[key] = "candidate_sum"
+        return GroupLoadState(loads=loads, sources=sources, records=records)
+
     def _select_least_loaded_usage_group(
         self,
         pool_groups: list[RotationPoolGroup],
@@ -1319,7 +1387,7 @@ class RotationService:
         pool_groups: list[RotationPoolGroup],
         loads: dict[str, float],
         improvement_delta: float = 0.0,
-    ) -> RotationPoolGroup:
+    ) -> tuple[RotationPoolGroup, dict[str, Any]]:
         assignment = candidate.assignment
         current_key = self._normalize_key(assignment.current_group_id)
         least_loaded = self._select_least_loaded_usage_group(pool_groups, loads)
@@ -1330,18 +1398,63 @@ class RotationService:
             before_gap = current_load - least_load
             after_gap = abs((current_load - candidate.usage_value) - (least_load + candidate.usage_value))
             if before_gap > 0 and after_gap < before_gap - improvement_delta:
-                return least_loaded
+                return least_loaded, {
+                    "selection_reason": "move_reduces_group_load_spread",
+                    "before_gap": before_gap,
+                    "after_gap": after_gap,
+                    "spread_improvement": before_gap - after_gap,
+                }
         if current_key in loads:
             current_group = next(
                 group
                 for group in pool_groups
                 if self._normalize_key(group.group_id) == current_key
             )
-            return current_group
-        return least_loaded
+            return current_group, {
+                "selection_reason": "no_group_load_spread_improvement",
+                "before_gap": current_load - least_load,
+                "after_gap": None,
+                "spread_improvement": 0.0,
+            }
+        return least_loaded, {
+            "selection_reason": "source_group_missing_from_pool",
+            "before_gap": None,
+            "after_gap": None,
+            "spread_improvement": 0.0,
+        }
 
     def _serialize_usage_loads(self, loads: dict[str, float]) -> str:
         return ",".join(f"{key}:{loads[key]:.6g}" for key in sorted(loads))
+
+    def _group_load_metadata(
+        self,
+        loads: dict[str, float],
+        sources: dict[str, str],
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            key: {
+                "load": loads[key],
+                "source": sources.get(key, "candidate_sum"),
+            }
+            for key in sorted(loads)
+        }
+
+    def _simulated_group_load_metadata(
+        self,
+        loads: dict[str, float],
+        sources: dict[str, str],
+        *,
+        source_key: str,
+        target_key: str,
+        usage_value: float,
+    ) -> dict[str, dict[str, Any]]:
+        simulated = dict(loads)
+        if source_key != target_key:
+            if source_key in simulated:
+                simulated[source_key] = max(0.0, simulated[source_key] - usage_value)
+            if target_key in simulated:
+                simulated[target_key] += usage_value
+        return self._group_load_metadata(simulated, sources)
 
     def _build_usage_snapshot(self, user_id: Any) -> dict[str, Any]:
         usage_window = self._window_enum()
