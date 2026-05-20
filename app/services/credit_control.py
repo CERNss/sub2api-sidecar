@@ -23,6 +23,7 @@ from app.models.credit import (
     CreditUsageWindow,
     CreditUserSnapshot,
 )
+from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
 from app.services.operational_data import (
     SOURCE_USER_API_KEYS,
     SOURCE_USER_USAGE,
@@ -66,6 +67,7 @@ class CreditControlService:
         balance_max: float | None = None,
         consumption_min: float | None = None,
         consumption_max: float | None = None,
+        usage_segment: UsageSegment | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[CreditUserSnapshot], int, dict[str, Any]]:
@@ -82,6 +84,7 @@ class CreditControlService:
                 balance_max=balance_max,
                 consumption_min=consumption_min,
                 consumption_max=consumption_max,
+                usage_segment=usage_segment,
             )
         ]
         total = len(filtered)
@@ -100,6 +103,7 @@ class CreditControlService:
         balance_max: float | None = None,
         consumption_min: float | None = None,
         consumption_max: float | None = None,
+        usage_segment: UsageSegment | None = None,
     ) -> list[CreditUserSnapshot]:
         all_items = self._load_user_snapshots(usage_window)
         return [
@@ -114,6 +118,7 @@ class CreditControlService:
                 balance_max=balance_max,
                 consumption_min=consumption_min,
                 consumption_max=consumption_max,
+                usage_segment=usage_segment,
             )
         ]
 
@@ -645,10 +650,15 @@ class CreditControlService:
         users = self._latest_snapshot_payload(SOURCE_USERS, default=[])
         if not isinstance(users, list):
             users = []
+        segments_by_user_id = {
+            str(record.user_id): record
+            for record in self.store.list_user_usage_segments(limit=100000)
+        }
         snapshots: list[CreditUserSnapshot] = []
         for user in users:
             if not isinstance(user, dict):
                 continue
+            segment = segments_by_user_id.get(str(user.get("id")))
             usage = self._user_usage_from_snapshot(user["id"], usage_window)
             snapshots.append(
                 CreditUserSnapshot(
@@ -667,6 +677,9 @@ class CreditControlService:
                     consumption=self._extract_consumption(usage),
                     usage_window=usage_window,
                     usage=self._redact(usage) if usage else {},
+                    usage_segment=segment.segment.value if segment else None,
+                    usage_segment_label=segment.segment_label if segment else None,
+                    usage_profile=self._usage_profile(segment),
                 )
             )
         return snapshots
@@ -725,6 +738,7 @@ class CreditControlService:
         balance_max: float | None,
         consumption_min: float | None,
         consumption_max: float | None,
+        usage_segment: UsageSegment | None,
     ) -> bool:
         if search:
             needle = search.lower()
@@ -750,11 +764,17 @@ class CreditControlService:
             item.consumption is None or item.consumption > consumption_max
         ):
             return False
+        if usage_segment is not None and item.usage_segment != usage_segment.value:
+            return False
         return True
 
     def _aggregate_users(self, items: list[CreditUserSnapshot]) -> dict[str, Any]:
         balances = [item.balance for item in items if item.balance is not None]
         consumption = [item.consumption for item in items if item.consumption is not None]
+        segment_counts: dict[str, int] = {}
+        for item in items:
+            key = item.usage_segment or "unknown"
+            segment_counts[key] = segment_counts.get(key, 0) + 1
         active_user_count = sum(
             1 for item in items if str(item.status or "").strip().lower() in {"active", "enabled", "ok"}
         )
@@ -767,7 +787,30 @@ class CreditControlService:
             "total_consumption": sum(consumption) if consumption else None,
             "known_consumption_count": len(consumption),
             "active_user_count": active_user_count,
+            "segment_counts": segment_counts,
         }
+
+    def _usage_profile(self, segment: UserUsageSegmentRecord | None) -> dict[str, Any]:
+        if segment is None:
+            return {}
+        return self._redact(
+            {
+                "segment": segment.segment.value,
+                "segment_label": segment.segment_label,
+                "usage_by_window": segment.usage_by_window,
+                "daily_average_by_window": segment.daily_average_by_window,
+                "baseline_window": segment.baseline_window,
+                "baseline_daily_average": segment.baseline_daily_average,
+                "short_term_ratio": segment.short_term_ratio,
+                "medium_term_ratio": segment.medium_term_ratio,
+                "runway_days": segment.runway_days,
+                "known_usage_window_count": segment.known_usage_window_count,
+                "positive_usage_window_count": segment.positive_usage_window_count,
+                "reasons": segment.reasons,
+                "observed_at": segment.observed_at.isoformat(),
+                "refreshed_at": segment.refreshed_at.isoformat(),
+            }
+        )
 
     def _validate_adjustment(
         self,

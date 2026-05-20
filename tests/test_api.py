@@ -32,6 +32,7 @@ from app.models.rotation import (
 )
 from app.services.credit_scheduler import CreditControlScheduler
 from app.services.rotation_scheduler import AutoRotationScheduler
+from app.services.usage_segmentation import UsageSegmentationService
 
 AUTH_PAYLOAD = {"username": "admin", "password": "test-admin-pass"}
 EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES = [
@@ -411,6 +412,7 @@ def clear_caches() -> None:
     main.get_provisioning_service.cache_clear()
     main.get_notification_service.cache_clear()
     main.get_credit_control_service.cache_clear()
+    main.get_usage_segmentation_service.cache_clear()
 
 
 def save_auto_rotation_config(
@@ -1398,10 +1400,17 @@ def test_credit_control_lists_filters_and_details_users(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
     save_operational_snapshots(backend)
+    UsageSegmentationService(main.get_flow_store()).refresh()
 
     with patch.object(requests.Session, "request", new=backend.request):
         response = client.get(
             "/api/credit-control/users?window=7d&search=rotate&balance_min=10&limit=10"
+        )
+        segment_response = client.get(
+            "/api/credit-control/users?usage_segment=active&limit=10"
+        )
+        spike_response = client.get(
+            "/api/credit-control/users?usage_segment=spike&limit=10"
         )
         detail_response = client.get("/api/credit-control/users/101?window=5h")
 
@@ -1414,13 +1423,41 @@ def test_credit_control_lists_filters_and_details_users(client) -> None:
     assert payload["items"][0]["balance_display"] == "12.5 credits"
     assert payload["items"][0]["balance_unit"] == "credits"
     assert payload["items"][0]["consumption"] == 6.0
+    assert payload["items"][0]["usage_segment"] == "spike"
+    assert payload["items"][0]["usage_segment_label"] == "短期突增"
+    assert payload["items"][0]["usage_profile"]["daily_average_by_window"]["30d"] == pytest.approx(20.0 / 30.0)
     assert payload["aggregates"]["total_balance"] == 12.5
     assert payload["aggregates"]["total_consumption"] == 6.0
+    assert payload["aggregates"]["segment_counts"]["spike"] == 1
+    assert segment_response.status_code == 200
+    assert segment_response.json()["total"] == 0
+    assert spike_response.status_code == 200
+    assert spike_response.json()["total"] == 2
     assert detail_response.status_code == 200
     detail_payload = detail_response.json()
     assert detail_payload["item"]["user_id"] == 101
+    assert detail_payload["item"]["usage_segment"] == "spike"
     assert detail_payload["item"]["api_keys"][0]["key_id"] == "key-101"
     assert detail_payload["item"]["api_keys"][0]["usage"] == 1.0
+
+
+def test_usage_segmentation_apis_require_auth_and_refresh(client) -> None:
+    backend = FakeRotationSub2API()
+    unauthenticated = client.get("/api/usage-segmentation/users")
+    login(client)
+    save_operational_snapshots(backend)
+
+    refresh = client.post("/api/usage-segmentation/refresh")
+    users = client.get("/api/usage-segmentation/users")
+    scheduler = client.get("/api/usage-segmentation/scheduler")
+
+    assert unauthenticated.status_code == 401
+    assert refresh.status_code == 200
+    assert refresh.json()["user_count"] == 2
+    assert users.status_code == 200
+    assert users.json()["total"] == 2
+    assert users.json()["segment_counts"]["spike"] == 2
+    assert scheduler.status_code == 200
 
 
 def test_credit_control_manual_adjustment_preview_execute_and_audit(client) -> None:
@@ -2108,6 +2145,7 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
         store = main.get_flow_store()
         save_auto_rotation_config()
         save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
         now = datetime.now(timezone.utc)
         store.upsert_rotation_pool_group(
             RotationPoolGroup(
@@ -2162,7 +2200,8 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     assert backend.replace_calls[0]["new_group_id"] == "11"
     assert payload["moved"][0]["usage_window"] == "5h"
     assert payload["moved"][0]["usage_value"] == 1.5
-    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
+    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "usage_segmentation"
+    assert payload["moved"][0]["usage_snapshot"]["segment"] == "spike"
     assert payload["moved"][0]["metadata"]["decision_type"] == "usage_balancing"
     assert "usage_loads_before" in payload["moved"][0]["metadata"]
     assert len(payload["skipped"]) == 1
@@ -2174,6 +2213,68 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     assert run["status"] == "moved"
     assert len(run["moved"]) == 1
     assert run["moved"][0]["user_id"] == 101
+
+
+def test_auto_rotation_falls_back_to_user_usage_without_segment_record(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=202,
+                email="newbie@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
 
 
 def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -> None:

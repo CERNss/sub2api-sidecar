@@ -11,6 +11,7 @@ from app.models.operational_data import (
     OperationalMetricSample,
     ProvisioningRuntimeSettings,
 )
+from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
 from app.models.rotation import RotationEvent, RotationPoolGroup, RotationResultStatus, RotationTrigger, UserGroupAssignment
 from app.stores.postgres import PostgresFlowStore
 
@@ -420,3 +421,47 @@ def test_postgres_store_persists_runtime_settings(app_env: dict[str, str]) -> No
     assert credit.enabled is False
     assert provisioning is not None
     assert provisioning.assignment_mode == AssignmentMode.managed_pool
+
+
+def test_postgres_store_persists_latest_user_usage_segments(app_env: dict[str, str]) -> None:
+    store = PostgresFlowStore(app_env["database_url"])
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+    store.upsert_user_usage_segment(
+        UserUsageSegmentRecord(
+            user_id=101,
+            email="rotate@example.com",
+            segment=UsageSegment.active,
+            segment_label="活跃",
+            usage_by_window={"1d": 2.0},
+            daily_average_by_window={"1d": 2.0},
+            observed_at=now,
+            refreshed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.upsert_user_usage_segment(
+        UserUsageSegmentRecord(
+            user_id=101,
+            email="rotate@example.com",
+            segment=UsageSegment.heavy,
+            segment_label="高频",
+            usage_by_window={"1d": 8.0},
+            daily_average_by_window={"1d": 8.0},
+            observed_at=now + timedelta(minutes=1),
+            refreshed_at=now + timedelta(minutes=1),
+            created_at=now,
+            updated_at=now + timedelta(minutes=1),
+        )
+    )
+
+    record = store.get_user_usage_segment(101)
+    records = store.list_user_usage_segments(segment=UsageSegment.heavy)
+    counts = store.user_usage_segment_counts()
+
+    assert record is not None
+    assert record.segment == UsageSegment.heavy
+    assert record.usage_by_window["1d"] == 8.0
+    assert len(records) == 1
+    assert counts == {"heavy": 1}

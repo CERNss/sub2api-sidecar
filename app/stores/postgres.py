@@ -37,6 +37,7 @@ from app.models.rotation import (
     RotationPoolKind,
     UserGroupAssignment,
 )
+from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
 from app.stores.base import FlowStore
 
 
@@ -1139,6 +1140,140 @@ class PostgresFlowStore(FlowStore):
             CreditAuditRecord,
         )
 
+    def upsert_user_usage_segment(
+        self, record: UserUsageSegmentRecord
+    ) -> UserUsageSegmentRecord:
+        payload = record.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_usage_segments (
+                    user_id_key, email, segment, observed_at, refreshed_at,
+                    payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(user_id_key) DO UPDATE SET
+                    email = excluded.email,
+                    segment = excluded.segment,
+                    observed_at = excluded.observed_at,
+                    refreshed_at = excluded.refreshed_at,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    self._serialize_key(record.user_id),
+                    record.email,
+                    record.segment.value,
+                    record.observed_at.isoformat(),
+                    record.refreshed_at.isoformat(),
+                    payload,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return record
+
+    def upsert_user_usage_segments(
+        self, records: list[UserUsageSegmentRecord]
+    ) -> list[UserUsageSegmentRecord]:
+        if not records:
+            return records
+        with self._connect() as connection:
+            for record in records:
+                connection.execute(
+                    """
+                    INSERT INTO user_usage_segments (
+                        user_id_key, email, segment, observed_at, refreshed_at,
+                        payload, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(user_id_key) DO UPDATE SET
+                        email = excluded.email,
+                        segment = excluded.segment,
+                        observed_at = excluded.observed_at,
+                        refreshed_at = excluded.refreshed_at,
+                        payload = excluded.payload,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        self._serialize_key(record.user_id),
+                        record.email,
+                        record.segment.value,
+                        record.observed_at.isoformat(),
+                        record.refreshed_at.isoformat(),
+                        record.model_dump_json(),
+                        record.created_at.isoformat(),
+                        record.updated_at.isoformat(),
+                    ),
+                )
+            connection.commit()
+        return records
+
+    def get_user_usage_segment(self, user_id: Any) -> UserUsageSegmentRecord | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM user_usage_segments
+            WHERE user_id_key = %s
+            """,
+            (self._serialize_key(user_id),),
+            UserUsageSegmentRecord,
+        )
+
+    def list_user_usage_segments(
+        self,
+        *,
+        segment: UsageSegment | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[UserUsageSegmentRecord]:
+        where = ""
+        params: tuple[Any, ...]
+        if segment is not None:
+            where = "WHERE segment = %s"
+            params = (segment.value, limit, offset)
+        else:
+            params = (limit, offset)
+        return self._load_many_models(
+            f"""
+            SELECT payload FROM user_usage_segments
+            {where}
+            ORDER BY
+                CASE segment
+                    WHEN 'heavy' THEN 0
+                    WHEN 'spike' THEN 1
+                    WHEN 'active' THEN 2
+                    WHEN 'light' THEN 3
+                    ELSE 4
+                END,
+                refreshed_at DESC,
+                email ASC
+            LIMIT %s OFFSET %s
+            """,
+            params,
+            UserUsageSegmentRecord,
+        )
+
+    def count_user_usage_segments(self, *, segment: UsageSegment | None = None) -> int:
+        if segment is not None:
+            query = "SELECT COUNT(*) AS total FROM user_usage_segments WHERE segment = %s"
+            params = (segment.value,)
+        else:
+            query = "SELECT COUNT(*) AS total FROM user_usage_segments"
+            params = ()
+        with self._connect() as connection:
+            row = connection.execute(query, params).fetchone()
+        return int(row["total"] if row else 0)
+
+    def user_usage_segment_counts(self) -> dict[str, int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT segment, COUNT(*) AS total
+                FROM user_usage_segments
+                GROUP BY segment
+                """
+            ).fetchall()
+        return {str(row["segment"]): int(row["total"]) for row in rows}
+
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -1448,6 +1583,26 @@ class PostgresFlowStore(FlowStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_credit_audit_records_list
                 ON credit_audit_records(created_at DESC, operation_type, status)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_usage_segments (
+                    user_id_key TEXT PRIMARY KEY,
+                    email TEXT NOT NULL,
+                    segment TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    refreshed_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_user_usage_segments_list
+                ON user_usage_segments(segment, refreshed_at DESC, email ASC)
                 """
             )
             connection.commit()

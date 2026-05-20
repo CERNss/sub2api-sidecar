@@ -832,6 +832,13 @@ pre {
   margin-bottom: 12px;
 }
 
+.credit-segment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
 .credit-aggregate-card {
   min-height: 70px;
   border: 1px solid #dbe5f0;

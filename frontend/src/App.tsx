@@ -481,6 +481,9 @@ type CreditControlUser = {
   balance_display?: string | null;
   balance_unit?: string | null;
   consumption: number | null;
+  usage_segment?: string | null;
+  usage_segment_label?: string | null;
+  usage_profile?: Record<string, unknown>;
   api_key_count?: number | null;
   last_activity_at?: string | null;
   updated_at?: string | null;
@@ -493,6 +496,7 @@ type CreditControlAggregates = {
   negative_balance_count?: number | null;
   active_user_count?: number | null;
   user_count?: number | null;
+  segment_counts?: Record<string, number>;
 };
 
 type CreditControlUsersPayload = ApiPayload & {
@@ -625,6 +629,7 @@ type CreditUserFilters = {
   balanceMax: string;
   consumptionMin: string;
   consumptionMax: string;
+  usageSegment: string;
 };
 
 type AdjustmentTargetMode = "selected" | "filtered";
@@ -662,6 +667,14 @@ const usageWindowOptions = [
   { label: "最近 1 天", value: "1d" },
   { label: "最近 7 天", value: "7d" },
   { label: "最近 30 天", value: "30d" }
+] as const;
+const usageSegmentOptions = [
+  { label: "全部分层", value: "" },
+  { label: "高频", value: "heavy" },
+  { label: "短期突增", value: "spike" },
+  { label: "活跃", value: "active" },
+  { label: "轻量", value: "light" },
+  { label: "沉默", value: "idle" }
 ] as const;
 const operatorViewPaths: Record<OperatorView, string> = {
   orchestration: "/orchestration/manual",
@@ -913,6 +926,15 @@ function statusTagColor(status: string | null | undefined): string {
   if (["active", "ok", "enabled", "completed", "success", "succeeded"].includes(normalized)) return "green";
   if (["pending", "running", "processing"].includes(normalized)) return "blue";
   if (["disabled", "inactive", "failed", "error"].includes(normalized)) return "red";
+  return "default";
+}
+
+function usageSegmentColor(segment: string | null | undefined): string {
+  if (segment === "heavy") return "red";
+  if (segment === "spike") return "orange";
+  if (segment === "active") return "green";
+  if (segment === "light") return "blue";
+  if (segment === "idle") return "default";
   return "default";
 }
 
@@ -3822,7 +3844,8 @@ function CreditControlView({
     balanceMin: "",
     balanceMax: "",
     consumptionMin: "",
-    consumptionMax: ""
+    consumptionMax: "",
+    usageSegment: ""
   });
   const [users, setUsers] = useState<CreditControlUser[]>([]);
   const [aggregates, setAggregates] = useState<CreditControlAggregates>({});
@@ -3866,6 +3889,7 @@ function CreditControlView({
       search: filters.search.trim(),
       status: filters.status,
       group_id: filters.groupId.trim(),
+      usage_segment: filters.usageSegment,
       balance_min: parseOptionalNumber(filters.balanceMin),
       balance_max: parseOptionalNumber(filters.balanceMax),
       consumption_min: parseOptionalNumber(filters.consumptionMin),
@@ -3889,6 +3913,7 @@ function CreditControlView({
               search: filters.search.trim(),
               status: filters.status,
               group_id: filters.groupId.trim(),
+              usage_segment: filters.usageSegment,
               balance_min: parseOptionalNumber(filters.balanceMin),
               balance_max: parseOptionalNumber(filters.balanceMax),
               consumption_min: parseOptionalNumber(filters.consumptionMin),
@@ -4174,6 +4199,7 @@ function CreditControlView({
     { label: "平均余额", value: formatMoney(aggregates.average_balance), tone: "average" },
     { label: "负余额", value: unknownToText(aggregates.negative_balance_count ?? 0), tone: "danger" }
   ];
+  const segmentCounts = aggregates.segment_counts ?? {};
 
   return (
     <div className="credit-workspace">
@@ -4257,6 +4283,11 @@ function CreditControlView({
                     placeholder="Group ID"
                     onChange={(event) => setFilters((current) => ({ ...current, groupId: event.target.value }))}
                   />
+                  <Select
+                    value={filters.usageSegment}
+                    onChange={(value) => setFilters((current) => ({ ...current, usageSegment: value }))}
+                    options={[...usageSegmentOptions]}
+                  />
                   <AntButton type="primary" htmlType="submit" icon={<Search size={15} />} loading={loadingUsers}>
                     查询
                   </AntButton>
@@ -4291,6 +4322,13 @@ function CreditControlView({
                     <span>{item.label}</span>
                     <strong>{item.value}</strong>
                   </div>
+                ))}
+              </div>
+              <div className="credit-segment-strip">
+                {usageSegmentOptions.filter((item) => item.value).map((item) => (
+                  <Tag key={item.value} color={usageSegmentColor(item.value)}>
+                    {item.label} {segmentCounts[item.value] ?? 0}
+                  </Tag>
                 ))}
               </div>
 
@@ -4344,6 +4382,16 @@ function CreditControlView({
                     dataIndex: "balance",
                     align: "right",
                     render: (value) => <span className={Number(value) < 0 ? "credit-danger-text" : ""}>{formatMoney(value)}</span>
+                  },
+                  {
+                    title: "分层",
+                    dataIndex: "usage_segment",
+                    width: 112,
+                    render: (_, user) => (
+                      <Tag color={usageSegmentColor(user.usage_segment)}>
+                        {user.usage_segment_label || user.usage_segment || "未知"}
+                      </Tag>
+                    )
                   },
                   {
                     title: "窗口消耗",
@@ -4658,6 +4706,20 @@ function CreditControlView({
               <Descriptions.Item label="API Keys">{detail.item.api_keys?.length ?? detail.item.api_key_count ?? 0}</Descriptions.Item>
               <Descriptions.Item label="余额">{formatMoney(detail.item.balance)}</Descriptions.Item>
               <Descriptions.Item label="窗口消耗">{formatMoney(detail.item.consumption)}</Descriptions.Item>
+              <Descriptions.Item label="用量分层">
+                <Tag color={usageSegmentColor(detail.item.usage_segment)}>
+                  {detail.item.usage_segment_label || detail.item.usage_segment || "未知"}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="余额可撑天数">
+                {formatMoney((detail.item.usage_profile?.runway_days as number | undefined) ?? null)}
+              </Descriptions.Item>
+              <Descriptions.Item label="30d 日均">
+                {formatMoney(((detail.item.usage_profile?.daily_average_by_window as Record<string, number | null> | undefined)?.["30d"]) ?? null)}
+              </Descriptions.Item>
+              <Descriptions.Item label="5h/30d 倍率">
+                {formatMoney((detail.item.usage_profile?.short_term_ratio as number | undefined) ?? null)}
+              </Descriptions.Item>
             </Descriptions>
             <div className="section-heading">API Key 用量</div>
             <List

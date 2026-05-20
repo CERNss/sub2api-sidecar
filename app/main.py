@@ -111,7 +111,12 @@ from app.models.schemas import (
     RotationPoolCandidatesEnvelope,
     RotationPoolGroupRequest,
     Sub2APILoginRequest,
+    UsageSegmentationRefreshEnvelope,
+    UsageSegmentationSchedulerStatusResponse,
+    UserUsageSegmentResponse,
+    UserUsageSegmentsEnvelope,
 )
+from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
 from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.credit_control import CreditControlError, CreditControlService
 from app.services.credit_scheduler import CreditControlScheduler
@@ -127,6 +132,8 @@ from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
 from app.services.rotation import RotationExecutionResult, RotationService
 from app.services.rotation_scheduler import AutoRotationScheduler
+from app.services.usage_segmentation import UsageSegmentationService
+from app.services.usage_segmentation_scheduler import UsageSegmentationScheduler
 from app.stores.postgres import PostgresFlowStore
 
 setup_logging()
@@ -153,6 +160,18 @@ async def lifespan(app_instance: FastAPI):
         notification_service.refresh_samples(now=datetime.now(timezone.utc))
     except Exception:
         logger.exception("Initial operational data refresh failed")
+    usage_segmentation_service = get_usage_segmentation_service()
+    try:
+        usage_segmentation_service.refresh(now=datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("Initial usage segmentation refresh failed")
+    usage_segmentation_scheduler = UsageSegmentationScheduler(
+        segmentation_service=usage_segmentation_service,
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
+    )
+    app_instance.state.usage_segmentation_scheduler = usage_segmentation_scheduler
+    usage_segmentation_scheduler.start()
     notification_scheduler.start()
     rotation_service = get_rotation_service()
     rotation_scheduler = AutoRotationScheduler(
@@ -175,6 +194,7 @@ async def lifespan(app_instance: FastAPI):
         rotation_scheduler.stop()
         notification_scheduler.stop()
         credit_scheduler.stop()
+        usage_segmentation_scheduler.stop()
 
 
 app = FastAPI(
@@ -254,6 +274,11 @@ def get_credit_control_service() -> CreditControlService:
         store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
     )
+
+
+@lru_cache(maxsize=1)
+def get_usage_segmentation_service() -> UsageSegmentationService:
+    return UsageSegmentationService(store=get_flow_store())
 
 
 def get_operational_data_runtime_settings() -> OperationalDataRuntimeSettings:
@@ -787,6 +812,15 @@ def credit_usage_window(value: str | None) -> CreditUsageWindow:
         raise CreditControlError("unsupported credit usage window") from exc
 
 
+def usage_segment(value: str | None) -> UsageSegment | None:
+    if value in (None, ""):
+        return None
+    try:
+        return UsageSegment(value)
+    except ValueError as exc:
+        raise CreditControlError("unsupported usage segment") from exc
+
+
 def credit_user_response(item: Any) -> CreditControlUserResponse:
     return CreditControlUserResponse(
         user_id=item.user_id,
@@ -804,6 +838,39 @@ def credit_user_response(item: Any) -> CreditControlUserResponse:
         consumption=item.consumption,
         usage_window=item.usage_window.value,
         usage=item.usage,
+        usage_segment=item.usage_segment,
+        usage_segment_label=item.usage_segment_label,
+        usage_profile=item.usage_profile,
+    )
+
+
+def usage_segment_response(record: UserUsageSegmentRecord) -> UserUsageSegmentResponse:
+    return UserUsageSegmentResponse(
+        user_id=record.user_id,
+        email=record.email,
+        username=record.username,
+        name=record.name,
+        display_name=record.display_name,
+        status=record.status,
+        group_id=record.group_id,
+        group_name=record.group_name,
+        group_ids=list(record.group_ids),
+        balance=record.balance,
+        api_key_count=record.api_key_count,
+        usage_by_window=record.usage_by_window,
+        daily_average_by_window=record.daily_average_by_window,
+        baseline_window=record.baseline_window,
+        baseline_daily_average=record.baseline_daily_average,
+        short_term_ratio=record.short_term_ratio,
+        medium_term_ratio=record.medium_term_ratio,
+        runway_days=record.runway_days,
+        known_usage_window_count=record.known_usage_window_count,
+        positive_usage_window_count=record.positive_usage_window_count,
+        segment=record.segment.value,
+        segment_label=record.segment_label,
+        reasons=list(record.reasons),
+        observed_at=record.observed_at,
+        refreshed_at=record.refreshed_at,
     )
 
 
@@ -1160,6 +1227,7 @@ def credit_control_users(
     search: str | None = None,
     status_filter: str | None = Query(default=None, alias="status"),
     group_id: str | None = None,
+    usage_segment_filter: str | None = Query(default=None, alias="usage_segment"),
     balance_min: float | None = None,
     balance_max: float | None = None,
     consumption_min: float | None = None,
@@ -1178,6 +1246,7 @@ def credit_control_users(
         balance_max=balance_max,
         consumption_min=consumption_min,
         consumption_max=consumption_max,
+        usage_segment=usage_segment(usage_segment_filter),
         limit=limit,
         offset=offset,
     )
@@ -1254,6 +1323,7 @@ def run_credit_adjustment(
             balance_max=payload.target.balance_max,
             consumption_min=payload.target.consumption_min,
             consumption_max=payload.target.consumption_max,
+            usage_segment=usage_segment(payload.target.usage_segment),
         )
         record = (
             service.preview_adjustment_for_users(
@@ -1411,6 +1481,63 @@ def credit_control_scheduler_status(
         )
     else:
         response = CreditControlSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/api/usage-segmentation/users")
+def usage_segmentation_users(
+    segment: str | None = None,
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    parsed_segment = usage_segment(segment)
+    store = get_flow_store()
+    records = store.list_user_usage_segments(
+        segment=parsed_segment,
+        limit=limit,
+        offset=offset,
+    )
+    total = store.count_user_usage_segments(segment=parsed_segment)
+    payload = UserUsageSegmentsEnvelope(
+        items=[usage_segment_response(record) for record in records],
+        total=total,
+        limit=limit,
+        offset=offset,
+        segment_counts=store.user_usage_segment_counts(),
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.post("/api/usage-segmentation/refresh")
+def usage_segmentation_refresh(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_usage_segmentation_service().refresh()
+    payload = UsageSegmentationRefreshEnvelope(
+        refreshed_at=result.refreshed_at,
+        user_count=result.user_count,
+        segment_counts=result.segment_counts,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
+@app.get("/api/usage-segmentation/scheduler")
+def usage_segmentation_scheduler_status(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    scheduler = getattr(app.state, "usage_segmentation_scheduler", None)
+    if scheduler is None:
+        runtime_settings = get_operational_data_runtime_settings()
+        response = UsageSegmentationSchedulerStatusResponse(
+            enabled=runtime_settings.enabled,
+            running=False,
+            cadence_seconds=runtime_settings.collect_interval_seconds,
+            tick_count=0,
+            last_segment_counts=get_flow_store().user_usage_segment_counts(),
+        )
+    else:
+        response = UsageSegmentationSchedulerStatusResponse(**scheduler.snapshot().__dict__)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 

@@ -221,6 +221,9 @@ class CreditControlUserResponse(BaseModel):
     consumption: float | None = None
     usage_window: str
     usage: dict[str, Any] = Field(default_factory=dict)
+    usage_segment: str | None = None
+    usage_segment_label: str | None = None
+    usage_profile: dict[str, Any] = Field(default_factory=dict)
     api_key_count: int | None = None
     last_activity_at: str | None = None
     updated_at: str | None = None
@@ -280,6 +283,7 @@ class CreditControlTargetRequest(BaseModel):
     balance_max: float | None = None
     consumption_min: float | None = None
     consumption_max: float | None = None
+    usage_segment: str | None = None
 
 
 class CreditControlAdjustmentRequest(BaseModel):
@@ -409,6 +413,63 @@ class CreditControlAuditEnvelope(BaseModel):
     success: bool = True
     items: list[CreditControlAuditResponse]
     total: int
+
+
+class UserUsageSegmentResponse(BaseModel):
+    user_id: Any
+    email: str
+    username: str | None = None
+    name: str | None = None
+    display_name: str | None = None
+    status: str | None = None
+    group_id: Any | None = None
+    group_name: str | None = None
+    group_ids: list[Any] = Field(default_factory=list)
+    balance: float | None = None
+    api_key_count: int = 0
+    usage_by_window: dict[str, float | None] = Field(default_factory=dict)
+    daily_average_by_window: dict[str, float | None] = Field(default_factory=dict)
+    baseline_window: str | None = None
+    baseline_daily_average: float | None = None
+    short_term_ratio: float | None = None
+    medium_term_ratio: float | None = None
+    runway_days: float | None = None
+    known_usage_window_count: int = 0
+    positive_usage_window_count: int = 0
+    segment: str
+    segment_label: str
+    reasons: list[str] = Field(default_factory=list)
+    observed_at: datetime | None = None
+    refreshed_at: datetime | None = None
+
+
+class UserUsageSegmentsEnvelope(BaseModel):
+    success: bool = True
+    items: list[UserUsageSegmentResponse]
+    total: int
+    limit: int
+    offset: int
+    segment_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class UsageSegmentationRefreshEnvelope(BaseModel):
+    success: bool = True
+    refreshed_at: datetime
+    user_count: int
+    segment_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class UsageSegmentationSchedulerStatusResponse(BaseModel):
+    success: bool = True
+    enabled: bool
+    running: bool
+    cadence_seconds: int
+    tick_count: int
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
+    last_tick_error: str | None = None
+    last_refreshed_count: int = 0
+    last_segment_counts: dict[str, int] | None = None
 
 
 class OrchestrationAssignRequest(BaseModel):

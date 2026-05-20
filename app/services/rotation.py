@@ -21,6 +21,7 @@ from app.models.rotation import (
     RotationTrigger,
     UserGroupAssignment,
 )
+from app.models.usage_segmentation import UserUsageSegmentRecord
 from app.services.operational_data import (
     SOURCE_GROUPS,
     SOURCE_USER_API_KEYS,
@@ -1343,10 +1344,14 @@ class RotationService:
         return ",".join(f"{key}:{loads[key]:.6g}" for key in sorted(loads))
 
     def _build_usage_snapshot(self, user_id: Any) -> dict[str, Any]:
-        api_keys_response = self._user_api_keys_snapshot(user_id)
-        api_keys = api_keys_response["items"]
-        has_api_keys = api_keys_response["total"] > 0
         usage_window = self._window_enum()
+        segment = self.store.get_user_usage_segment(user_id)
+        if segment is not None:
+            usage_value = segment.usage_by_window.get(usage_window.value)
+            return self._usage_snapshot_from_segment(segment, usage_window, usage_value)
+
+        api_keys_response = self._user_api_keys_snapshot(user_id)
+        has_api_keys = api_keys_response["total"] > 0
         usage_stats = self._user_usage_snapshot(user_id, usage_window)
         usage_value = self._usage_value_from_stats(usage_stats)
 
@@ -1356,6 +1361,29 @@ class RotationService:
             "usage_source": "user_usage" if usage_value is not None else "missing",
             "has_api_keys": has_api_keys,
             "api_key_count": api_keys_response["total"],
+        }
+
+    def _usage_snapshot_from_segment(
+        self,
+        segment: UserUsageSegmentRecord,
+        usage_window: AutoRotationUsageWindow,
+        usage_value: float | None,
+    ) -> dict[str, Any]:
+        return {
+            "usage_window": usage_window,
+            "usage_value": float(usage_value or 0.0),
+            "usage_source": "usage_segmentation",
+            "segment": segment.segment.value,
+            "segment_label": segment.segment_label,
+            "daily_average_by_window": segment.daily_average_by_window,
+            "baseline_window": segment.baseline_window,
+            "baseline_daily_average": segment.baseline_daily_average,
+            "short_term_ratio": segment.short_term_ratio,
+            "medium_term_ratio": segment.medium_term_ratio,
+            "runway_days": segment.runway_days,
+            "has_api_keys": bool(segment.has_api_keys),
+            "api_key_count": segment.api_key_count,
+            "refreshed_at": segment.refreshed_at.isoformat(),
         }
 
     def _usage_value_from_stats(self, stats: dict[str, Any]) -> float | None:

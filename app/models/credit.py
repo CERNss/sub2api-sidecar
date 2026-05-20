@@ -128,6 +128,9 @@ class CreditUserSnapshot(BaseModel):
     consumption: float | None = None
     usage_window: CreditUsageWindow = CreditUsageWindow.window_1d
     usage: dict[str, Any] = Field(default_factory=dict)
+    usage_segment: str | None = None
+    usage_segment_label: str | None = None
+    usage_profile: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreditAdjustmentOutcome(BaseModel):
