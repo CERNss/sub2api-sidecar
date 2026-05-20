@@ -507,6 +507,10 @@ type CreditControlUsersPayload = ApiPayload & {
   aggregates?: CreditControlAggregates;
 };
 
+type UsageSegmentationPayload = ApiPayload & {
+  segment_counts?: Record<string, number>;
+};
+
 type CreditControlAuditItem = {
   audit_id?: string | null;
   event_id?: string | null;
@@ -676,6 +680,7 @@ const usageSegmentOptions = [
   { label: "轻量", value: "light" },
   { label: "沉默", value: "idle" }
 ] as const;
+const usageSegmentOverviewOrder = ["heavy", "active", "light", "idle", "spike"] as const;
 const operatorViewPaths: Record<OperatorView, string> = {
   orchestration: "/orchestration/manual",
   provision: "/provision",
@@ -936,6 +941,11 @@ function usageSegmentColor(segment: string | null | undefined): string {
   if (segment === "light") return "blue";
   if (segment === "idle") return "default";
   return "default";
+}
+
+function usageSegmentDisplayLabel(value: string): string {
+  const option = usageSegmentOptions.find((item) => item.value === value);
+  return option?.label ?? value;
 }
 
 function defaultPolicyDraft(): CreditPolicyDraft {
@@ -3849,6 +3859,7 @@ function CreditControlView({
   });
   const [users, setUsers] = useState<CreditControlUser[]>([]);
   const [aggregates, setAggregates] = useState<CreditControlAggregates>({});
+  const [segmentOverviewCounts, setSegmentOverviewCounts] = useState<Record<string, number>>({});
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState({ limit: 25, offset: 0 });
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
@@ -3948,6 +3959,21 @@ function CreditControlView({
       }
     } finally {
       setLoadingUsers(false);
+    }
+  }
+
+  async function loadSegmentOverview() {
+    try {
+      const payload = await requestJson<UsageSegmentationPayload>(
+        "/api/usage-segmentation/users?limit=1",
+        { method: "GET" },
+        "加载用量分层概览失败"
+      );
+      setSegmentOverviewCounts(payload.segment_counts ?? {});
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setSegmentOverviewCounts({});
+      }
     }
   }
 
@@ -4180,6 +4206,7 @@ function CreditControlView({
   useEffect(() => {
     void loadRuntimeSettings();
     void loadUsers();
+    void loadSegmentOverview();
   }, []);
 
   useEffect(() => {
@@ -4199,7 +4226,12 @@ function CreditControlView({
     { label: "平均余额", value: formatMoney(aggregates.average_balance), tone: "average" },
     { label: "负余额", value: unknownToText(aggregates.negative_balance_count ?? 0), tone: "danger" }
   ];
-  const segmentCounts = aggregates.segment_counts ?? {};
+  const segmentOverviewRows = usageSegmentOverviewOrder
+    .map((segment) => ({
+      segment,
+      label: usageSegmentDisplayLabel(segment),
+      count: segmentOverviewCounts[segment] ?? 0
+    }));
 
   return (
     <div className="credit-workspace">
@@ -4232,7 +4264,10 @@ function CreditControlView({
               icon={<ReloadOutlined />}
               loading={loadingUsers || loadingPolicies || loadingRuns || loadingAudit}
               onClick={() => {
-                if (activeTab === "users") void loadUsers();
+                if (activeTab === "users") {
+                  void loadUsers();
+                  void loadSegmentOverview();
+                }
                 if (activeTab === "policies") void loadPolicies();
                 if (activeTab === "runs") void loadRuns();
                 if (activeTab === "audit") void loadAudit();
@@ -4324,13 +4359,24 @@ function CreditControlView({
                   </div>
                 ))}
               </div>
-              <div className="credit-segment-strip">
-                {usageSegmentOptions.filter((item) => item.value).map((item) => (
-                  <Tag key={item.value} color={usageSegmentColor(item.value)}>
-                    {item.label} {segmentCounts[item.value] ?? 0}
-                  </Tag>
+              <section className="credit-segment-overview" aria-label="用量分层人数">
+                <div className="credit-segment-overview-head">
+                  <span>分层</span>
+                  <span>人数</span>
+                </div>
+                {segmentOverviewRows.map((item) => (
+                  <div
+                    key={item.segment}
+                    className="credit-segment-overview-row"
+                  >
+                    <span>
+                      <Tag color={usageSegmentColor(item.segment)}>{item.label}</Tag>
+                      <strong>{item.segment}</strong>
+                    </span>
+                    <strong>{item.count}</strong>
+                  </div>
                 ))}
-              </div>
+              </section>
 
               <Table
                 className="credit-table"

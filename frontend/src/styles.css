@@ -818,7 +818,7 @@ pre {
 }
 
 .credit-filter-row-primary {
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, 150px) minmax(100px, 120px) minmax(120px, 140px) auto;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, 150px) minmax(100px, 120px) minmax(120px, 140px) minmax(110px, 130px) auto;
 }
 
 .credit-filter-row-range {
@@ -829,13 +829,6 @@ pre {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  margin-bottom: 12px;
-}
-
-.credit-segment-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
   margin-bottom: 12px;
 }
 
@@ -876,6 +869,53 @@ pre {
 
 .credit-aggregate-danger {
   border-left: 4px solid #dc2626;
+}
+
+.credit-segment-overview {
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid #dbe5f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.credit-segment-overview-head,
+.credit-segment-overview-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 120px);
+  align-items: center;
+  gap: 16px;
+  padding: 11px 14px;
+}
+
+.credit-segment-overview-head {
+  color: #334155;
+  background: #f8fafc;
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.credit-segment-overview-row {
+  border-top: 1px solid #e5edf5;
+}
+
+.credit-segment-overview-row > span {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.credit-segment-overview-row strong {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.credit-segment-overview-row > strong:last-child,
+.credit-segment-overview-head > span:last-child {
+  text-align: right;
 }
 
 .credit-table {
