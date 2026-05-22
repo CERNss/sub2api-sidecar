@@ -542,6 +542,40 @@ class OrchestrationApiKeyAssignRequest(BaseModel):
     reason: str | None = None
 
 
+class KeyTransferRequest(BaseModel):
+    source_user_id: Any | None = None
+    dry_run: bool = False
+    reason: str | None = None
+
+
+class KeyTransferItemResponse(BaseModel):
+    key_id: Any
+    key_name: str | None = None
+    source_user_id: Any | None = None
+    source_group_id: Any | None = None
+    target_user_id: Any | None = None
+    target_email: str | None = None
+    target_group_id: Any | None = None
+    status: str
+    reason: str
+    quota: float | None = None
+
+
+class KeyTransferEnvelope(BaseModel):
+    success: bool = True
+    run_id: str | None = None
+    run_kind: str | None = None
+    tag: str | None = None
+    dry_run: bool = False
+    source_user_id: Any
+    key_name_pattern: str
+    planned_count: int = 0
+    moved_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    items: list[KeyTransferItemResponse] = Field(default_factory=list)
+
+
 class RotationPoolGroupRequest(BaseModel):
     group_id: Any
     priority: int | None = Field(default=None, ge=0)

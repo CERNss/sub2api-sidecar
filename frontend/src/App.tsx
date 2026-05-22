@@ -95,7 +95,7 @@ type ProvisionStartPayload = ApiPayload & {
 
 type FlowStatusFilter = "" | "pending_oauth" | "completed" | "failed";
 type AssignmentModeFilter = "" | "dedicated" | "managed_pool";
-type OperatorView = "orchestration" | "provision" | "notification" | "creditControl";
+type OperatorView = "orchestration" | "provision" | "keyTransfer" | "notification" | "creditControl";
 type OrchestrationTab = "manual" | "dynamic";
 type CreditControlTab = "users" | "policies" | "runs" | "audit";
 
@@ -393,6 +393,33 @@ type RotationExecutionPayload = ApiPayload & {
   metadata?: Record<string, unknown> | null;
 };
 
+type KeyTransferItem = {
+  key_id: unknown;
+  key_name: string | null;
+  source_user_id: unknown | null;
+  source_group_id: unknown | null;
+  target_user_id: unknown | null;
+  target_email: string | null;
+  target_group_id: unknown | null;
+  status: string;
+  reason: string;
+  quota: number | null;
+};
+
+type KeyTransferPayload = ApiPayload & {
+  run_id?: string | null;
+  run_kind?: string | null;
+  tag?: string | null;
+  dry_run: boolean;
+  source_user_id: unknown;
+  key_name_pattern: string;
+  planned_count: number;
+  moved_count: number;
+  skipped_count: number;
+  failed_count: number;
+  items: KeyTransferItem[];
+};
+
 type AutoRotationRunPayload = ApiPayload & {
   run_id?: string | null;
   run_kind?: string | null;
@@ -655,6 +682,8 @@ type CreditPolicyDraft = {
 const emptyStatus: StatusState = { message: "", tone: "idle" };
 const APP_TITLE = "Sub2API OpenAI OAuth 编排服务";
 const DEFAULT_AUTH_USERNAME = "admin";
+const DEFAULT_KEY_TRANSFER_SOURCE_SEARCH = "admin";
+const KEY_TRANSFER_NAME_PATTERN = "服务:对象:版本号:邮箱";
 const FIXED_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback";
 const graphCompactNodeSize = { width: 272, height: 82 };
 const graphTallNodeSize = { width: 272, height: 184 };
@@ -684,6 +713,7 @@ const usageSegmentOverviewOrder = ["heavy", "active", "light", "idle", "spike"] 
 const operatorViewPaths: Record<OperatorView, string> = {
   orchestration: "/orchestration/manual",
   provision: "/provision",
+  keyTransfer: "/key-transfer",
   notification: "/notifications",
   creditControl: "/credit-control"
 };
@@ -1003,6 +1033,9 @@ function draftToPolicyPayload(draft: CreditPolicyDraft): ApiPayload {
 
 function runKindLabel(run: AutoRotationRunPayload): string {
   if (run.run_kind === "manual") {
+    if (run.tag === "key_transfer" || run.tag === "key_transfer_preview") {
+      return run.dry_run ? "密钥转移预览" : "密钥转移";
+    }
     return run.tag === "manual_api_key" ? "手动 Key" : "手动用户";
   }
   return run.dry_run ? "动态预览" : "动态执行";
@@ -1263,6 +1296,25 @@ function UserIdentity({ name, email }: { name: ReactNode; email: ReactNode }) {
 function renderUserOption(option: { label?: ReactNode; data: UserSelectOption }) {
   const userOption = option.data;
   return <UserIdentity name={option.label} email={userOption.emailText} />;
+}
+
+function transferEmailFromKeyName(keyName: string | null): string | null {
+  if (!keyName) return null;
+  const parts = keyName.split(":").map((part) => part.trim());
+  if (parts.length !== 4 || parts.slice(0, 3).some((part) => !part)) return null;
+  const email = parts[3];
+  if (!/^[^\s@:;]+@[^\s@:;]+\.[^\s@:;]+$/.test(email)) return null;
+  return email.toLowerCase();
+}
+
+function isTransferKey(key: OrchestrationApiKey): boolean {
+  return transferEmailFromKeyName(key.name) !== null;
+}
+
+function transferStatusColor(status: string): string {
+  if (status === "moved" || status === "planned") return "green";
+  if (status === "failed") return "red";
+  return "default";
 }
 
 function buildGroupOption(group: OrchestrationGroup, disabled = false): GroupSelectOption {
@@ -1565,6 +1617,9 @@ function viewFromPath(pathname: string): OperatorView {
   if (pathname === operatorViewPaths.creditControl || pathname.startsWith("/credit-control/")) {
     return "creditControl";
   }
+  if (pathname === operatorViewPaths.keyTransfer || pathname === "/data-sync") {
+    return "keyTransfer";
+  }
   if (pathname === operatorViewPaths.provision) {
     return "provision";
   }
@@ -1592,6 +1647,8 @@ function loginRedirectPath(): string {
     ...Object.values(orchestrationTabPaths),
     "/orchestration",
     "/dynamic",
+    "/key-transfer",
+    "/data-sync",
     "/credit-control/users",
     "/credit-control/policies",
     "/credit-control/runs",
@@ -2575,6 +2632,14 @@ function OperatorWorkspace() {
               OAuth 预配
             </button>
             <button
+              className={activeView === "keyTransfer" ? "active" : ""}
+              type="button"
+              onClick={() => navigateView("keyTransfer")}
+            >
+              <KeyOutlined />
+              密钥转移
+            </button>
+            <button
               className={activeView === "notification" ? "active" : ""}
               type="button"
               onClick={() => navigateView("notification")}
@@ -2610,6 +2675,8 @@ function OperatorWorkspace() {
           onTabChange={navigateCreditTab}
           onAuthExpired={handleAuthExpired}
         />
+      ) : activeView === "keyTransfer" ? (
+        <KeyTransferView onAuthExpired={handleAuthExpired} />
       ) : activeView === "provision" ? (
         <ProvisionForm
           onAuthExpired={handleAuthExpired}
@@ -2623,6 +2690,314 @@ function OperatorWorkspace() {
         />
       )}
     </main>
+  );
+}
+
+function KeyTransferView({
+  onAuthExpired
+}: {
+  onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+}) {
+  const [sourceSearch, setSourceSearch] = useState(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
+  const [users, setUsers] = useState<OrchestrationUser[]>([]);
+  const [sourceUserId, setSourceUserId] = useState("");
+  const [apiKeys, setApiKeys] = useState<OrchestrationApiKey[]>([]);
+  const [status, setStatus] = useState<StatusState>(emptyStatus);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [loadingKeys, setLoadingKeys] = useState(false);
+  const [submitting, setSubmitting] = useState<"preview" | "execute" | null>(null);
+  const [transferResult, setTransferResult] = useState<KeyTransferPayload | null>(null);
+  const selectedUser = users.find((user) => idValue(user.user_id) === sourceUserId) ?? null;
+  const transferKeys = apiKeys.filter(isTransferKey);
+  const userOptions = users.map(buildUserOption);
+
+  async function loadSourceUsers(searchOverride = sourceSearch) {
+    const searchTerm = searchOverride.trim() || DEFAULT_KEY_TRANSFER_SOURCE_SEARCH;
+    setLoadingUsers(true);
+    try {
+      const payload = await requestJson<OrchestrationUsersPayload>(
+        `/orchestration/users?${compactParams({ email: searchTerm })}`,
+        { method: "GET" },
+        "加载 admin 源用户失败"
+      );
+      setUsers(payload.items);
+      const nextUserId = payload.items.length === 1 ? idValue(payload.items[0].user_id) : "";
+      setSourceUserId((current) =>
+        current && payload.items.some((user) => idValue(user.user_id) === current) ? current : nextUserId
+      );
+      setStatus({
+        message:
+          payload.items.length === 0
+            ? `没有找到 admin 源用户：${searchTerm}`
+            : payload.items.length === 1
+            ? `已定位 admin 源用户：${payload.items[0].email || userDisplayName(payload.items[0])}`
+            : `找到 ${payload.items.length} 个候选 admin 用户，请选择一个`,
+        tone: payload.items.length === 1 ? "success" : "info"
+      });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setUsers([]);
+        setSourceUserId("");
+        setStatus({ message: getErrorMessage(error, "加载 admin 源用户失败"), tone: "error" });
+      }
+    } finally {
+      setLoadingUsers(false);
+    }
+  }
+
+  async function loadSourceKeys(userId = sourceUserId) {
+    if (!userId) {
+      setApiKeys([]);
+      return;
+    }
+    setLoadingKeys(true);
+    try {
+      const payload = await requestJson<OrchestrationApiKeysPayload>(
+        `/orchestration/users/${encodeURIComponent(userId)}/api-keys`,
+        { method: "GET" },
+        "加载 admin API Keys 失败"
+      );
+      setApiKeys(payload.items);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setApiKeys([]);
+        setStatus({ message: getErrorMessage(error, "加载 admin API Keys 失败"), tone: "error" });
+      }
+    } finally {
+      setLoadingKeys(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadSourceUsers(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
+  }, []);
+
+  useEffect(() => {
+    void loadSourceKeys(sourceUserId);
+  }, [sourceUserId]);
+
+  async function runKeyTransfer(dryRun: boolean) {
+    if (!selectedUser) {
+      setStatus({ message: "请先定位 admin 源用户。", tone: "error" });
+      return;
+    }
+    const action = dryRun ? "preview" : "execute";
+    setSubmitting(action);
+    setStatus({ message: dryRun ? "正在预览密钥转移" : "正在执行密钥转移", tone: "info" });
+    try {
+      const payload = await requestJson<KeyTransferPayload>(
+        "/orchestration/api-keys/transfer",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            source_user_id: selectedUser.user_id,
+            dry_run: dryRun,
+            reason: "密钥转移一键操作"
+          })
+        },
+        dryRun ? "密钥转移预览失败" : "密钥转移失败"
+      );
+      setTransferResult(payload);
+      const message = dryRun
+        ? `预览完成：可转移 ${payload.planned_count}，跳过 ${payload.skipped_count}，失败 ${payload.failed_count}`
+        : `转移完成：已转移 ${payload.moved_count}，跳过 ${payload.skipped_count}，失败 ${payload.failed_count}`;
+      setStatus({
+        message,
+        tone: payload.failed_count > 0 ? "error" : payload.planned_count + payload.moved_count + payload.skipped_count > 0 ? "success" : "info"
+      });
+      if (!dryRun) {
+        await loadSourceKeys(idValue(selectedUser.user_id));
+      }
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, dryRun ? "密钥转移预览失败" : "密钥转移失败"), tone: "error" });
+      }
+    } finally {
+      setSubmitting(null);
+    }
+  }
+
+  return (
+    <section className="panel data-sync-shell">
+      <header className="data-sync-header">
+        <div>
+          <p className="eyebrow">Key Transfer</p>
+          <h2>密钥转移</h2>
+        </div>
+        <Space wrap>
+          <Tag color={selectedUser ? "green" : "default"}>{selectedUser ? "admin 已定位" : "等待 admin"}</Tag>
+          <Tag color={transferKeys.length > 0 ? "blue" : "default"}>{transferKeys.length} 个可转移 Key</Tag>
+        </Space>
+      </header>
+
+      <div className="data-sync-grid">
+        <section className="data-sync-pane">
+          <div className="data-sync-pane-head">
+            <Space>
+              <UserOutlined />
+              <Typography.Text strong>admin 源用户</Typography.Text>
+            </Space>
+            <AntButton
+              size="small"
+              icon={<ReloadOutlined />}
+              loading={loadingUsers}
+              onClick={() => void loadSourceUsers()}
+            >
+              刷新
+            </AntButton>
+          </div>
+          <div className="data-sync-source-row">
+            <Input.Search
+              value={sourceSearch}
+              placeholder="admin / admin@example.com"
+              enterButton="查询"
+              loading={loadingUsers}
+              onChange={(event) => setSourceSearch(event.target.value)}
+              onSearch={(value) => {
+                setSourceSearch(value || DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
+                void loadSourceUsers(value || DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
+              }}
+            />
+            <Select
+              value={sourceUserId || undefined}
+              placeholder="选择 admin 用户"
+              loading={loadingUsers}
+              options={userOptions}
+              optionFilterProp="searchText"
+              optionRender={renderUserOption}
+              showSearch
+              onChange={(value) => setSourceUserId(value)}
+            />
+          </div>
+          <div className="summary-grid data-sync-summary-grid">
+            <SummaryItem label="User ID" value={unknownToText(selectedUser?.user_id)} />
+            <SummaryItem label="Email" value={selectedUser?.email || "-"} />
+            <SummaryItem label="admin 分组" value={selectedUser?.current_group_name || unknownToText(selectedUser?.current_group_id)} />
+            <SummaryItem label="待扫描 Key" value={String(apiKeys.length)} />
+          </div>
+          <Alert
+            showIcon
+            type="info"
+            message={`一键转移会扫描 admin 用户下 ${KEY_TRANSFER_NAME_PATTERN} 格式的 Key，按邮箱找到已有目标用户，改到目标用户第一个可用分组，并移除 Key 额度限制。`}
+          />
+        </section>
+
+        <section className="data-sync-pane">
+          <div className="data-sync-pane-head">
+            <Space>
+              <KeyOutlined />
+              <Typography.Text strong>一键操作</Typography.Text>
+            </Space>
+            {transferResult ? (
+              <Tag color={transferResult.failed_count > 0 ? "red" : "blue"}>
+                {transferResult.dry_run ? "预览结果" : "执行结果"}
+              </Tag>
+            ) : null}
+          </div>
+          <Space wrap>
+            <AntButton
+              icon={<Search />}
+              loading={submitting === "preview"}
+              disabled={!selectedUser || submitting !== null}
+              onClick={() => void runKeyTransfer(true)}
+            >
+              预览
+            </AntButton>
+            <AntButton
+              type="primary"
+              icon={<SyncOutlined />}
+              loading={submitting === "execute"}
+              disabled={!selectedUser || submitting !== null}
+              onClick={() => void runKeyTransfer(false)}
+            >
+              一键转移
+            </AntButton>
+            <AntButton
+              icon={<ReloadOutlined />}
+              loading={loadingKeys}
+              disabled={!selectedUser}
+              onClick={() => void loadSourceKeys()}
+            >
+              刷新 Key
+            </AntButton>
+          </Space>
+          {status.message ? (
+            <Alert
+              className="data-sync-status"
+              showIcon
+              type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
+              message={status.message}
+            />
+          ) : null}
+          <div className="data-sync-result-grid">
+            <div>
+              <span>计划</span>
+              <strong>{transferResult?.planned_count ?? 0}</strong>
+            </div>
+            <div>
+              <span>已转移</span>
+              <strong>{transferResult?.moved_count ?? 0}</strong>
+            </div>
+            <div>
+              <span>跳过</span>
+              <strong>{transferResult?.skipped_count ?? 0}</strong>
+            </div>
+            <div>
+              <span>失败</span>
+              <strong>{transferResult?.failed_count ?? 0}</strong>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section className="data-sync-pane data-sync-list-pane">
+        <div className="data-sync-pane-head">
+          <Space>
+            <ListChecks size={16} aria-hidden="true" />
+            <Typography.Text strong>转移明细</Typography.Text>
+          </Space>
+          {loadingKeys ? <Spin size="small" /> : <Tag>{apiKeys.length} admin Key</Tag>}
+        </div>
+        {transferResult ? (
+          <Table
+            className="data-sync-table"
+            size="small"
+            rowKey={(item) => idValue(item.key_id) || `${item.target_email}-${item.status}`}
+            dataSource={transferResult.items}
+            pagination={{ pageSize: 8, hideOnSinglePage: true }}
+            columns={[
+              { title: "Key", dataIndex: "key_name", render: (value, item) => value || unknownToText(item.key_id) },
+              { title: "目标邮箱", dataIndex: "target_email", render: (value) => value || "-" },
+              { title: "目标用户", dataIndex: "target_user_id", render: (value) => unknownToText(value) },
+              { title: "目标分组", dataIndex: "target_group_id", render: (value) => unknownToText(value) },
+              {
+                title: "状态",
+                dataIndex: "status",
+                render: (value: string) => <Tag color={transferStatusColor(value)}>{value}</Tag>
+              },
+              { title: "原因", dataIndex: "reason" }
+            ]}
+          />
+        ) : (
+          <List
+            className="data-sync-key-list"
+            size="small"
+            dataSource={transferKeys}
+            locale={{ emptyText: loadingKeys ? "正在加载 Key" : "当前 admin 用户暂无可转移 Key" }}
+            renderItem={(key) => (
+              <List.Item>
+                <List.Item.Meta
+                  avatar={<KeyOutlined />}
+                  title={key.name || unknownToText(key.key_id)}
+                  description={`${apiKeyRouteLabel(key)} · Key ID ${unknownToText(key.key_id)}`}
+                />
+                <Tag color={statusTagColor(key.status)}>{key.status || "unknown"}</Tag>
+              </List.Item>
+            )}
+          />
+        )}
+      </section>
+    </section>
   );
 }
 
@@ -3772,6 +4147,7 @@ function ExistingOrchestrationView({
                   ? `执行编排（${selectedKeyIds.length} 个 Key）`
                   : "执行编排"}
               </AntButton>
+
             </section>
           </form>
         ) : (

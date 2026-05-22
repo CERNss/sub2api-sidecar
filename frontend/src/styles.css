@@ -748,6 +748,107 @@ pre {
   align-items: stretch;
 }
 
+/* --- Data sync --- */
+
+.data-sync-shell {
+  min-width: 0;
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.data-sync-header,
+.data-sync-pane-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.data-sync-header h2 {
+  margin: 0;
+}
+
+.data-sync-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(340px, 0.92fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.data-sync-pane {
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  background: #ffffff;
+}
+
+.data-sync-source-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 0.9fr);
+  gap: 10px;
+}
+
+.data-sync-summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.data-sync-status {
+  margin: 0;
+}
+
+.data-sync-result-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.data-sync-result-grid > div {
+  min-width: 0;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 4px;
+  background: #f8fafc;
+}
+
+.data-sync-result-grid span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.data-sync-result-grid strong {
+  color: #111827;
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 780;
+}
+
+.data-sync-list-pane {
+  overflow: hidden;
+}
+
+.data-sync-table {
+  min-width: 0;
+}
+
+.data-sync-table .ant-table-cell,
+.data-sync-key-list .ant-list-item-meta-title,
+.data-sync-key-list .ant-list-item-meta-description {
+  overflow-wrap: anywhere;
+}
+
 /* --- Credit control --- */
 
 .credit-workspace {
@@ -3907,6 +4008,8 @@ pre {
   .workspace,
   .orchestration-grid,
   .notification-workspace,
+  .data-sync-grid,
+  .data-sync-source-row,
   .credit-users-layout,
   .credit-policy-layout,
   .rule-layout,
@@ -3925,6 +4028,8 @@ pre {
   }
 
   .credit-aggregate-grid,
+  .data-sync-summary-grid,
+  .data-sync-result-grid,
   .credit-editor-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -4035,6 +4140,9 @@ pre {
   .segmented,
   .filter-grid,
   .credit-aggregate-grid,
+  .data-sync-summary-grid,
+  .data-sync-result-grid,
+  .data-sync-source-row,
   .credit-filter-row-primary,
   .credit-filter-row-range,
   .credit-editor-grid,

@@ -216,6 +216,7 @@ class FakeRotationSub2API:
         self.replace_calls: list[dict[str, object]] = []
         self.set_user_group_calls: list[dict[str, object]] = []
         self.api_key_group_calls: list[dict[str, object]] = []
+        self.api_key_owner_calls: list[dict[str, object]] = []
         self.balance_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
         self.group_usage_by_window = {
@@ -416,14 +417,51 @@ class FakeRotationSub2API:
             return FakeResponse(500, {"message": "boom"})
         if method == "PUT" and path.startswith("/api/v1/admin/api-keys/"):
             key_id = path.split("/")[5]
+            if "user_id" in json:
+                self.api_key_owner_calls.append(
+                    {
+                        "key_id": key_id,
+                        "user_id": json["user_id"],
+                        "group_id": json["group_id"],
+                        "quota": json["quota"],
+                        "reset_quota": json["reset_quota"],
+                    }
+                )
+                key_record: dict[str, object] | None = None
+                source_user_id: int | None = None
+                for user_id, keys in self.user_api_keys.items():
+                    for candidate in keys:
+                        if str(candidate.get("id") or candidate.get("key_id")) == key_id:
+                            key_record = candidate
+                            source_user_id = user_id
+                            break
+                    if key_record is not None:
+                        break
+                if key_record is None:
+                    return FakeResponse(404, {"message": "api key not found"})
+                if source_user_id is not None:
+                    self.user_api_keys[source_user_id] = [
+                        candidate
+                        for candidate in self.user_api_keys[source_user_id]
+                        if str(candidate.get("id") or candidate.get("key_id")) != key_id
+                    ]
+                key_record["user_id"] = json["user_id"]
+                key_record["group_id"] = json["group_id"]
+                key_record["quota"] = json["quota"]
+                target_user_id = int(json["user_id"])
+                self.user_api_keys.setdefault(target_user_id, []).append(key_record)
+                return FakeResponse(
+                    200,
+                    {
+                        "code": 0,
+                        "message": "success",
+                        "data": {"api_key": key_record},
+                    },
+                )
             self.api_key_group_calls.append({"key_id": key_id, "group_id": json["group_id"]})
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
-        if method == "GET" and path == "/api/v1/admin/users/101/api-keys":
-            return self._api_keys_response(101)
-        if method == "GET" and path == "/api/v1/admin/users/202/api-keys":
-            return self._api_keys_response(202)
-        if method == "GET" and path == "/api/v1/admin/users/303/api-keys":
-            return self._api_keys_response(303)
+        if method == "GET" and path.startswith("/api/v1/admin/users/") and path.endswith("/api-keys"):
+            return self._api_keys_response(int(path.split("/")[5]))
         if method == "GET" and path == "/api/v1/admin/usage/stats":
             return FakeResponse(
                 200,
@@ -800,6 +838,36 @@ def test_sub2api_client_updates_single_api_key_group_with_admin_endpoint() -> No
             "method": "PUT",
             "path": "/api/v1/admin/api-keys/key-1",
             "json": {"group_id": 123},
+        }
+    ]
+
+
+def test_sub2api_client_replace_group_sends_numeric_group_ids_as_numbers() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"migrated_keys": 1}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.replace_exclusive_user_group(
+            user_id=3,
+            old_group_id=15,
+            new_group_id="7",
+        )
+
+    assert result["migrated_keys"] == 1
+    assert calls == [
+        {
+            "method": "POST",
+            "path": "/api/v1/admin/users/3/replace-group",
+            "json": {"old_group_id": 15, "new_group_id": 7},
         }
     ]
 
@@ -2023,6 +2091,234 @@ def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> 
     assert runs[0].moved[0]["metadata"]["key_id"] == "key-101"
 
 
+def test_key_transfer_moves_matching_admin_keys_and_preserves_key_value(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users[2]["group_ids"] = [22, 11]
+    backend.user_api_keys[1] = [
+        {
+            "id": "9001",
+            "user_id": 1,
+            "key": "sk-keep-this-value",
+            "name": "rotom:codex:v1:idle@example.com",
+            "group_id": 11,
+            "quota": 50.0,
+        }
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        preview = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"dry_run": True},
+        )
+        execute = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"dry_run": False},
+        )
+
+    assert preview.status_code == 200
+    assert preview.json()["planned_count"] == 1
+    assert preview.json()["moved_count"] == 0
+    assert backend.api_key_owner_calls == [
+        {
+            "key_id": "9001",
+            "user_id": 202,
+            "group_id": 22,
+            "quota": 0.0,
+            "reset_quota": True,
+        }
+    ]
+    assert execute.status_code == 200
+    payload = execute.json()
+    assert payload["moved_count"] == 1
+    item = payload["items"][0]
+    assert item["key_id"] == "9001"
+    assert "key_value" not in item
+    assert item["target_user_id"] == 202
+    assert item["target_group_id"] == 22
+    assert item["quota"] == 0.0
+    assert backend.user_api_keys[202][-1]["key"] == "sk-keep-this-value"
+    assert backend.user_api_keys[202][-1]["quota"] == 0.0
+    runs = main.get_flow_store().list_orchestration_runs()
+    assert runs[0].tag == "key_transfer"
+
+
+def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+        {
+            "id": 505,
+            "email": "nogroup@example.com",
+            "name": "nogroup@example.com",
+            "status": "active",
+        },
+        {
+            "id": 606,
+            "email": "duplicate@example.com",
+            "name": "duplicate-a@example.com",
+            "status": "active",
+            "group_id": 11,
+        },
+        {
+            "id": 707,
+            "email": "duplicate@example.com",
+            "name": "duplicate-b@example.com",
+            "status": "active",
+            "group_id": 22,
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": "bad-name",
+            "user_id": 1,
+            "key": "sk-bad-name",
+            "name": "ordinary-key",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
+            "id": "missing-user",
+            "user_id": 1,
+            "key": "sk-missing-user",
+            "name": "rotom:codex:v1:missing@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
+            "id": "no-group",
+            "user_id": 1,
+            "key": "sk-no-group",
+            "name": "rotom:codex:v1:nogroup@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
+            "id": "duplicate-email",
+            "user_id": 1,
+            "key": "sk-duplicate-email",
+            "name": "rotom:codex:v1:duplicate@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"source_user_id": 1},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["moved_count"] == 0
+    assert payload["skipped_count"] == 4
+    reasons = {item["key_id"]: item["reason"] for item in payload["items"]}
+    assert reasons["bad-name"] == "API key name does not match the service:object:version:email pattern"
+    assert reasons["missing-user"] == "USER_NOT_FOUND"
+    assert reasons["no-group"] == "TARGET_USER_GROUP_NOT_FOUND"
+    assert reasons["duplicate-email"] == "USER_EMAIL_NOT_UNIQUE"
+    assert backend.api_key_owner_calls == []
+
+
+def test_key_transfer_accepts_any_service_object_version_email_prefix(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users.extend(
+        [
+            {
+                "id": 808,
+                "email": "xuzhilin@jihuanshe.com",
+                "name": "xuzhilin",
+                "status": "active",
+                "group_ids": [22, 11],
+            },
+            {
+                "id": 909,
+                "email": "luozhaobin@jihuanshe.com",
+                "name": "luozhaobin",
+                "status": "active",
+                "group_id": 11,
+            },
+        ]
+    )
+    backend.user_api_keys[1] = [
+        {
+            "id": "xuzhilin",
+            "user_id": 1,
+            "key": "sk-xuzhilin",
+            "name": "rotom:codex:v1:xuzhilin@jihuanshe.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
+            "id": "luozhaobin",
+            "user_id": 1,
+            "key": "sk-luozhaobin",
+            "name": "svc:object:v2:luozhaobin@jihuanshe.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
+            "id": "invalid-email",
+            "user_id": 1,
+            "key": "sk-invalid-email",
+            "name": "rotom:codex:v1:not-email",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"source_user_id": 1, "dry_run": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["key_name_pattern"] == "service:object:version:email"
+    assert payload["planned_count"] == 2
+    assert payload["skipped_count"] == 1
+    statuses = {item["key_id"]: item["status"] for item in payload["items"]}
+    assert statuses["xuzhilin"] == "planned"
+    assert statuses["luozhaobin"] == "planned"
+    assert statuses["invalid-email"] == "skipped"
+
+
 def test_managed_pool_provisioning_uses_selected_pool_group(client) -> None:
     backend = FakeRotationSub2API()
 
@@ -2405,7 +2701,7 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     assert len(payload["moved"]) == 1
     assert backend.replace_calls[0]["user_id"] == 101
     assert backend.replace_calls[0]["old_group_id"] == 22
-    assert backend.replace_calls[0]["new_group_id"] == "11"
+    assert backend.replace_calls[0]["new_group_id"] == 11
     assert payload["moved"][0]["usage_window"] == "5h"
     assert payload["moved"][0]["usage_value"] == 1.5
     assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "usage_segmentation"
@@ -2551,7 +2847,7 @@ def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -
     assert payload["moved"][0]["usage_value"] == 1.5
     assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
     assert backend.replace_calls == [
-        {"user_id": 101, "old_group_id": 22, "new_group_id": "11"}
+        {"user_id": 101, "old_group_id": 22, "new_group_id": 11}
     ]
 
 
@@ -2655,7 +2951,7 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     assert payload["moved"][0]["metadata"]["source_group_load_source"] == "group_usage:usage_logs"
     assert payload["moved"][0]["metadata"]["target_group_load_source"] == "group_usage:usage_logs"
     assert backend.replace_calls == [
-        {"user_id": 101, "old_group_id": 11, "new_group_id": "22"}
+        {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
     ]
 
 
@@ -2714,8 +3010,8 @@ def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -
     assert payload["rollback_status"] == "completed"
     assert payload["rollback_results"][0]["status"] == "moved"
     assert backend.replace_calls == [
-        {"user_id": 101, "old_group_id": 22, "new_group_id": "11"},
-        {"user_id": 101, "old_group_id": "11", "new_group_id": 22},
+        {"user_id": 101, "old_group_id": 22, "new_group_id": 11},
+        {"user_id": 101, "old_group_id": 11, "new_group_id": 22},
     ]
 
 
@@ -3151,7 +3447,7 @@ def test_auto_rotation_auto_assigns_new_users_only_within_schedule_range(
     assert preview_payload["planned"][0]["usage_window"] == "5h"
     assert preview_payload["planned"][0]["metadata"]["decision_type"] == "new_user_usage_assignment"
     assert backend.replace_calls == [
-        {"user_id": 101, "old_group_id": 33, "new_group_id": "11"}
+        {"user_id": 101, "old_group_id": 33, "new_group_id": 11}
     ]
     assert executed.status_code == 200
     executed_payload = executed.json()

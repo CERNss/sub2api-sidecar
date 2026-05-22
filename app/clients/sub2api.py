@@ -105,6 +105,36 @@ class Sub2APIClient:
         data = self._request("PUT", path, json=payload)
         return {"key_id": key_id, "group_id": group_id, "raw": data}
 
+    def migrate_api_key_owner(
+        self,
+        *,
+        key_id: Any,
+        user_id: Any,
+        group_id: Any,
+        quota: float = 0.0,
+        reset_quota: bool = True,
+    ) -> dict[str, Any]:
+        payload = {
+            "user_id": user_id,
+            "group_id": group_id,
+            "quota": quota,
+            "reset_quota": reset_quota,
+        }
+        path = self.UPDATE_API_KEY_GROUP_PATH.format(key_id=key_id)
+        data = self._request("PUT", path, json=payload)
+        body = self._unwrap_data(data)
+        api_key = self._extract_value(body, "api_key", "data.api_key", "result.api_key")
+        if not isinstance(api_key, dict):
+            api_key = body if isinstance(body, dict) else {}
+        return {
+            "key_id": key_id,
+            "user_id": user_id,
+            "group_id": group_id,
+            "quota": quota,
+            "api_key": api_key,
+            "raw": data,
+        }
+
     def replace_exclusive_user_group(
         self,
         *,
@@ -112,7 +142,10 @@ class Sub2APIClient:
         old_group_id: Any,
         new_group_id: Any,
     ) -> dict[str, Any]:
-        payload = {"old_group_id": old_group_id, "new_group_id": new_group_id}
+        payload = {
+            "old_group_id": self._coerce_numeric_id(old_group_id),
+            "new_group_id": self._coerce_numeric_id(new_group_id),
+        }
         path = self.REPLACE_EXCLUSIVE_GROUP_PATH.format(user_id=user_id)
         data = self._request("POST", path, json=payload)
         body = self._unwrap_data(data)
@@ -129,6 +162,12 @@ class Sub2APIClient:
             "migrated_keys": migrated_keys or 0,
             "raw": data,
         }
+
+    @staticmethod
+    def _coerce_numeric_id(value: Any) -> Any:
+        if isinstance(value, str) and value.isdecimal():
+            return int(value)
+        return value
 
     def list_groups(self, platform: str | None = None) -> list[dict[str, Any]]:
         params = {"platform": platform} if platform else None

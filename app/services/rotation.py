@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from email_validator import EmailNotValidError, validate_email
+
 from app.clients.sub2api import Sub2APIClient, Sub2APIError
 from app.config import Settings
 from app.errors import RotationExecutionError, RotationPoolEmptyError, RotationTargetValidationError
@@ -70,6 +72,46 @@ class GroupLoadState:
     loads: dict[str, float]
     sources: dict[str, str]
     records: dict[str, GroupUsageSegmentRecord]
+
+
+@dataclass
+class KeyTransferItem:
+    key_id: Any
+    key_name: str | None
+    key_value: str | None
+    source_user_id: Any | None
+    source_group_id: Any | None
+    target_user_id: Any | None
+    target_email: str | None
+    target_group_id: Any | None
+    status: RotationResultStatus
+    reason: str
+    quota: float | None = None
+
+
+@dataclass
+class KeyTransferRun:
+    source_user_id: Any
+    key_name_pattern: str
+    dry_run: bool
+    run_record: OrchestrationRunRecord | None
+    items: list[KeyTransferItem]
+
+    @property
+    def planned_count(self) -> int:
+        return sum(1 for item in self.items if item.status == RotationResultStatus.planned)
+
+    @property
+    def moved_count(self) -> int:
+        return sum(1 for item in self.items if item.status == RotationResultStatus.moved)
+
+    @property
+    def skipped_count(self) -> int:
+        return sum(1 for item in self.items if item.status == RotationResultStatus.skipped)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(1 for item in self.items if item.status == RotationResultStatus.failed)
 
 
 @dataclass
@@ -438,6 +480,70 @@ class RotationService:
             },
         )
         return result
+
+    def transfer_admin_api_keys(
+        self,
+        *,
+        source_user_id: Any | None = None,
+        dry_run: bool = False,
+        reason: str | None = None,
+    ) -> KeyTransferRun:
+        admin_user_id = self._resolve_admin_user_id()
+        if source_user_id in (None, ""):
+            source_user_id = admin_user_id
+        elif self._normalize_key(source_user_id) != self._normalize_key(admin_user_id):
+            raise RotationExecutionError("Key transfer only supports the admin source user")
+        source_user_key = self._normalize_key(source_user_id)
+
+        source_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
+        target_emails = {
+            target_email
+            for key_item in source_keys
+            if isinstance(key_item, dict)
+            for target_email in [self._extract_transfer_email(self._text_or_none(key_item.get("name")))]
+            if target_email
+        }
+        users_by_email, duplicate_emails = self._users_by_exact_emails(target_emails)
+        available_groups_by_key = self._available_groups_by_key()
+        items: list[KeyTransferItem] = []
+        for key_item in source_keys:
+            item = self._plan_key_transfer(
+                key_item,
+                source_user_id=source_user_id,
+                source_user_key=source_user_key,
+                users_by_email=users_by_email,
+                duplicate_emails=duplicate_emails,
+                available_groups_by_key=available_groups_by_key,
+            )
+            if item.status == RotationResultStatus.planned and not dry_run:
+                item = self._execute_key_transfer(item)
+            items.append(item)
+
+        run_record = self._save_key_transfer_run(
+            items=items,
+            dry_run=dry_run,
+            reason=reason,
+        )
+        return KeyTransferRun(
+            source_user_id=source_user_id,
+            key_name_pattern="service:object:version:email",
+            dry_run=dry_run,
+            run_record=run_record,
+            items=items,
+        )
+
+    def migrate_rotom_keys(
+        self,
+        *,
+        source_user_id: Any | None = None,
+        dry_run: bool = False,
+        reason: str | None = None,
+    ) -> KeyTransferRun:
+        return self.transfer_admin_api_keys(
+            source_user_id=source_user_id,
+            dry_run=dry_run,
+            reason=reason,
+        )
 
     _STATUS_BUCKETS = {
         RotationResultStatus.moved: "moved",
@@ -1191,6 +1297,395 @@ class RotationService:
             },
         )
 
+    def _users_by_exact_emails(
+        self,
+        emails: set[str],
+    ) -> tuple[dict[str, dict[str, Any]], set[str]]:
+        users_by_email: dict[str, dict[str, Any]] = {}
+        duplicate_emails: set[str] = set()
+        for email in sorted(emails):
+            email_key = self._normalize_email(email)
+            exact_matches = [
+                user
+                for user in self.sub2api_client.list_users(email=email)
+                if self._normalize_email(user.get("email")) == email_key
+            ]
+            unique_matches: list[dict[str, Any]] = []
+            seen_user_ids: set[str] = set()
+            for user in exact_matches:
+                user_key = self._normalize_key(user.get("id"))
+                if user_key in seen_user_ids:
+                    continue
+                seen_user_ids.add(user_key)
+                unique_matches.append(user)
+            if len(unique_matches) == 1:
+                users_by_email[email_key] = unique_matches[0]
+            elif len(unique_matches) > 1:
+                duplicate_emails.add(email_key)
+        return users_by_email, duplicate_emails
+
+    def _available_groups_by_key(self) -> dict[str, dict[str, Any]]:
+        groups = self.sub2api_client.list_groups(
+            platform=self.settings.sub2api_provisioning_defaults.group_platform
+        )
+        available: dict[str, dict[str, Any]] = {}
+        for group in groups:
+            group_id = group.get("id")
+            if group_id in (None, ""):
+                continue
+            status = str(group.get("status") or "active").strip().lower()
+            if status and status != "active":
+                continue
+            available[self._normalize_key(group_id)] = group
+        return available
+
+    def _resolve_admin_user_id(self) -> Any:
+        candidates: list[dict[str, Any]] = []
+        seen_user_ids: set[str] = set()
+        for search_term in ("admin", self.settings.app_auth_username):
+            for user in self.sub2api_client.list_users(email=search_term):
+                user_id = user.get("id")
+                if user_id in (None, ""):
+                    continue
+                user_key = self._normalize_key(user_id)
+                if not user_key or user_key in seen_user_ids:
+                    continue
+                seen_user_ids.add(user_key)
+                username = self._normalize_key(user.get("username")).strip().lower()
+                email_local = self._normalize_email(user.get("email")).split("@", 1)[0]
+                name = self._normalize_key(user.get("name")).strip().lower()
+                display_name = self._normalize_key(user.get("display_name")).strip().lower()
+                auth_username = self.settings.app_auth_username.strip().lower()
+                if auth_username in {username, email_local, name, display_name}:
+                    candidates.append(user)
+        if len(candidates) == 1:
+            return candidates[0]["id"]
+        if not candidates:
+            raise RotationExecutionError("Admin source user was not found")
+        raise RotationExecutionError("Admin source user is ambiguous")
+
+    def _plan_key_transfer(
+        self,
+        key_item: dict[str, Any],
+        *,
+        source_user_id: Any,
+        source_user_key: str,
+        users_by_email: dict[str, dict[str, Any]],
+        duplicate_emails: set[str],
+        available_groups_by_key: dict[str, dict[str, Any]],
+    ) -> KeyTransferItem:
+        key_id = key_item.get("id") or key_item.get("key_id")
+        key_name = self._text_or_none(key_item.get("name"))
+        key_value = self._text_or_none(key_item.get("key"))
+        source_group_id = key_item.get("group_id") or key_item.get("current_group_id")
+        source_key_user_id = key_item.get("user_id", source_user_id)
+        if key_id in (None, ""):
+            return KeyTransferItem(
+                key_id=None,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_user_id,
+                source_group_id=source_group_id,
+                target_user_id=None,
+                target_email=None,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="API key id is missing",
+            )
+        if self._normalize_key(source_key_user_id) != source_user_key:
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=None,
+                target_email=None,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="API key is not owned by the selected source user",
+            )
+        if not key_value:
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=None,
+                target_email=None,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="API key value is missing; cannot verify preservation",
+            )
+
+        target_email = self._extract_transfer_email(key_name)
+        if not target_email:
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=None,
+                target_email=None,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="API key name does not match the service:object:version:email pattern",
+            )
+
+        target_email_key = self._normalize_email(target_email)
+        if target_email_key in duplicate_emails:
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=None,
+                target_email=target_email,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="USER_EMAIL_NOT_UNIQUE",
+            )
+
+        target_user = users_by_email.get(target_email_key)
+        if target_user is None:
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=None,
+                target_email=target_email,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="USER_NOT_FOUND",
+            )
+
+        target_user_id = target_user.get("id")
+        if target_user_id in (None, ""):
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=None,
+                target_email=target_email,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="TARGET_USER_ID_NOT_FOUND",
+            )
+
+        target_group_id = self._first_available_user_group_id(
+            target_user,
+            available_groups_by_key,
+        )
+        if target_group_id in (None, ""):
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=target_user_id,
+                target_email=target_email,
+                target_group_id=None,
+                status=RotationResultStatus.skipped,
+                reason="TARGET_USER_GROUP_NOT_FOUND",
+            )
+
+        if self._normalize_key(source_key_user_id) == self._normalize_key(target_user_id):
+            return KeyTransferItem(
+                key_id=key_id,
+                key_name=key_name,
+                key_value=key_value,
+                source_user_id=source_key_user_id,
+                source_group_id=source_group_id,
+                target_user_id=target_user_id,
+                target_email=target_email,
+                target_group_id=target_group_id,
+                status=RotationResultStatus.skipped,
+                reason="API key already belongs to target user",
+            )
+
+        return KeyTransferItem(
+            key_id=key_id,
+            key_name=key_name,
+            key_value=key_value,
+            source_user_id=source_key_user_id,
+            source_group_id=source_group_id,
+            target_user_id=target_user_id,
+            target_email=target_email,
+            target_group_id=target_group_id,
+            status=RotationResultStatus.planned,
+            reason="Ready to transfer API key to target email user",
+            quota=0.0,
+        )
+
+    def _execute_key_transfer(
+        self,
+        item: KeyTransferItem,
+    ) -> KeyTransferItem:
+        try:
+            response = self.sub2api_client.migrate_api_key_owner(
+                key_id=item.key_id,
+                user_id=item.target_user_id,
+                group_id=item.target_group_id,
+                quota=0.0,
+                reset_quota=True,
+            )
+        except Sub2APIError as exc:
+            logger.exception("API key transfer failed for key_id=%s", item.key_id)
+            item.status = RotationResultStatus.failed
+            item.reason = f"Upstream api-key owner migration failed: {exc}"
+            return item
+
+        api_key = response.get("api_key")
+        if not isinstance(api_key, dict):
+            api_key = {}
+        if not api_key:
+            item.status = RotationResultStatus.failed
+            item.reason = "Upstream response did not include API key confirmation"
+            return item
+        returned_key_value = self._text_or_none(api_key.get("key"))
+        if not returned_key_value or returned_key_value != item.key_value:
+            item.status = RotationResultStatus.failed
+            item.reason = "Upstream response changed API key value"
+            return item
+        returned_user_id = api_key.get("user_id")
+        returned_group_id = api_key.get("group_id")
+        returned_quota = self._optional_float(api_key.get("quota"))
+        mismatches: list[str] = []
+        if returned_user_id in (None, "") or self._normalize_key(returned_user_id) != self._normalize_key(item.target_user_id):
+            mismatches.append("user_id")
+        if returned_group_id in (None, "") or self._normalize_key(returned_group_id) != self._normalize_key(item.target_group_id):
+            mismatches.append("group_id")
+        if returned_quota != 0.0:
+            mismatches.append("quota")
+        if mismatches:
+            item.status = RotationResultStatus.failed
+            item.reason = "Upstream response did not confirm " + ", ".join(mismatches)
+            return item
+        item.status = RotationResultStatus.moved
+        item.reason = "API key transferred to target email user"
+        item.quota = 0.0
+        return item
+
+    def _save_key_transfer_run(
+        self,
+        *,
+        items: list[KeyTransferItem],
+        dry_run: bool,
+        reason: str | None,
+    ) -> OrchestrationRunRecord:
+        planned: list[dict[str, Any]] = []
+        moved: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for item in items:
+            serialized = self._serialize_key_transfer_item(item)
+            if item.status == RotationResultStatus.moved:
+                moved.append(serialized)
+            elif item.status == RotationResultStatus.planned:
+                planned.append(serialized)
+            elif item.status == RotationResultStatus.failed:
+                failed.append(serialized)
+            else:
+                skipped.append(serialized)
+        return self._save_orchestration_run(
+            run_kind=OrchestrationRunKind.manual,
+            tag="key_transfer_preview" if dry_run else "key_transfer",
+            trigger_type=RotationTrigger.manual,
+            dry_run=dry_run,
+            window=None,
+            synced={},
+            config={"key_name_pattern": "service:object:version:email", "reason": reason or ""},
+            planned=planned,
+            moved=moved,
+            skipped=skipped,
+            failed=failed,
+        )
+
+    def _serialize_key_transfer_item(self, item: KeyTransferItem) -> dict[str, Any]:
+        return {
+            "user_id": item.target_user_id or item.source_user_id or "",
+            "email": item.target_email or "unknown@example.com",
+            "source_group_id": item.source_group_id,
+            "target_group_id": item.target_group_id,
+            "trigger_type": RotationTrigger.manual.value,
+            "status": item.status.value,
+            "reason": item.reason,
+            "migrated_keys": 1 if item.status in {RotationResultStatus.moved, RotationResultStatus.planned} else 0,
+            "usage_window": None,
+            "usage_value": None,
+            "usage_snapshot": None,
+            "metadata": {
+                "key_id": str(item.key_id or ""),
+                "key_name": item.key_name or "",
+                "source_user_id": str(item.source_user_id or ""),
+                "target_user_id": str(item.target_user_id or ""),
+                "target_email": item.target_email or "",
+                "quota": str(item.quota if item.quota is not None else ""),
+            },
+        }
+
+    def _extract_transfer_email(self, key_name: str | None) -> str | None:
+        if not key_name:
+            return None
+        parts = [part.strip() for part in key_name.split(":")]
+        if len(parts) != 4 or any(not part for part in parts[:3]):
+            return None
+        suffix = parts[3]
+        if not suffix or any(separator in suffix for separator in (",", ";", " ")):
+            return None
+        try:
+            normalized = validate_email(suffix, check_deliverability=False).normalized
+        except EmailNotValidError:
+            return None
+        return normalized.lower()
+
+    def _first_available_user_group_id(
+        self,
+        user: dict[str, Any],
+        available_groups_by_key: dict[str, dict[str, Any]],
+    ) -> Any | None:
+        for group_id in self._candidate_user_group_ids(user):
+            if self._normalize_key(group_id) in available_groups_by_key:
+                return group_id
+        return None
+
+    def _candidate_user_group_ids(self, user: dict[str, Any]) -> list[Any]:
+        candidate_group_ids: list[Any] = []
+
+        def add(group_id: Any) -> None:
+            if group_id in (None, ""):
+                return
+            if not any(self._normalize_key(existing) == self._normalize_key(group_id) for existing in candidate_group_ids):
+                candidate_group_ids.append(group_id)
+
+        group_ids = user.get("group_ids")
+        if isinstance(group_ids, list):
+            for group_id in group_ids:
+                add(group_id)
+        group_id = user.get("current_group_id") or user.get("group_id")
+        add(group_id)
+        raw = user.get("raw")
+        if isinstance(raw, dict):
+            for field_name in ("group_ids", "allowed_groups", "groups"):
+                raw_groups = raw.get(field_name)
+                if not isinstance(raw_groups, list):
+                    continue
+                for raw_group in raw_groups:
+                    if isinstance(raw_group, dict):
+                        group_id = raw_group.get("id") or raw_group.get("group_id")
+                    else:
+                        group_id = raw_group
+                    add(group_id)
+        return candidate_group_ids
+
     def _save_orchestration_run(
         self,
         *,
@@ -1587,6 +2082,26 @@ class RotationService:
 
     def _normalize_key(self, value: Any) -> str:
         return str(value)
+
+    def _normalize_email(self, value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _text_or_none(self, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value)
+
+    def _optional_float(self, value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
 
     def _serialize_result(self, result: RotationExecutionResult) -> dict[str, Any]:
         return {

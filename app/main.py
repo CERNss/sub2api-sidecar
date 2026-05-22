@@ -101,6 +101,9 @@ from app.models.schemas import (
     OrchestrationAssignRequest,
     OrchestrationGroupResponse,
     OrchestrationGroupsEnvelope,
+    KeyTransferEnvelope,
+    KeyTransferItemResponse,
+    KeyTransferRequest,
     OrchestrationUserResponse,
     OrchestrationUsersEnvelope,
     ProvisionCompleteRequest,
@@ -137,7 +140,7 @@ from app.services.notification_delivery import NotificationDeliveryService
 from app.services.operational_data import OperationalDataCollector
 from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
-from app.services.rotation import RotationExecutionResult, RotationService
+from app.services.rotation import KeyTransferRun, RotationExecutionResult, RotationService
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.services.usage_segmentation import UsageSegmentationService
 from app.services.usage_segmentation_scheduler import UsageSegmentationScheduler
@@ -610,6 +613,8 @@ def safe_operator_next_path(value: str | None) -> str:
         "/dynamic",
         "/dashboard",
         "/provision",
+        "/key-transfer",
+        "/data-sync",
         "/notifications",
         "/credit-control",
         "/credit-control/users",
@@ -727,6 +732,8 @@ def index(request: Request) -> Response:
 @app.get("/dynamic", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
 @app.get("/provision", response_class=HTMLResponse)
+@app.get("/key-transfer", response_class=HTMLResponse)
+@app.get("/data-sync", response_class=HTMLResponse)
 @app.get("/notifications", response_class=HTMLResponse)
 @app.get("/credit-control", response_class=HTMLResponse)
 @app.get("/credit-control/users", response_class=HTMLResponse)
@@ -775,6 +782,37 @@ def rotation_execution_response(
         usage_value=result.usage_value,
         usage_snapshot=result.usage_snapshot,
         metadata=result.metadata,
+    )
+
+
+def key_transfer_response(run: KeyTransferRun) -> KeyTransferEnvelope:
+    record = run.run_record
+    return KeyTransferEnvelope(
+        run_id=record.run_id if record else None,
+        run_kind=record.run_kind.value if record else None,
+        tag=record.tag if record else None,
+        dry_run=run.dry_run,
+        source_user_id=run.source_user_id,
+        key_name_pattern=run.key_name_pattern,
+        planned_count=run.planned_count,
+        moved_count=run.moved_count,
+        skipped_count=run.skipped_count,
+        failed_count=run.failed_count,
+        items=[
+            KeyTransferItemResponse(
+                key_id=item.key_id,
+                key_name=item.key_name,
+                source_user_id=item.source_user_id,
+                source_group_id=item.source_group_id,
+                target_user_id=item.target_user_id,
+                target_email=item.target_email,
+                target_group_id=item.target_group_id,
+                status=item.status.value,
+                reason=item.reason,
+                quota=item.quota,
+            )
+            for item in run.items
+        ],
     )
 
 
@@ -1776,6 +1814,34 @@ def orchestration_update_api_key_group(
     )
     run_record = service.save_manual_run_record(tag="manual_api_key", result=result)
     response = rotation_execution_response(result, run_record=run_record)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.post("/orchestration/api-keys/transfer")
+def orchestration_transfer_admin_api_keys(
+    payload: KeyTransferRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    run = get_rotation_service().transfer_admin_api_keys(
+        source_user_id=payload.source_user_id,
+        dry_run=payload.dry_run,
+        reason=payload.reason,
+    )
+    response = key_transfer_response(run)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.post("/orchestration/api-keys/migrate-rotom")
+def orchestration_migrate_rotom_keys_compat(
+    payload: KeyTransferRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    run = get_rotation_service().transfer_admin_api_keys(
+        source_user_id=payload.source_user_id,
+        dry_run=payload.dry_run,
+        reason=payload.reason,
+    )
+    response = key_transfer_response(run)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 
