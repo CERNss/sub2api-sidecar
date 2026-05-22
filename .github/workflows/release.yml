@@ -185,6 +185,35 @@ jobs:
           echo "release_tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
           echo "release_version=${TAG_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.release_ref }}
+          fetch-depth: 0
+
+      - name: Require release tag on main
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags --force --prune
+
+          TAG_COMMIT="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          if ! git show-ref --verify --quiet refs/remotes/origin/main; then
+            echo "origin/main is required for release validation."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+            echo "Release tag ${RELEASE_TAG} points to ${TAG_COMMIT}, which is not contained in origin/main."
+            echo "Merge develop into main first, then create the release tag from main."
+            exit 1
+          fi
+
+          echo "Release tag ${RELEASE_TAG} is contained in origin/main."
+
       - name: Resolve Docker platforms
         id: platforms
         shell: bash
