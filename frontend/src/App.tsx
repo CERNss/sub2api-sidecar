@@ -5948,7 +5948,6 @@ function ProvisionForm({
   const [email, setEmail] = useState("");
   const [callbackUrl, setCallbackUrl] = useState("");
   const [startPayload, setStartPayload] = useState<ProvisionStartPayload | null>(null);
-  const [completePayload, setCompletePayload] = useState<ApiPayload | null>(null);
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [busyAction, setBusyAction] = useState<"start" | "complete" | null>(null);
 
@@ -5958,11 +5957,9 @@ function ProvisionForm({
       ? startPayload.oauth_redirect_uri
       : FIXED_OAUTH_REDIRECT_URI;
   const callbackPlaceholder = `${redirectUri}${redirectUri.includes("?") ? "&" : "?"}code=...&state=...`;
-  const visiblePayload = useMemo(() => completePayload ?? startPayload, [completePayload, startPayload]);
 
   async function startProvision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setCompletePayload(null);
 
     if (!email.trim()) {
       setStatus({ message: "请先输入 email。", tone: "error" });
@@ -6002,16 +5999,14 @@ function ProvisionForm({
     setStatus({ message: "正在解析回调地址并完成 OAuth 绑定", tone: "info" });
 
     try {
-      const payload = await requestJson<ApiPayload>("/provision/oauth/complete", {
+      await requestJson<ApiPayload>("/provision/oauth/complete", {
         method: "POST",
         body: JSON.stringify({ callback_url: callbackUrl.trim() })
       }, "完成绑定失败");
-      setCompletePayload(payload);
       setStatus({ message: "OAuth 绑定已完成。", tone: "success" });
       onFlowChanged();
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
-        setCompletePayload({ success: false, detail: getErrorMessage(error, "完成绑定失败") });
         setStatus({ message: getErrorMessage(error, "完成绑定失败"), tone: "error" });
       }
     } finally {
@@ -6020,7 +6015,7 @@ function ProvisionForm({
   }
 
   return (
-    <div className="workspace">
+    <div className="workspace provision-workspace">
       <section className="panel form-panel provision-form-panel">
         <form className="form-stack" onSubmit={startProvision}>
           <label className="field">
@@ -6076,20 +6071,6 @@ function ProvisionForm({
           </div>
           <StatusLine status={status} />
         </form>
-      </section>
-
-      <section className="panel result-panel" aria-live="polite">
-        <div className="panel-title-row">
-          <div>
-            <p className="eyebrow">Result</p>
-            <h2>执行结果</h2>
-          </div>
-        </div>
-        {visiblePayload ? (
-          <pre>{formatPayload(visiblePayload)}</pre>
-        ) : (
-          <div className="empty-state">等待发起流程</div>
-        )}
       </section>
     </div>
   );

@@ -249,6 +249,10 @@ pre {
   align-items: start;
 }
 
+.provision-workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .operator-stack {
   display: grid;
   gap: 16px;
