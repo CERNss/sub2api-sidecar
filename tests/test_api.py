@@ -219,6 +219,8 @@ class FakeRotationSub2API:
         self.api_key_owner_calls: list[dict[str, object]] = []
         self.balance_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
+        self.create_account_calls = 0
+        self.bind_account_calls: list[dict[str, object]] = []
         self.group_usage_by_window = {
             "1d": [
                 {
@@ -363,6 +365,7 @@ class FakeRotationSub2API:
                 },
             )
         if method == "POST" and path == "/api/v1/admin/accounts":
+            self.create_account_calls += 1
             assert json["platform"] == "openai"
             assert json["type"] == "oauth"
             assert json["credentials"]["access_token"] == "token-123"
@@ -387,7 +390,10 @@ class FakeRotationSub2API:
         if method == "POST" and path in {
             "/api/v1/admin/groups/11/accounts",
             "/api/v1/admin/groups/22/accounts",
+            "/api/v1/admin/groups/77/accounts",
+            "/api/v1/admin/groups/999/accounts",
         }:
+            self.bind_account_calls.append({"path": path, "json": dict(json or {})})
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "POST" and path == "/api/v1/admin/users/101/replace-group":
             self.replace_calls.append(
@@ -743,6 +749,10 @@ def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
 
 def fake_sub2api_request(self, method: str, url: str, json=None, params=None, timeout=None):
     path = urlparse(url).path
+    if method == "GET" and path == "/api/v1/admin/groups/all":
+        return FakeResponse(200, {"items": []})
+    if method == "GET" and path == "/api/v1/admin/accounts":
+        return FakeResponse(200, {"items": []})
     if method == "POST" and path == "/api/v1/admin/groups":
         assert json["platform"] == "openai"
         assert json["is_exclusive"] is True
@@ -2319,7 +2329,7 @@ def test_key_transfer_accepts_any_service_object_version_email_prefix(client) ->
     assert statuses["invalid-email"] == "skipped"
 
 
-def test_managed_pool_provisioning_uses_selected_pool_group(client) -> None:
+def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) -> None:
     backend = FakeRotationSub2API()
 
     with TestClient(main.app) as managed_client:
@@ -2353,14 +2363,125 @@ def test_managed_pool_provisioning_uses_selected_pool_group(client) -> None:
             )
 
     assert start_response.status_code == 200
-    assert start_response.json()["group_id"] == "11"
-    assert backend.create_group_calls == 0
+    assert start_response.json()["group_id"] == 999
+    assert backend.create_group_calls == 1
     assert complete_response.status_code == 200
     completed_flow = main.get_flow_store().get_by_flow_id(start_response.json()["flow_id"])
     assert completed_flow is not None
     assert completed_flow.user_id is None
-    assert completed_flow.group_id == "11"
-    assert completed_flow.assignment_mode == AssignmentMode.managed_pool
+    assert completed_flow.group_id == 999
+    assert completed_flow.assignment_mode == AssignmentMode.dedicated
+
+
+def test_provision_start_reuses_existing_email_named_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 77,
+            "name": "repeat@example.com",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/provision/start", json={"email": "repeat@example.com"})
+
+    assert response.status_code == 200
+    assert response.json()["group_id"] == 77
+    assert backend.create_group_calls == 0
+
+
+def test_oauth_complete_reuses_existing_account_and_skips_duplicate_binding(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 77,
+            "name": "repeat@example.com",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.accounts.append(
+        {
+            "id": "acct-repeat",
+            "name": "repeat@example.com",
+            "email": "repeat@example.com",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "group_ids": [77],
+        }
+    )
+
+    login(client)
+    with patch.object(requests.Session, "request", new=backend.request):
+        start_response = client.post("/provision/start", json={"email": "repeat@example.com"})
+        state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={
+                "callback_url": f"http://localhost:1455/callback?code=mock-code&state={state}"
+            },
+        )
+
+    assert complete_response.status_code == 200
+    assert complete_response.json()["oauth_account_id"] == "acct-repeat"
+    assert backend.create_account_calls == 0
+    assert backend.bind_account_calls == []
+
+
+def test_oauth_complete_reuses_existing_account_and_binds_missing_email_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 77,
+            "name": "repeat@example.com",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.accounts.append(
+        {
+            "id": "acct-repeat",
+            "name": "repeat@example.com",
+            "email": "repeat@example.com",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "group_ids": [11],
+        }
+    )
+
+    login(client)
+    with patch.object(requests.Session, "request", new=backend.request):
+        start_response = client.post("/provision/start", json={"email": "repeat@example.com"})
+        state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={
+                "callback_url": f"http://localhost:1455/callback?code=mock-code&state={state}"
+            },
+        )
+
+    assert complete_response.status_code == 200
+    assert complete_response.json()["oauth_account_id"] == "acct-repeat"
+    assert backend.create_account_calls == 0
+    assert backend.bind_account_calls == [
+        {
+            "path": "/api/v1/admin/groups/77/accounts",
+            "json": {"account_id": "acct-repeat", "account_ids": ["acct-repeat"]},
+        }
+    ]
 
 
 def test_provisioning_settings_api_updates_assignment_mode(client) -> None:

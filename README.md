@@ -65,7 +65,7 @@
 - 自动化测试
   - 覆盖 PostgreSQL store 持久化行为
   - 覆盖登录、受保护接口、paste-back OAuth 编排流程和错误分支
-  - 覆盖已有用户/分组编排、轮换池发现、managed-pool 预配、手动轮换、自动轮换
+  - 覆盖已有用户/分组编排、轮换池发现、专属组预配复用、手动轮换、自动轮换
 
 ## 已有用户/分组编排
 
@@ -85,18 +85,20 @@
 ### OAuth 预配流程
 
 1. 用户输入 email，调用 `POST /provision/start`
-2. 服务创建分组，并返回 OAuth 登录链接
+2. 服务按 email 解析专属分组，并返回 OAuth 登录链接
+   - 如果同名分组已存在则复用；否则创建新分组
    - 分组创建默认携带 `platform=openai`
 3. 用户手动点击 OAuth 登录链接
 4. OAuth 提供方把浏览器跳到上游固定回调地址，通常是某个 localhost 地址
 5. 用户把浏览器地址栏中的完整 callback URL 复制回来
 6. 前端或调用方将该 URL 提交给 `POST /provision/oauth/complete`
-7. 服务解析 `code/state`，继续完成 OAuth 账号创建和账号绑组
+7. 服务解析 `code/state`，继续完成 OAuth 账号创建或复用，以及账号绑组
    - 账号名称强制使用入口 email
+   - 如果已存在同名或同邮箱 OAuth 账号，则复用该账号
    - 账号默认按 `openai + oauth` 创建
    - 账号默认打开“临时不可调度”并附带 529/429/503 三条规则
    - `wsmode` 默认设置为 `context_pool`
-   - 账号创建后仍会再调用一次账号绑组接口，确保绑定到上一步创建的专属分组
+   - 如果已有账号已经绑定目标分组，不会重复绑组；缺少绑定时才补绑到目标分组
 
 在进入这个流程之前，需要先登录：
 
@@ -117,12 +119,6 @@
 
 非专属组不会被允许加入轮换池；订阅分组也不会被允许加入轮换池，因为 upstream `replace-group` 当前只支持专属标准分组。
 
-### managed-pool 预配
-
-- 当预配页面/API 的 assignment mode 设置为 `managed_pool` 时，`POST /provision/start` 不再创建新专属组
-- 服务会从本地 Landing 池里选择优先级最低的组作为默认目标组
-- 如果轮换池为空，请求会失败
-
 ### 自动轮换策略
 
 - V1 仅支持 4 个窗口：`5h`、`1d`、`7d`、`30d`
@@ -134,19 +130,16 @@
 
 ### 推荐 rollout
 
-1. 先在预配页面保持 assignment mode 为 `dedicated`
-2. 通过 `GET /rotation/pool/candidates` 和 `POST /rotation/pool/groups` 选出一小组专属轮换目标
-3. 通过动态编排页面或 `/rotation/auto/config` 设置 usage window、cooldown、阈值、dead-band 等运行时策略
-4. 先手动调用 `POST /rotation/auto/run` 验证策略
-5. 再在动态编排页面打开运行时自动轮换开关
-6. 最后在预配页面把 assignment mode 切到 `managed_pool`
+1. 通过 `GET /rotation/pool/candidates` 和 `POST /rotation/pool/groups` 选出一小组专属轮换目标
+2. 通过动态编排页面或 `/rotation/auto/config` 设置 usage window、cooldown、阈值、dead-band 等运行时策略
+3. 先手动调用 `POST /rotation/auto/run` 验证策略
+4. 再在动态编排页面打开运行时自动轮换开关
 
 ### 回滚
 
-1. 在预配页面把 assignment mode 切回 `dedicated`
-2. 在动态编排页面关闭运行时自动轮换开关
-3. 如有需要，用 `POST /rotation/manual` 把用户迁回目标专属组
-4. 再按需清理本地轮换池
+1. 在动态编排页面关闭运行时自动轮换开关
+2. 如有需要，用 `POST /rotation/manual` 把用户迁回目标专属组
+3. 再按需清理本地轮换池
 
 ## 目录结构
 
@@ -223,7 +216,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-`config.yaml` 放非敏感、启动前必须确定的部署配置，例如本服务地址、数据库地址和库名、OAuth redirect、Sub2API 连接参数、Sub2API 默认 payload 和临时不可调度规则。Sub2API admin key、PostgreSQL 密码、登录密码这类密钥和密码放 `.env`。预配 assignment mode、自动轮换、自动充值、运行态数据采集这类运行时开关和策略在后台页面/API 保存到 PostgreSQL，不再放进 `config.yaml`。
+`config.yaml` 放非敏感、启动前必须确定的部署配置，例如本服务地址、数据库地址和库名、OAuth redirect、Sub2API 连接参数、Sub2API 默认 payload 和临时不可调度规则。Sub2API admin key、PostgreSQL 密码、登录密码这类密钥和密码放 `.env`。自动轮换、自动充值、运行态数据采集这类运行时开关和策略在后台页面/API 保存到 PostgreSQL，不再放进 `config.yaml`。
 
 `.env` 只保留密钥和密码类字段：
 
@@ -252,11 +245,11 @@ database:
 - URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、`sub2api.base_url` 和 `database.url`；不要写进 `.env`。
 - 当前运行时只支持 PostgreSQL，不再支持 SQLite，也不做 SQLite 数据迁移。
 - `app.base_path` 默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
-- 预配 assignment mode 通过预配页面或 `/api/provisioning/settings` 运行时配置；新 OAuth flow 创建时会把当时的模式写进 flow，后续切换不会影响已经开始的 OAuth 流程。
+- 预配页面不再提供 assignment mode 切换；`POST /provision/start` 始终按入口 email 解析或创建专属分组，并把 flow 记录为 `dedicated`。
 - 自动轮换执行开关和业务策略通过动态编排页面或 `/rotation/auto/config` 运行时配置；已登录管理员可请求 `GET /rotation/auto/scheduler` 查看后台调度线程和当前运行时开关。
 - 自动充值后台执行开关通过额度控制页面或 `/api/credit-control/settings` 运行时配置；已登录管理员可请求 `GET /api/credit-control/scheduler` 查看状态。
 - 运行态数据采集开关、`collect_interval_seconds`、`expiration`、`retention_seconds` 和 `max_storage_mb` 通过全局设置或 `/api/operational-data/settings` 运行时配置，不写进 `config.yaml`。采集线程默认 60 秒一轮，按当前 PostgreSQL 设置调整间隔，按顺序拉取 Sub2API accounts、groups、users、用户 usage、用户 API keys、当天 usage、昨天 usage，先落 PostgreSQL raw snapshots 和派生 metrics，再由告警、自动编排、额度控制读取本地数据。`expiration` 不设置表示本地数据永不过期，设置为正整数秒时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。`retention_seconds` 按时间删除旧 snapshots/metrics，`max_storage_mb` 按大小从最老记录开始清理并保留每个 source/metric 的最新记录。已登录管理员可请求 `GET /api/operational-data/status` 查看采样状态、当前占用、每个数据源状态、最近一次 tick 时间和错误。
-- 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只创建专属 group 并完成 OAuth 账号挂接。
+- 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只解析或创建专属 group，并完成 OAuth 账号挂接。
 
 环境变量可以覆盖 `config.yaml` 中的同名配置项；已移除的运行时环境变量不再兼容，出现时会直接启动失败。新部署建议优先改 `config.yaml`。
 
@@ -310,7 +303,7 @@ https://sub2api.example.com/sidecar/
   - `429` -> 暂停 `10` 分钟，关键词 `rate limit, too many requests`
   - `503` -> 暂停 `30` 分钟，关键词 `unavailable, maintenance`
 - 创建 OAuth 账号时会把专属分组 ID 带入 payload
-- 无论创建账号接口是否已经处理分组，服务仍然会再调用一次“账号绑组”接口，确保账号最终绑定到专属分组
+- 如果已存在同名或同邮箱 OAuth 账号，服务会复用该账号；已有目标分组绑定时跳过重复绑组，缺少绑定时才补绑
 
 ## 安装依赖
 

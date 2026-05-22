@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import secrets
 import uuid
-from collections.abc import Callable
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -12,7 +11,6 @@ from app.errors import (
     FlowNotFoundError,
     InvalidOAuthCallbackPayloadError,
     InvalidOAuthStateError,
-    RotationPoolEmptyError,
 )
 from app.models.flow import (
     AssignmentMode,
@@ -22,7 +20,6 @@ from app.models.flow import (
     ProvisionEventType,
     ProvisionFlow,
 )
-from app.models.rotation import RotationPoolKind
 from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
 from app.stores.postgres import PostgresFlowStore
 
@@ -35,14 +32,10 @@ class ProvisioningService:
         flow_store: PostgresFlowStore,
         sub2api_client: Sub2APIClient,
         openai_oauth_redirect_uri: str,
-        assignment_mode_provider: Callable[[], AssignmentMode] | None = None,
     ) -> None:
         self.flow_store = flow_store
         self.sub2api_client = sub2api_client
         self.openai_oauth_redirect_uri = openai_oauth_redirect_uri
-        self.assignment_mode_provider = assignment_mode_provider or (
-            lambda: AssignmentMode.dedicated
-        )
 
     def start_flow(self, email: str) -> ProvisionStartResponse:
         logger.info("Starting provisioning flow for email=%s", email)
@@ -171,24 +164,36 @@ class ProvisioningService:
                     "received_token_payload": True,
                 },
             )
-            account = self.sub2api_client.create_openai_account_from_oauth(
-                name=flow.email,
+            account, account_action = self._resolve_oauth_account(
+                email=flow.email,
                 oauth_payload=exchange["exchange"],
                 group_id=flow.group_id,
             )
+            if account_action == "created":
+                account_message = "OpenAI OAuth account created"
+            else:
+                account_message = "Existing OpenAI OAuth account reused"
             self._record_event(
                 flow_id=flow.flow_id,
                 event_type=ProvisionEventType.account_created,
                 status=ProvisionEventStatus.succeeded,
-                message="OpenAI OAuth account created",
-                details={"account_id": account["id"], "group_id": flow.group_id},
+                message=account_message,
+                details={
+                    "account_id": account["id"],
+                    "group_id": flow.group_id,
+                    "action": account_action,
+                },
             )
             self._record_event(
                 flow_id=flow.flow_id,
                 event_type=ProvisionEventType.account_bound,
                 status=ProvisionEventStatus.succeeded,
-                message="OpenAI OAuth account group assignment included in account creation",
-                details={"account_id": account["id"], "group_id": flow.group_id},
+                message="OpenAI OAuth account group assignment resolved",
+                details={
+                    "account_id": account["id"],
+                    "group_id": flow.group_id,
+                    "action": account_action,
+                },
             )
         except Exception as exc:
             logger.exception("OAuth completion failed | flow_id=%s", flow.flow_id)
@@ -274,22 +279,93 @@ class ProvisioningService:
         return email[:128]
 
     def _resolve_group_assignment(self, email: str) -> tuple[object, AssignmentMode, str]:
-        assignment_mode = self.assignment_mode_provider()
-        if assignment_mode == AssignmentMode.dedicated:
-            group_name = self._build_group_name(email)
-            group = self.sub2api_client.create_group(group_name)
-            return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
-
-        default_group = self.flow_store.get_default_rotation_pool_group(RotationPoolKind.landing)
-        if default_group is None:
-            raise RotationPoolEmptyError(
-                "Managed-pool provisioning is enabled but no landing pool group is available"
+        group_name = self._build_group_name(email)
+        existing_group = self._find_group_by_name(group_name)
+        if existing_group is not None:
+            return (
+                existing_group["id"],
+                AssignmentMode.dedicated,
+                "existing dedicated provisioning group",
             )
-        return (
-            default_group.group_id,
-            AssignmentMode.managed_pool,
-            "managed-pool default target",
+        group = self.sub2api_client.create_group(group_name)
+        return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
+
+    def _find_group_by_name(self, group_name: str) -> dict[str, object] | None:
+        groups = self.sub2api_client.list_groups(
+            platform=self.sub2api_client.provisioning_defaults.group_platform
         )
+        for group in groups:
+            if str(group.get("name") or "").strip().lower() == group_name.strip().lower():
+                return group
+        return None
+
+    def _resolve_oauth_account(
+        self,
+        *,
+        email: str,
+        oauth_payload: dict[str, object],
+        group_id: object,
+    ) -> tuple[dict[str, object], str]:
+        existing = self._find_oauth_account(email)
+        if existing is None:
+            account = self.sub2api_client.create_openai_account_from_oauth(
+                name=email,
+                oauth_payload=oauth_payload,
+                group_id=group_id,
+            )
+            return account, "created"
+
+        account_id = existing["id"]
+        if not self._account_has_group(existing, group_id):
+            self.sub2api_client.bind_account_to_group(account_id, group_id)
+            return self._existing_account_payload(existing, email), "bound_existing"
+
+        return self._existing_account_payload(existing, email), "already_bound"
+
+    def _find_oauth_account(self, email: str) -> dict[str, object] | None:
+        needle = email.strip().lower()
+        for account in self.sub2api_client.list_openai_accounts():
+            candidates = [
+                account.get("name"),
+                account.get("email"),
+                self._nested_value(account, "raw.name"),
+                self._nested_value(account, "raw.email"),
+                self._nested_value(account, "raw.account_name"),
+                self._nested_value(account, "raw.account_email"),
+                self._nested_value(account, "raw.login_email"),
+                self._nested_value(account, "raw.extra.email"),
+                self._nested_value(account, "raw.credentials.email"),
+            ]
+            if any(
+                str(value).strip().lower() == needle
+                for value in candidates
+                if value not in (None, "")
+            ):
+                return account
+        return None
+
+    def _existing_account_payload(
+        self, account: dict[str, object], fallback_name: str
+    ) -> dict[str, object]:
+        return {
+            "id": account["id"],
+            "name": account.get("name") or fallback_name,
+            "raw": account,
+        }
+
+    def _account_has_group(self, account: dict[str, object], group_id: object) -> bool:
+        group_ids = account.get("group_ids")
+        if not isinstance(group_ids, list):
+            return False
+        return any(str(value) == str(group_id) for value in group_ids)
+
+    def _nested_value(self, payload: dict[str, object], path: str) -> object | None:
+        current: object = payload
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
 
     def _first_param(self, params: dict[str, list[str]], key: str) -> str | None:
         values = params.get(key) or []

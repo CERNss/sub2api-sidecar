@@ -274,7 +274,6 @@ def get_provisioning_service() -> ProvisioningService:
         flow_store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
         openai_oauth_redirect_uri=settings.openai_oauth_redirect_uri,
-        assignment_mode_provider=lambda: get_provisioning_runtime_settings().assignment_mode,
     )
 
 
