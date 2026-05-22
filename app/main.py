@@ -1823,6 +1823,7 @@ def orchestration_transfer_admin_api_keys(
 ) -> JSONResponse:
     run = get_rotation_service().transfer_admin_api_keys(
         source_user_id=payload.source_user_id,
+        key_ids=payload.key_ids,
         dry_run=payload.dry_run,
         reason=payload.reason,
     )
@@ -1837,6 +1838,7 @@ def orchestration_migrate_rotom_keys_compat(
 ) -> JSONResponse:
     run = get_rotation_service().transfer_admin_api_keys(
         source_user_id=payload.source_user_id,
+        key_ids=payload.key_ids,
         dry_run=payload.dry_run,
         reason=payload.reason,
     )

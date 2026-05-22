@@ -847,6 +847,21 @@ pre {
   min-width: 0;
 }
 
+.data-sync-key-list .data-sync-key-row {
+  min-width: 0;
+  padding: 12px;
+  cursor: pointer;
+}
+
+.data-sync-key-list .data-sync-key-row.selected {
+  border-radius: 8px;
+  background: #f0fdfa;
+}
+
+.data-sync-key-checkbox {
+  margin-right: 12px;
+}
+
 .data-sync-table .ant-table-cell,
 .data-sync-key-list .ant-list-item-meta-title,
 .data-sync-key-list .ant-list-item-meta-description {

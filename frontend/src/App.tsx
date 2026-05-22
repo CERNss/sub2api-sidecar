@@ -2698,8 +2698,17 @@ function KeyTransferView({
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [submitting, setSubmitting] = useState<"preview" | "execute" | null>(null);
   const [transferResult, setTransferResult] = useState<KeyTransferPayload | null>(null);
+  const [selectedKeyIds, setSelectedKeyIds] = useState<string[]>([]);
   const selectedUser = users.find((user) => idValue(user.user_id) === sourceUserId) ?? null;
-  const transferKeys = apiKeys.filter(isTransferKey);
+  const transferKeys = useMemo(() => apiKeys.filter(isTransferKey), [apiKeys]);
+  const transferKeyIds = useMemo(() => transferKeys.map((key) => idValue(key.key_id)).filter(Boolean), [transferKeys]);
+  const selectedTransferKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
+  const selectedTransferKeys = useMemo(
+    () => transferKeys.filter((key) => selectedTransferKeySet.has(idValue(key.key_id))),
+    [selectedTransferKeySet, transferKeys]
+  );
+  const allTransferKeysSelected =
+    transferKeyIds.length > 0 && transferKeyIds.every((keyId) => selectedTransferKeySet.has(keyId));
   const userOptions = users.map(buildUserOption);
 
   async function loadSourceUsers(searchOverride = sourceSearch) {
@@ -2736,9 +2745,16 @@ function KeyTransferView({
     }
   }
 
-  async function loadSourceKeys(userId = sourceUserId) {
+  async function loadSourceKeys(
+    userId = sourceUserId,
+    options: { clearResult?: boolean } = {}
+  ) {
+    const shouldClearResult = options.clearResult ?? true;
     if (!userId) {
       setApiKeys([]);
+      if (shouldClearResult) {
+        setTransferResult(null);
+      }
       return;
     }
     setLoadingKeys(true);
@@ -2749,9 +2765,15 @@ function KeyTransferView({
         "加载 admin API Keys 失败"
       );
       setApiKeys(payload.items);
+      if (shouldClearResult) {
+        setTransferResult(null);
+      }
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
         setApiKeys([]);
+        if (shouldClearResult) {
+          setTransferResult(null);
+        }
         setStatus({ message: getErrorMessage(error, "加载 admin API Keys 失败"), tone: "error" });
       }
     } finally {
@@ -2764,17 +2786,46 @@ function KeyTransferView({
   }, []);
 
   useEffect(() => {
+    setSelectedKeyIds([]);
+    setTransferResult(null);
     void loadSourceKeys(sourceUserId);
   }, [sourceUserId]);
+
+  useEffect(() => {
+    const allowedIds = new Set(transferKeyIds);
+    setSelectedKeyIds((current) => current.filter((keyId) => allowedIds.has(keyId)));
+  }, [transferKeyIds]);
+
+  function toggleTransferKeySelection(keyId: string) {
+    if (!keyId) {
+      return;
+    }
+    setTransferResult(null);
+    setSelectedKeyIds((current) =>
+      current.includes(keyId) ? current.filter((selectedId) => selectedId !== keyId) : [...current, keyId]
+    );
+  }
+
+  function toggleAllTransferKeys() {
+    setTransferResult(null);
+    setSelectedKeyIds(allTransferKeysSelected ? [] : transferKeyIds);
+  }
 
   async function runKeyTransfer(dryRun: boolean) {
     if (!selectedUser) {
       setStatus({ message: "请先定位 admin 源用户。", tone: "error" });
       return;
     }
+    if (selectedKeyIds.length === 0) {
+      setStatus({ message: "请先选择要转移的 Key，可单选或多选。", tone: "error" });
+      return;
+    }
     const action = dryRun ? "preview" : "execute";
     setSubmitting(action);
-    setStatus({ message: dryRun ? "正在预览密钥转移" : "正在执行密钥转移", tone: "info" });
+    setStatus({
+      message: dryRun ? `正在预览 ${selectedKeyIds.length} 个 Key` : `正在转移 ${selectedKeyIds.length} 个 Key`,
+      tone: "info"
+    });
     try {
       const payload = await requestJson<KeyTransferPayload>(
         "/orchestration/api-keys/transfer",
@@ -2782,8 +2833,9 @@ function KeyTransferView({
           method: "POST",
           body: JSON.stringify({
             source_user_id: selectedUser.user_id,
+            key_ids: selectedKeyIds,
             dry_run: dryRun,
-            reason: "密钥转移一键操作"
+            reason: selectedKeyIds.length === 1 ? "密钥转移单个 Key" : "密钥转移多个 Key"
           })
         },
         dryRun ? "密钥转移预览失败" : "密钥转移失败"
@@ -2797,7 +2849,8 @@ function KeyTransferView({
         tone: payload.failed_count > 0 ? "error" : payload.planned_count + payload.moved_count + payload.skipped_count > 0 ? "success" : "info"
       });
       if (!dryRun) {
-        await loadSourceKeys(idValue(selectedUser.user_id));
+        await loadSourceKeys(idValue(selectedUser.user_id), { clearResult: false });
+        setSelectedKeyIds([]);
       }
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
@@ -2818,6 +2871,7 @@ function KeyTransferView({
         <Space wrap>
           <Tag color={selectedUser ? "green" : "default"}>{selectedUser ? "admin 已定位" : "等待 admin"}</Tag>
           <Tag color={transferKeys.length > 0 ? "blue" : "default"}>{transferKeys.length} 个可转移 Key</Tag>
+          <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>已选 {selectedKeyIds.length}</Tag>
         </Space>
       </header>
 
@@ -2864,12 +2918,12 @@ function KeyTransferView({
             <SummaryItem label="User ID" value={unknownToText(selectedUser?.user_id)} />
             <SummaryItem label="Email" value={selectedUser?.email || "-"} />
             <SummaryItem label="admin 分组" value={selectedUser?.current_group_name || unknownToText(selectedUser?.current_group_id)} />
-            <SummaryItem label="待扫描 Key" value={String(apiKeys.length)} />
+            <SummaryItem label="已选 Key" value={`${selectedKeyIds.length} / ${transferKeys.length}`} />
           </div>
           <Alert
             showIcon
             type="info"
-            message={`一键转移会扫描 admin 用户下 ${KEY_TRANSFER_NAME_PATTERN} 格式的 Key，按邮箱找到已有目标用户，改到目标用户第一个可用分组，并移除 Key 额度限制。`}
+            message={`选择 admin 用户下 ${KEY_TRANSFER_NAME_PATTERN} 格式的 Key 后，可按单个或多个执行转移；系统会按邮箱找到已有目标用户，改到目标用户第一个可用分组，并移除 Key 额度限制。`}
           />
         </section>
 
@@ -2877,7 +2931,7 @@ function KeyTransferView({
           <div className="data-sync-pane-head">
             <Space>
               <KeyOutlined />
-              <Typography.Text strong>一键操作</Typography.Text>
+              <Typography.Text strong>选中操作</Typography.Text>
             </Space>
             {transferResult ? (
               <Tag color={transferResult.failed_count > 0 ? "red" : "blue"}>
@@ -2889,19 +2943,19 @@ function KeyTransferView({
             <AntButton
               icon={<Search />}
               loading={submitting === "preview"}
-              disabled={!selectedUser || submitting !== null}
+              disabled={!selectedUser || selectedKeyIds.length === 0 || submitting !== null}
               onClick={() => void runKeyTransfer(true)}
             >
-              预览
+              预览选中
             </AntButton>
             <AntButton
               type="primary"
               icon={<SyncOutlined />}
               loading={submitting === "execute"}
-              disabled={!selectedUser || submitting !== null}
+              disabled={!selectedUser || selectedKeyIds.length === 0 || submitting !== null}
               onClick={() => void runKeyTransfer(false)}
             >
-              一键转移
+              转移选中
             </AntButton>
             <AntButton
               icon={<ReloadOutlined />}
@@ -2947,7 +3001,32 @@ function KeyTransferView({
             <ListChecks size={16} aria-hidden="true" />
             <Typography.Text strong>转移明细</Typography.Text>
           </Space>
-          {loadingKeys ? <Spin size="small" /> : <Tag>{apiKeys.length} admin Key</Tag>}
+          <Space wrap>
+            {transferResult ? <Tag>{transferResult.items.length} 条结果</Tag> : <Tag>{selectedTransferKeys.length} / {transferKeys.length} 已选</Tag>}
+            {loadingKeys ? (
+              <Spin size="small" />
+            ) : transferResult ? null : (
+              <>
+                <AntButton
+                  size="small"
+                  disabled={transferKeyIds.length === 0}
+                  onClick={toggleAllTransferKeys}
+                >
+                  {allTransferKeysSelected ? "清空选择" : "全选可转移 Key"}
+                </AntButton>
+                <AntButton
+                  size="small"
+                  disabled={selectedKeyIds.length === 0}
+                  onClick={() => {
+                    setTransferResult(null);
+                    setSelectedKeyIds([]);
+                  }}
+                >
+                  清空
+                </AntButton>
+              </>
+            )}
+          </Space>
         </div>
         {transferResult ? (
           <Table
@@ -2975,16 +3054,29 @@ function KeyTransferView({
             size="small"
             dataSource={transferKeys}
             locale={{ emptyText: loadingKeys ? "正在加载 Key" : "当前 admin 用户暂无可转移 Key" }}
-            renderItem={(key) => (
-              <List.Item>
-                <List.Item.Meta
-                  avatar={<KeyOutlined />}
-                  title={key.name || unknownToText(key.key_id)}
-                  description={`${apiKeyRouteLabel(key)} · Key ID ${unknownToText(key.key_id)}`}
-                />
-                <Tag color={statusTagColor(key.status)}>{key.status || "unknown"}</Tag>
-              </List.Item>
-            )}
+            renderItem={(key) => {
+              const keyId = idValue(key.key_id);
+              const checked = selectedTransferKeySet.has(keyId);
+              return (
+                <List.Item
+                  className={`data-sync-key-row ${checked ? "selected" : ""}`.trim()}
+                  onClick={() => toggleTransferKeySelection(keyId)}
+                >
+                  <Checkbox
+                    className="data-sync-key-checkbox"
+                    checked={checked}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={() => toggleTransferKeySelection(keyId)}
+                  />
+                  <List.Item.Meta
+                    avatar={<KeyOutlined />}
+                    title={key.name || unknownToText(key.key_id)}
+                    description={`${apiKeyRouteLabel(key)} · Key ID ${unknownToText(key.key_id)}`}
+                  />
+                  <Tag color={statusTagColor(key.status)}>{key.status || "unknown"}</Tag>
+                </List.Item>
+              );
+            }}
           />
         )}
       </section>

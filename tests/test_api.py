@@ -2165,6 +2165,92 @@ def test_key_transfer_moves_matching_admin_keys_and_preserves_key_value(client) 
     assert runs[0].tag == "key_transfer"
 
 
+def test_key_transfer_limits_processing_to_selected_key_ids(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users.extend(
+        [
+            {
+                "id": 808,
+                "email": "xuzhilin@jihuanshe.com",
+                "name": "xuzhilin",
+                "status": "active",
+                "group_ids": [22, 11],
+            },
+            {
+                "id": 909,
+                "email": "luozhaobin@jihuanshe.com",
+                "name": "luozhaobin",
+                "status": "active",
+                "group_id": 11,
+            },
+            {
+                "id": 1001,
+                "email": "unselected@jihuanshe.com",
+                "name": "unselected",
+                "status": "active",
+                "group_id": 22,
+            },
+        ]
+    )
+    backend.user_api_keys[1] = [
+        {
+            "id": "xuzhilin",
+            "user_id": 1,
+            "key": "sk-xuzhilin",
+            "name": "rotom:codex:v1:xuzhilin@jihuanshe.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
+            "id": "luozhaobin",
+            "user_id": 1,
+            "key": "sk-luozhaobin",
+            "name": "rotom:codex:v1:luozhaobin@jihuanshe.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
+            "id": "unselected",
+            "user_id": 1,
+            "key": "sk-unselected",
+            "name": "rotom:codex:v1:unselected@jihuanshe.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={
+                "source_user_id": 1,
+                "dry_run": False,
+                "key_ids": ["xuzhilin", "luozhaobin"],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["moved_count"] == 2
+    assert payload["skipped_count"] == 0
+    assert {item["key_id"] for item in payload["items"]} == {"xuzhilin", "luozhaobin"}
+    assert [call["key_id"] for call in backend.api_key_owner_calls] == ["xuzhilin", "luozhaobin"]
+    assert [key["id"] for key in backend.user_api_keys[1]] == ["unselected"]
+
+
 def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(client) -> None:
     backend = FakeRotationSub2API()
     backend.users = [

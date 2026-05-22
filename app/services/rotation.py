@@ -485,6 +485,7 @@ class RotationService:
         self,
         *,
         source_user_id: Any | None = None,
+        key_ids: list[Any] | None = None,
         dry_run: bool = False,
         reason: str | None = None,
     ) -> KeyTransferRun:
@@ -496,6 +497,14 @@ class RotationService:
         source_user_key = self._normalize_key(source_user_id)
 
         source_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
+        selected_key_ids = self._normalize_selected_key_ids(key_ids)
+        if selected_key_ids is not None:
+            source_keys = [
+                key_item
+                for key_item in source_keys
+                if isinstance(key_item, dict)
+                and self._normalize_key(key_item.get("id") or key_item.get("key_id")) in selected_key_ids
+            ]
         target_emails = {
             target_email
             for key_item in source_keys
@@ -536,11 +545,13 @@ class RotationService:
         self,
         *,
         source_user_id: Any | None = None,
+        key_ids: list[Any] | None = None,
         dry_run: bool = False,
         reason: str | None = None,
     ) -> KeyTransferRun:
         return self.transfer_admin_api_keys(
             source_user_id=source_user_id,
+            key_ids=key_ids,
             dry_run=dry_run,
             reason=reason,
         )
@@ -1524,6 +1535,14 @@ class RotationService:
             reason="Ready to transfer API key to target email user",
             quota=0.0,
         )
+
+    def _normalize_selected_key_ids(self, key_ids: list[Any] | None) -> set[str] | None:
+        if key_ids is None:
+            return None
+        selected = {self._normalize_key(key_id) for key_id in key_ids if key_id not in (None, "")}
+        if not selected:
+            raise RotationExecutionError("At least one API key must be selected")
+        return selected
 
     def _execute_key_transfer(
         self,

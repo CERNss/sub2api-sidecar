@@ -544,6 +544,7 @@ class OrchestrationApiKeyAssignRequest(BaseModel):
 
 class KeyTransferRequest(BaseModel):
     source_user_id: Any | None = None
+    key_ids: list[Any] | None = None
     dry_run: bool = False
     reason: str | None = None
 
