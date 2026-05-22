@@ -25,7 +25,7 @@ type Props = {
   renderSaveAction: (scope: string) => ReactNode;
 };
 
-const FEISHU_BALANCE_CARD_TEMPLATE: Record<string, unknown> = {
+const FEISHU_SAMPLE_CARD_TEMPLATE: Record<string, unknown> = {
   config: { wide_screen_mode: true },
   header: {
     template: "red",
@@ -182,11 +182,11 @@ export function WebhookEditor({
     }
   }
 
-  function applyFeishuBalanceTemplate(webhook: NotificationWebhook) {
-    const text = stringifyTemplate(FEISHU_BALANCE_CARD_TEMPLATE);
+  function applyFeishuSampleTemplate(webhook: NotificationWebhook) {
+    const text = stringifyTemplate(FEISHU_SAMPLE_CARD_TEMPLATE);
     setFeishuTemplateDrafts((current) => ({ ...current, [webhook.id]: text }));
     setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
-    onChange(webhook.id, { feishuCardTemplate: FEISHU_BALANCE_CARD_TEMPLATE });
+    onChange(webhook.id, { feishuCardTemplate: FEISHU_SAMPLE_CARD_TEMPLATE });
   }
 
   function clearFeishuTemplate(webhook: NotificationWebhook) {
@@ -336,9 +336,9 @@ export function WebhookEditor({
                       <div className="notif-template-toolbar">
                         <span>飞书消息卡片</span>
                         <div>
-                          <button className="button secondary compact" type="button" onClick={() => applyFeishuBalanceTemplate(webhook)}>
+                          <button className="button secondary compact" type="button" onClick={() => applyFeishuSampleTemplate(webhook)}>
                             <FileJson size={16} aria-hidden="true" />
-                            余额模板
+                            示例模版
                           </button>
                           <button className="button tertiary compact" type="button" onClick={() => clearFeishuTemplate(webhook)}>
                             <Eraser size={16} aria-hidden="true" />
@@ -349,7 +349,7 @@ export function WebhookEditor({
                       <textarea
                         className="notif-template-textarea"
                         value={feishuTemplateDrafts[webhook.id] ?? stringifyTemplate(webhook.feishuCardTemplate)}
-                        placeholder={stringifyTemplate(FEISHU_BALANCE_CARD_TEMPLATE)}
+                        placeholder={stringifyTemplate(FEISHU_SAMPLE_CARD_TEMPLATE)}
                         spellCheck={false}
                         onChange={(event) => updateFeishuTemplate(webhook, event.target.value)}
                       />
