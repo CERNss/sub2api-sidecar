@@ -91,9 +91,10 @@ class KeyTransferItem:
 
 @dataclass
 class KeyTransferRun:
-    source_user_id: Any
+    source_user_id: Any | None
     key_name_pattern: str
     dry_run: bool
+    scope: str
     run_record: OrchestrationRunRecord | None
     items: list[KeyTransferItem]
 
@@ -488,15 +489,25 @@ class RotationService:
         key_ids: list[Any] | None = None,
         dry_run: bool = False,
         reason: str | None = None,
+        scope: str = "admin",
     ) -> KeyTransferRun:
-        admin_user_id = self._resolve_admin_user_id()
-        if source_user_id in (None, ""):
-            source_user_id = admin_user_id
-        elif self._normalize_key(source_user_id) != self._normalize_key(admin_user_id):
-            raise RotationExecutionError("Key transfer only supports the admin source user")
-        source_user_key = self._normalize_key(source_user_id)
-
-        source_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
+        scope_key = scope.strip().lower() if scope else "admin"
+        if scope_key not in {"admin", "all_users"}:
+            raise RotationExecutionError("Unsupported key transfer scope")
+        if scope_key == "all_users":
+            if source_user_id not in (None, ""):
+                raise RotationExecutionError("All-user key transfer does not accept a source user")
+            source_user_id = None
+            source_user_key = None
+            source_keys = self.sub2api_client.list_all_user_api_keys()["items"]
+        else:
+            admin_user_id = self._resolve_admin_user_id()
+            if source_user_id in (None, ""):
+                source_user_id = admin_user_id
+            elif self._normalize_key(source_user_id) != self._normalize_key(admin_user_id):
+                raise RotationExecutionError("Key transfer only supports the admin source user")
+            source_user_key = self._normalize_key(source_user_id)
+            source_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
         selected_key_ids = self._normalize_selected_key_ids(key_ids)
         if selected_key_ids is not None:
             source_keys = [
@@ -532,11 +543,13 @@ class RotationService:
             items=items,
             dry_run=dry_run,
             reason=reason,
+            scope=scope_key,
         )
         return KeyTransferRun(
             source_user_id=source_user_id,
             key_name_pattern="service:object:version:email",
             dry_run=dry_run,
+            scope=scope_key,
             run_record=run_record,
             items=items,
         )
@@ -554,6 +567,7 @@ class RotationService:
             key_ids=key_ids,
             dry_run=dry_run,
             reason=reason,
+            scope="admin",
         )
 
     _STATUS_BUCKETS = {
@@ -1379,8 +1393,8 @@ class RotationService:
         self,
         key_item: dict[str, Any],
         *,
-        source_user_id: Any,
-        source_user_key: str,
+        source_user_id: Any | None,
+        source_user_key: str | None,
         users_by_email: dict[str, dict[str, Any]],
         duplicate_emails: set[str],
         available_groups_by_key: dict[str, dict[str, Any]],
@@ -1390,6 +1404,8 @@ class RotationService:
         key_value = self._text_or_none(key_item.get("key"))
         source_group_id = key_item.get("group_id") or key_item.get("current_group_id")
         source_key_user_id = key_item.get("user_id", source_user_id)
+        if source_key_user_id in (None, ""):
+            source_key_user_id = key_item.get("owner_user_id", source_user_id)
         if key_id in (None, ""):
             return KeyTransferItem(
                 key_id=None,
@@ -1403,7 +1419,7 @@ class RotationService:
                 status=RotationResultStatus.skipped,
                 reason="API key id is missing",
             )
-        if self._normalize_key(source_key_user_id) != source_user_key:
+        if source_user_key is not None and self._normalize_key(source_key_user_id) != source_user_key:
             return KeyTransferItem(
                 key_id=key_id,
                 key_name=key_name,
@@ -1599,6 +1615,7 @@ class RotationService:
         items: list[KeyTransferItem],
         dry_run: bool,
         reason: str | None,
+        scope: str,
     ) -> OrchestrationRunRecord:
         planned: list[dict[str, Any]] = []
         moved: list[dict[str, Any]] = []
@@ -1621,7 +1638,11 @@ class RotationService:
             dry_run=dry_run,
             window=None,
             synced={},
-            config={"key_name_pattern": "service:object:version:email", "reason": reason or ""},
+            config={
+                "key_name_pattern": "service:object:version:email",
+                "reason": reason or "",
+                "scope": scope,
+            },
             planned=planned,
             moved=moved,
             skipped=skipped,

@@ -828,6 +828,7 @@ def key_transfer_response(run: KeyTransferRun) -> KeyTransferEnvelope:
         tag=record.tag if record else None,
         dry_run=run.dry_run,
         source_user_id=run.source_user_id,
+        scope=run.scope,
         key_name_pattern=run.key_name_pattern,
         planned_count=run.planned_count,
         moved_count=run.moved_count,
@@ -1850,6 +1851,38 @@ def orchestration_user_api_keys(
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
+@app.get("/orchestration/api-keys")
+def orchestration_all_user_api_keys(
+    upstream_id: str | None = None,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    selected_upstream_id = normalize_upstream_id(upstream_id)
+    response = get_sub2api_client(selected_upstream_id).list_all_user_api_keys()
+    items = []
+    for item in response["items"]:
+        items.append(
+            OrchestrationApiKeyResponse(
+                upstream_id=selected_upstream_id,
+                key_id=item.get("id") or item.get("key_id"),
+                name=item.get("name"),
+                group_id=item.get("group_id") or item.get("current_group_id"),
+                group_name=item.get("group_name") or item.get("current_group_name"),
+                status=item.get("status"),
+                usage_5h=item.get("usage_5h"),
+                usage_1d=item.get("usage_1d"),
+                usage_7d=item.get("usage_7d"),
+                user_id=item.get("user_id") or item.get("owner_user_id"),
+                user_email=item.get("owner_email"),
+            )
+        )
+    payload = OrchestrationApiKeysEnvelope(
+        upstream_id=selected_upstream_id,
+        items=items,
+        total=response["total"],
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
+
+
 @app.post("/orchestration/assignments/replace-group")
 def orchestration_replace_group(
     payload: OrchestrationAssignRequest,
@@ -1899,6 +1932,7 @@ def orchestration_transfer_admin_api_keys(
         source_user_id=payload.source_user_id,
         key_ids=payload.key_ids,
         dry_run=payload.dry_run,
+        scope=payload.scope,
         reason=payload.reason,
     )
     response = key_transfer_response(run)

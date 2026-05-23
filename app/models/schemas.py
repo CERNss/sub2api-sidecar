@@ -218,6 +218,8 @@ class OrchestrationApiKeyResponse(BaseModel):
     upstream_id: str = "default"
     key_id: Any
     name: str | None = None
+    user_id: Any | None = None
+    user_email: str | None = None
     group_id: Any | None = None
     group_name: str | None = None
     status: str | None = None
@@ -577,6 +579,7 @@ class KeyTransferRequest(BaseModel):
     source_user_id: Any | None = None
     key_ids: list[Any] | None = None
     dry_run: bool = False
+    scope: str = "admin"
     reason: str | None = None
 
 
@@ -599,8 +602,9 @@ class KeyTransferEnvelope(BaseModel):
     run_kind: str | None = None
     tag: str | None = None
     dry_run: bool = False
-    source_user_id: Any
     key_name_pattern: str
+    source_user_id: Any | None = None
+    scope: str = "admin"
     planned_count: int = 0
     moved_count: int = 0
     skipped_count: int = 0

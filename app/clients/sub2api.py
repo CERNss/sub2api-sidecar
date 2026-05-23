@@ -175,12 +175,13 @@ class Sub2APIClient:
         data = self._request("GET", self.LIST_GROUPS_PATH, params=params)
         return self._parse_group_list(data)
 
-    def list_users(self, email: str | None = None) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"page": 1, "page_size": 1000}
+    def list_users(self, email: str | None = None, page_size: int = 1000) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"page_size": page_size}
         if email:
             params["email"] = email
-        data = self._request("GET", self.LIST_USERS_PATH, params=params)
-        users = self._parse_user_list(data)
+        users: list[dict[str, Any]] = []
+        for data in self._request_paginated("GET", self.LIST_USERS_PATH, params=params):
+            users.extend(self._parse_user_list(data))
         if email:
             needle = email.lower()
             users = [
@@ -195,20 +196,42 @@ class Sub2APIClient:
 
     def get_user_api_keys(self, user_id: Any, page_size: int = 1000) -> dict[str, Any]:
         path = self.USER_API_KEYS_PATH.format(user_id=user_id)
-        data = self._request(
+        items: list[dict[str, Any]] = []
+        total: int | None = None
+        last_raw: dict[str, Any] = {}
+        for data in self._request_paginated(
             "GET",
             path,
-            params={"page": 1, "page_size": page_size},
-        )
-        envelope = self._unwrap_data(data)
-        items: list[dict[str, Any]] = []
-        total = 0
-        if isinstance(envelope, dict):
+            params={"page_size": page_size},
+        ):
+            last_raw = data
+            envelope = self._unwrap_data(data)
+            if not isinstance(envelope, dict):
+                continue
             raw_items = envelope.get("items", [])
             if isinstance(raw_items, list):
-                items = [item for item in raw_items if isinstance(item, dict)]
-            total = int(envelope.get("total", len(items)) or len(items))
-        return {"items": items, "total": total, "raw": data}
+                items.extend(item for item in raw_items if isinstance(item, dict))
+            if isinstance(envelope.get("total"), int):
+                total = envelope["total"]
+        return {"items": items, "total": total if total is not None else len(items), "raw": last_raw}
+
+    def list_all_user_api_keys(self, page_size: int = 1000) -> dict[str, Any]:
+        users = self.list_users(page_size=page_size)
+        items: list[dict[str, Any]] = []
+        for user in users:
+            user_id = user.get("id")
+            if user_id in (None, ""):
+                continue
+            response = self.get_user_api_keys(user_id, page_size=page_size)
+            for item in response["items"]:
+                key_item = dict(item)
+                key_item.setdefault("user_id", user_id)
+                key_item.setdefault("owner_user_id", user_id)
+                key_item.setdefault("owner_email", user.get("email"))
+                key_item.setdefault("owner_username", user.get("username"))
+                key_item.setdefault("owner_display_name", user.get("display_name"))
+                items.append(key_item)
+        return {"items": items, "total": len(items), "users_total": len(users)}
 
     def update_user_balance(
         self,
@@ -1374,6 +1397,70 @@ class Sub2APIClient:
 
         logger.info("Sub2API request succeeded: %s %s", method, url)
         return data
+
+    def _request_paginated(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        base_params = dict(params or {})
+        page = int(base_params.pop("page", 1) or 1)
+        page_size = int(base_params.get("page_size", 1000) or 1000)
+        results: list[dict[str, Any]] = []
+        total: int | None = None
+        pages: int | None = None
+        seen_page_signatures: set[tuple[str, ...]] = set()
+
+        while True:
+            data = self._request(
+                method,
+                path,
+                params={**base_params, "page": page, "page_size": page_size},
+            )
+            body = self._unwrap_data(data)
+            if not isinstance(body, dict):
+                results.append(data)
+                break
+
+            raw_items = body.get("items")
+            if raw_items is None and isinstance(body.get("users"), list):
+                raw_items = body["users"]
+            if raw_items is None and isinstance(body.get("data"), list):
+                raw_items = body["data"]
+            if isinstance(body.get("total"), int):
+                total = body["total"]
+            if isinstance(body.get("pages"), int):
+                pages = body["pages"]
+            if not isinstance(raw_items, list) or not raw_items:
+                results.append(data)
+                break
+            page_signature = tuple(
+                str(item.get("id") or item.get("user_id") or item.get("key_id") or item)
+                if isinstance(item, dict)
+                else str(item)
+                for item in raw_items
+            )
+            if page_signature in seen_page_signatures:
+                logger.warning(
+                    "Stopping Sub2API pagination after repeated page signature | path=%s | page=%s",
+                    path,
+                    page,
+                )
+                break
+            seen_page_signatures.add(page_signature)
+            results.append(data)
+            if pages is not None and page >= pages:
+                break
+            seen_count = page * page_size
+            if total is not None and seen_count >= total:
+                break
+            if len(raw_items) < page_size and total is None and pages is None:
+                break
+            page += 1
+
+        return results
 
     def _request_without_admin_key(
         self,
