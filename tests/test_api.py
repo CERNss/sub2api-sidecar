@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from unittest.mock import patch
 
 import pytest
@@ -604,6 +604,20 @@ def clear_caches() -> None:
     main.get_credit_control_service.cache_clear()
     main.get_usage_segmentation_service.cache_clear()
     main.get_group_usage_service.cache_clear()
+
+
+def database_config_from_app_env(app_env: dict[str, str]) -> str:
+    parsed = urlparse(app_env["database_url"])
+    return "\n".join(
+        [
+            "database:",
+            f"  url: {json.dumps(parsed.hostname or '')}",
+            f"  port: {parsed.port or 5432}",
+            f"  username: {json.dumps(unquote(parsed.username or ''))}",
+            f"  name: {json.dumps(unquote(parsed.path.lstrip('/')))}",
+            "",
+        ]
+    )
 
 
 def save_auto_rotation_config(
@@ -1315,15 +1329,11 @@ def test_auth_session_returns_current_session(client) -> None:
     assert payload["expires_at"]
 
 
-def test_upstreams_endpoint_returns_sanitized_config(client, tmp_path, monkeypatch) -> None:
+def test_upstreams_endpoint_returns_sanitized_config(client, tmp_path, monkeypatch, app_env) -> None:
     config_path = tmp_path / "multi-upstream.yaml"
     config_path.write_text(
-        """
-database:
-  url: 127.0.0.1
-  port: 55432
-  username: sub2api_sidecar
-  name: sub2api_sidecar_test
+        f"""
+{database_config_from_app_env(app_env)}
 app:
   base_url: http://testserver
 openai:
@@ -1373,15 +1383,11 @@ sub2api:
     clear_caches()
 
 
-def test_orchestration_discovery_uses_selected_upstream(client, tmp_path, monkeypatch) -> None:
+def test_orchestration_discovery_uses_selected_upstream(client, tmp_path, monkeypatch, app_env) -> None:
     config_path = tmp_path / "multi-upstream.yaml"
     config_path.write_text(
-        """
-database:
-  url: 127.0.0.1
-  port: 55432
-  username: sub2api_sidecar
-  name: sub2api_sidecar_test
+        f"""
+{database_config_from_app_env(app_env)}
 app:
   base_url: http://testserver
 openai:
@@ -1461,15 +1467,11 @@ sub2api:
     clear_caches()
 
 
-def test_provisioning_flow_uses_selected_upstream_for_start_and_complete(client, tmp_path, monkeypatch) -> None:
+def test_provisioning_flow_uses_selected_upstream_for_start_and_complete(client, tmp_path, monkeypatch, app_env) -> None:
     config_path = tmp_path / "multi-upstream.yaml"
     config_path.write_text(
-        """
-database:
-  url: 127.0.0.1
-  port: 55432
-  username: sub2api_sidecar
-  name: sub2api_sidecar_test
+        f"""
+{database_config_from_app_env(app_env)}
 app:
   base_url: http://testserver
 openai:

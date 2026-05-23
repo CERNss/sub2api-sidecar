@@ -159,14 +159,21 @@ UI_INDEX_FILE = UI_DIST_DIR / "index.html"
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     get_settings()
-    get_flow_store()
+    flow_store = get_flow_store()
     get_auth_manager()
+
+    def operational_runtime_settings() -> OperationalDataRuntimeSettings:
+        stored = flow_store.get_operational_data_runtime_settings()
+        if stored is not None:
+            return stored
+        return OperationalDataRuntimeSettings()
+
     notification_service = get_notification_service()
     notification_scheduler = NotificationScheduler(
         notification_service=notification_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
-        enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
-        cadence_provider=lambda: get_operational_data_runtime_settings().collect_interval_seconds,
+        enabled_provider=lambda: operational_runtime_settings().enabled,
+        cadence_provider=lambda: operational_runtime_settings().collect_interval_seconds,
     )
     app_instance.state.notification_scheduler = notification_scheduler
     try:
@@ -186,13 +193,13 @@ async def lifespan(app_instance: FastAPI):
     usage_segmentation_scheduler = UsageSegmentationScheduler(
         segmentation_service=usage_segmentation_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
-        enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
+        enabled_provider=lambda: operational_runtime_settings().enabled,
     )
     app_instance.state.usage_segmentation_scheduler = usage_segmentation_scheduler
     group_usage_scheduler = GroupUsageScheduler(
         group_usage_service=group_usage_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
-        enabled_provider=lambda: get_operational_data_runtime_settings().enabled,
+        enabled_provider=lambda: operational_runtime_settings().enabled,
     )
     app_instance.state.group_usage_scheduler = group_usage_scheduler
     usage_segmentation_scheduler.start()
@@ -202,14 +209,17 @@ async def lifespan(app_instance: FastAPI):
     rotation_scheduler = AutoRotationScheduler(
         rotation_service=rotation_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
-        enabled_provider=lambda: get_rotation_service().get_auto_rotation_config().enabled,
+        enabled_provider=lambda: rotation_service.get_auto_rotation_config().enabled,
     )
     app_instance.state.auto_rotation_scheduler = rotation_scheduler
     rotation_scheduler.start()
     credit_scheduler = CreditControlScheduler(
         credit_service=get_credit_control_service(),
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
-        enabled_provider=lambda: get_credit_control_runtime_settings().enabled,
+        enabled_provider=lambda: (
+            flow_store.get_credit_control_runtime_settings()
+            or CreditControlRuntimeSettings()
+        ).enabled,
     )
     app_instance.state.credit_control_scheduler = credit_scheduler
     credit_scheduler.start()
