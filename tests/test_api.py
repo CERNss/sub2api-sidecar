@@ -2561,6 +2561,10 @@ def test_existing_user_group_orchestration_assigns_user_without_source_group(cli
     backend.users[0]["group_id"] = None
     backend.users[0]["group_name"] = None
     backend.users[0]["group_ids"] = []
+    backend.user_api_keys[101] = [
+        {"id": "key-101-primary", "name": "primary", "group_id": None},
+        {"id": "key-101-extra", "name": "extra", "group_id": None},
+    ]
     login(client)
     save_operational_snapshots(backend)
 
@@ -2581,10 +2585,14 @@ def test_existing_user_group_orchestration_assigns_user_without_source_group(cli
     assert payload["status"] == "moved"
     assert payload["source_group_id"] is None
     assert payload["target_group_id"] == 22
-    assert payload["migrated_keys"] == 0
+    assert payload["migrated_keys"] == 2
     assert backend.replace_calls == []
     assert backend.set_user_group_calls == [
         {"user_id": 101, "group_id": 22, "allowed_groups": [22]}
+    ]
+    assert backend.api_key_group_calls == [
+        {"key_id": "key-101-primary", "group_id": 22},
+        {"key_id": "key-101-extra", "group_id": 22},
     ]
     assignment = main.get_flow_store().get_user_assignment(101)
     assert assignment is not None

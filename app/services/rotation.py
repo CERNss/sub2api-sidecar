@@ -391,7 +391,10 @@ class RotationService:
                     user_id=user_id,
                     group_id=target_group_id,
                 )
-                migrated_keys = 0
+                migrated_keys = self._move_user_api_keys_to_group(
+                    user_id=user_id,
+                    target_group_id=target_group_id,
+                )
             else:
                 response = self.sub2api_client.replace_exclusive_user_group(
                     user_id=user_id,
@@ -425,6 +428,22 @@ class RotationService:
             reason=request_reason,
             migrated_keys=migrated_keys,
         )
+
+    def _move_user_api_keys_to_group(self, *, user_id: Any, target_group_id: Any) -> int:
+        api_keys = self.sub2api_client.get_user_api_keys(user_id)["items"]
+        moved = 0
+        for api_key in api_keys:
+            if not isinstance(api_key, dict):
+                continue
+            key_id = api_key.get("id") or api_key.get("key_id")
+            if key_id in (None, ""):
+                continue
+            self.sub2api_client.update_api_key_group(
+                key_id=key_id,
+                group_id=target_group_id,
+            )
+            moved += 1
+        return moved
 
     def _get_direct_user_group(self, user_id: Any) -> tuple[Any | None, str | None]:
         for user in self._latest_users_snapshot():
