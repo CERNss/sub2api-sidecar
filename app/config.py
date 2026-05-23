@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
@@ -116,18 +117,51 @@ class Sub2APIProvisioningDefaults:
 
 
 @dataclass(frozen=True)
+class Sub2APIUpstream:
+    upstream_id: str
+    name: str
+    base_url: str
+    admin_api_key: str
+    admin_api_key_env: str
+    request_timeout_seconds: int
+    provisioning_defaults: Sub2APIProvisioningDefaults
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str
-    sub2api_base_url: str
-    sub2api_admin_api_key: str
     app_base_url: str
     app_base_path: str
     openai_oauth_redirect_uri: str
-    sub2api_provisioning_defaults: Sub2APIProvisioningDefaults
+    sub2api_upstreams: tuple[Sub2APIUpstream, ...]
+    default_sub2api_upstream_id: str
     app_auth_username: str = "admin"
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
     request_timeout_seconds: int = 30
+
+    @property
+    def default_sub2api_upstream(self) -> Sub2APIUpstream:
+        return self.get_sub2api_upstream(self.default_sub2api_upstream_id)
+
+    @property
+    def sub2api_base_url(self) -> str:
+        return self.default_sub2api_upstream.base_url
+
+    @property
+    def sub2api_admin_api_key(self) -> str:
+        return self.default_sub2api_upstream.admin_api_key
+
+    @property
+    def sub2api_provisioning_defaults(self) -> Sub2APIProvisioningDefaults:
+        return self.default_sub2api_upstream.provisioning_defaults
+
+    def get_sub2api_upstream(self, upstream_id: str | None = None) -> Sub2APIUpstream:
+        selected_id = (upstream_id or self.default_sub2api_upstream_id).strip()
+        for upstream in self.sub2api_upstreams:
+            if upstream.upstream_id == selected_id:
+                return upstream
+        raise ConfigurationError(f"Unknown Sub2API upstream_id: {selected_id}")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -137,7 +171,6 @@ class Settings:
         values: dict[str, Any] = {}
 
         for field_name, env_name, config_path in (
-            ("sub2api_base_url", "SUB2API_BASE_URL", ("sub2api", "base_url")),
             ("app_base_url", "APP_BASE_URL", ("app", "base_url")),
             (
                 "openai_oauth_redirect_uri",
@@ -154,20 +187,6 @@ class Settings:
         database_url = _database_url_setting(config, missing)
         if database_url is not None:
             values["database_url"] = database_url
-
-        for field_name, env_name in (
-            ("sub2api_admin_api_key", "SUB2API_ADMIN_API_KEY"),
-        ):
-            value = _env_string(env_name)
-            if value is None:
-                missing.append(env_name)
-            else:
-                values[field_name] = value
-
-        if missing:
-            raise ConfigurationError(
-                "Missing required configuration: " + ", ".join(sorted(missing))
-            )
 
         values["app_auth_username"] = _string_setting(
             config,
@@ -193,54 +212,19 @@ class Settings:
         if values["app_access_key_ttl_hours"] <= 0:
             raise ConfigurationError("APP_ACCESS_KEY_TTL_HOURS must be greater than zero")
 
-        values["sub2api_provisioning_defaults"] = Sub2APIProvisioningDefaults(
-            group_platform=_string_setting(
-                config,
-                "SUB2API_GROUP_PLATFORM",
-                ("sub2api", "provisioning_defaults", "group_platform"),
-                default="openai",
-            ),
-            account_provider=_string_setting(
-                config,
-                "SUB2API_ACCOUNT_PROVIDER",
-                ("sub2api", "provisioning_defaults", "account_provider"),
-                default="openai",
-            ),
-            account_platform=_string_setting(
-                config,
-                "SUB2API_ACCOUNT_PLATFORM",
-                ("sub2api", "provisioning_defaults", "account_platform"),
-                default="openai",
-            ),
-            account_type=_string_setting(
-                config,
-                "SUB2API_ACCOUNT_TYPE",
-                ("sub2api", "provisioning_defaults", "account_type"),
-                default="oauth",
-            ),
-            account_ws_mode=_string_setting(
-                config,
-                "SUB2API_ACCOUNT_WS_MODE",
-                ("sub2api", "provisioning_defaults", "account_ws_mode"),
-                default="context_pool",
-            ),
-            account_concurrency=_int_setting(
-                config,
-                "SUB2API_ACCOUNT_CONCURRENCY",
-                ("sub2api", "provisioning_defaults", "account_concurrency"),
-                default=5,
-            ),
-            account_temporary_unschedulable=_bool_setting(
-                config,
-                "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
-                ("sub2api", "provisioning_defaults", "account_temporary_unschedulable"),
-                default=True,
-            ),
-            account_temporary_unschedulable_rules=_rules_setting(config),
-            account_model_whitelist=_account_model_whitelist_setting(config),
+        upstreams = _sub2api_upstreams_setting(
+            config,
+            default_timeout_seconds=values["request_timeout_seconds"],
+            missing=missing,
         )
-        if values["sub2api_provisioning_defaults"].account_concurrency <= 0:
-            raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
+        if upstreams:
+            values["sub2api_upstreams"] = upstreams
+            values["default_sub2api_upstream_id"] = upstreams[0].upstream_id
+
+        if missing:
+            raise ConfigurationError(
+                "Missing required configuration: " + ", ".join(sorted(missing))
+            )
 
         return cls(**values)
 
@@ -314,6 +298,162 @@ def _reject_removed_settings(config: Mapping[str, Any]) -> None:
         "Removed configuration fields are not supported: "
         f"{removed}. Configure runtime switches and operational data expiration "
         "through the authenticated web UI/API."
+    )
+
+
+def _sub2api_upstreams_setting(
+    config: Mapping[str, Any],
+    *,
+    default_timeout_seconds: int,
+    missing: list[str],
+) -> tuple[Sub2APIUpstream, ...] | None:
+    upstreams_payload = _config_value(config, ("sub2api", "upstreams"))
+    defaults = _provisioning_defaults_setting(config)
+    if defaults.account_concurrency <= 0:
+        raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
+
+    if upstreams_payload is None:
+        base_url = _string_setting(
+            config,
+            "SUB2API_BASE_URL",
+            ("sub2api", "base_url"),
+        )
+        admin_api_key = _env_string("SUB2API_ADMIN_API_KEY")
+        if base_url is None:
+            missing.append("sub2api.base_url or SUB2API_BASE_URL")
+        if admin_api_key is None:
+            missing.append("SUB2API_ADMIN_API_KEY")
+        if base_url is None or admin_api_key is None:
+            return None
+        return (
+            Sub2APIUpstream(
+                upstream_id="default",
+                name="Default Sub2API",
+                base_url=base_url,
+                admin_api_key=admin_api_key,
+                admin_api_key_env="SUB2API_ADMIN_API_KEY",
+                request_timeout_seconds=default_timeout_seconds,
+                provisioning_defaults=defaults,
+            ),
+        )
+
+    if _env_string("SUB2API_BASE_URL") is not None:
+        raise ConfigurationError(
+            "SUB2API_BASE_URL cannot be used when sub2api.upstreams is configured"
+        )
+    if not isinstance(upstreams_payload, list) or not upstreams_payload:
+        raise ConfigurationError("sub2api.upstreams must be a non-empty array")
+
+    upstreams: list[Sub2APIUpstream] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(upstreams_payload, start=1):
+        source = f"sub2api.upstreams[{index}]"
+        if not isinstance(item, Mapping):
+            raise ConfigurationError(f"{source} must be an object")
+        upstream_id = _required_string_item(item, "id", source=source)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", upstream_id):
+            raise ConfigurationError(
+                f"{source}.id must use 1-64 URL-safe letters, numbers, underscores, or hyphens"
+            )
+        if upstream_id in seen_ids:
+            raise ConfigurationError(f"Duplicate Sub2API upstream id: {upstream_id}")
+        seen_ids.add(upstream_id)
+
+        base_url = _required_string_item(item, "base_url", source=source)
+        admin_api_key_env = _required_string_item(
+            item,
+            "admin_api_key_env",
+            source=source,
+        )
+        admin_api_key = _env_string(admin_api_key_env)
+        if admin_api_key is None:
+            missing.append(admin_api_key_env)
+
+        raw_timeout = item.get("request_timeout_seconds")
+        timeout_seconds = (
+            default_timeout_seconds
+            if raw_timeout in (None, "")
+            else _parse_int_value(raw_timeout, source=f"{source}.request_timeout_seconds")
+        )
+        if timeout_seconds <= 0:
+            raise ConfigurationError(f"{source}.request_timeout_seconds must be greater than zero")
+
+        upstreams.append(
+            Sub2APIUpstream(
+                upstream_id=upstream_id,
+                name=str(item.get("name") or upstream_id).strip() or upstream_id,
+                base_url=base_url,
+                admin_api_key=admin_api_key or "",
+                admin_api_key_env=admin_api_key_env,
+                request_timeout_seconds=timeout_seconds,
+                provisioning_defaults=defaults,
+            )
+        )
+
+    return tuple(upstreams)
+
+
+def _required_string_item(payload: Mapping[str, Any], key: str, *, source: str) -> str:
+    raw_value = payload.get(key)
+    if raw_value is None or raw_value == "":
+        raise ConfigurationError(f"{source}.{key} must be a non-empty string")
+    if isinstance(raw_value, str):
+        value = raw_value.strip()
+    elif isinstance(raw_value, (int, float, bool)):
+        value = str(raw_value).strip()
+    else:
+        raise ConfigurationError(f"{source}.{key} must be a string")
+    if not value:
+        raise ConfigurationError(f"{source}.{key} must be a non-empty string")
+    return value
+
+
+def _provisioning_defaults_setting(config: Mapping[str, Any]) -> Sub2APIProvisioningDefaults:
+    return Sub2APIProvisioningDefaults(
+        group_platform=_string_setting(
+            config,
+            "SUB2API_GROUP_PLATFORM",
+            ("sub2api", "provisioning_defaults", "group_platform"),
+            default="openai",
+        ),
+        account_provider=_string_setting(
+            config,
+            "SUB2API_ACCOUNT_PROVIDER",
+            ("sub2api", "provisioning_defaults", "account_provider"),
+            default="openai",
+        ),
+        account_platform=_string_setting(
+            config,
+            "SUB2API_ACCOUNT_PLATFORM",
+            ("sub2api", "provisioning_defaults", "account_platform"),
+            default="openai",
+        ),
+        account_type=_string_setting(
+            config,
+            "SUB2API_ACCOUNT_TYPE",
+            ("sub2api", "provisioning_defaults", "account_type"),
+            default="oauth",
+        ),
+        account_ws_mode=_string_setting(
+            config,
+            "SUB2API_ACCOUNT_WS_MODE",
+            ("sub2api", "provisioning_defaults", "account_ws_mode"),
+            default="context_pool",
+        ),
+        account_concurrency=_int_setting(
+            config,
+            "SUB2API_ACCOUNT_CONCURRENCY",
+            ("sub2api", "provisioning_defaults", "account_concurrency"),
+            default=5,
+        ),
+        account_temporary_unschedulable=_bool_setting(
+            config,
+            "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
+            ("sub2api", "provisioning_defaults", "account_temporary_unschedulable"),
+            default=True,
+        ),
+        account_temporary_unschedulable_rules=_rules_setting(config),
+        account_model_whitelist=_account_model_whitelist_setting(config),
     )
 
 

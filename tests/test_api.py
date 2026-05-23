@@ -220,6 +220,9 @@ class FakeRotationSub2API:
         self.balance_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
         self.create_account_calls = 0
+        self.generate_auth_url_calls = 0
+        self.exchange_code_calls = 0
+        self.update_account_calls: list[dict[str, object]] = []
         self.bind_account_calls: list[dict[str, object]] = []
         self.group_usage_by_window = {
             "1d": [
@@ -335,6 +338,7 @@ class FakeRotationSub2API:
             )
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
+            self.generate_auth_url_calls += 1
             upstream_state = f"upstream-{json['state']}"
             return FakeResponse(
                 200,
@@ -351,6 +355,7 @@ class FakeRotationSub2API:
                 },
             )
         if method == "POST" and path == "/api/v1/admin/openai/exchange-code":
+            self.exchange_code_calls += 1
             assert json["session_id"] == f"session-{json['state'].removeprefix('upstream-')}"
             return FakeResponse(
                 200,
@@ -366,6 +371,7 @@ class FakeRotationSub2API:
             )
         if method == "POST" and path == "/api/v1/admin/accounts":
             self.create_account_calls += 1
+            assert json["provider"] == "openai"
             assert json["platform"] == "openai"
             assert json["type"] == "oauth"
             assert json["credentials"]["access_token"] == "token-123"
@@ -385,6 +391,19 @@ class FakeRotationSub2API:
                     "code": 0,
                     "message": "success",
                     "data": {"account_id": "oa-1", "name": json["name"]},
+                },
+            )
+        if method == "PUT" and path.startswith("/api/v1/admin/accounts/"):
+            account_id = path.rsplit("/", 1)[-1]
+            self.update_account_calls.append(
+                {"account_id": account_id, "path": path, "json": dict(json or {})}
+            )
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"account_id": account_id, "name": json.get("name")},
                 },
             )
         if method == "POST" and path in {
@@ -549,6 +568,7 @@ def clear_caches() -> None:
     main.get_flow_store.cache_clear()
     main.get_sub2api_client.cache_clear()
     main.get_rotation_service.cache_clear()
+    main.get_rotation_service_for_upstream.cache_clear()
     main.get_provisioning_service.cache_clear()
     main.get_notification_service.cache_clear()
     main.get_credit_control_service.cache_clear()
@@ -797,6 +817,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
             },
         )
     if method == "POST" and path == "/api/v1/admin/accounts":
+        assert json["provider"] == "openai"
         assert json["platform"] == "openai"
         assert json["type"] == "oauth"
         assert "email" not in json
@@ -979,6 +1000,73 @@ def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:
     ]
 
 
+def test_sub2api_client_configures_existing_oauth_account_preserving_credentials() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(
+            200,
+            {"code": 0, "message": "success", "data": {"account_id": "acct-existing"}},
+        )
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+    account = {
+        "id": "acct-existing",
+        "name": "old@example.com",
+        "raw": {
+            "credentials": {
+                "access_token": "keep-access",
+                "refresh_token": "keep-refresh",
+                "id_token": "keep-id",
+            },
+            "extra": {"privacy_mode": "standard", "legacy": "value"},
+            "notes": "existing note",
+            "proxy_id": "proxy-1",
+            "priority": 9,
+            "rate_multiplier": 2,
+        },
+    }
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.configure_existing_openai_oauth_account(
+            account=account,
+            name="existing@example.com",
+            group_id=77,
+        )
+
+    payload = calls[0]["json"]
+    assert result["id"] == "acct-existing"
+    assert calls[0]["method"] == "PUT"
+    assert calls[0]["path"] == "/api/v1/admin/accounts/acct-existing"
+    assert payload["name"] == "existing@example.com"
+    assert payload["provider"] == "openai"
+    assert payload["platform"] == "openai"
+    assert payload["type"] == "oauth"
+    assert payload["group_ids"] == [77]
+    assert payload["concurrency"] == 5
+    assert payload["credentials"]["access_token"] == "keep-access"
+    assert payload["credentials"]["refresh_token"] == "keep-refresh"
+    assert payload["credentials"]["id_token"] == "keep-id"
+    assert payload["credentials"]["temp_unschedulable_enabled"] is True
+    assert payload["credentials"]["temp_unschedulable_rules"] == (
+        EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+    )
+    assert payload["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
+    assert payload["extra"]["privacy_mode"] == "standard"
+    assert payload["extra"]["legacy"] == "value"
+    assert payload["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
+    assert payload["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
+    assert payload["notes"] == "existing note"
+    assert payload["proxy_id"] == "proxy-1"
+    assert payload["priority"] == 9
+    assert payload["rate_multiplier"] == 2
+
+
 def login(client: TestClient) -> dict[str, object]:
     response = client.post("/auth/login", json=AUTH_PAYLOAD)
     assert response.status_code == 200
@@ -1114,6 +1202,260 @@ def test_auth_session_returns_current_session(client) -> None:
     assert payload["success"] is True
     assert payload["username"] == "admin"
     assert payload["expires_at"]
+
+
+def test_upstreams_endpoint_returns_sanitized_config(client, tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "multi-upstream.yaml"
+    config_path.write_text(
+        """
+database:
+  url: 127.0.0.1
+  port: 55432
+  username: sub2api_sidecar
+  name: sub2api_sidecar_test
+app:
+  base_url: http://testserver
+openai:
+  oauth_redirect_uri: http://localhost:1455/callback
+sub2api:
+  upstreams:
+    - id: main
+      name: Main Sub2API
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: secondary
+      name: Secondary Sub2API
+      base_url: http://secondary-sub2api.local
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
+    monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-secret")
+    clear_caches()
+    login(client)
+
+    response = client.get("/api/upstreams")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["default_upstream_id"] == "main"
+    assert payload["items"] == [
+        {
+            "upstream_id": "main",
+            "name": "Main Sub2API",
+            "base_url": "http://main-sub2api.local",
+            "is_default": True,
+        },
+        {
+            "upstream_id": "secondary",
+            "name": "Secondary Sub2API",
+            "base_url": "http://secondary-sub2api.local",
+            "is_default": False,
+        },
+    ]
+    assert "secret" not in json.dumps(payload)
+    assert "admin_api_key" not in json.dumps(payload)
+
+    monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
+    clear_caches()
+
+
+def test_orchestration_discovery_uses_selected_upstream(client, tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "multi-upstream.yaml"
+    config_path.write_text(
+        """
+database:
+  url: 127.0.0.1
+  port: 55432
+  username: sub2api_sidecar
+  name: sub2api_sidecar_test
+app:
+  base_url: http://testserver
+openai:
+  oauth_redirect_uri: http://localhost:1455/callback
+sub2api:
+  upstreams:
+    - id: main
+      name: Main Sub2API
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: secondary
+      name: Secondary Sub2API
+      base_url: http://secondary-sub2api.local
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+      request_timeout_seconds: 18
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
+    monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-key")
+    clear_caches()
+    login(client)
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append(
+            {
+                "method": method,
+                "host": urlparse(url).netloc,
+                "path": urlparse(url).path,
+                "api_key": self.headers.get("x-api-key"),
+                "timeout": timeout,
+            }
+        )
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": [
+                    {
+                        "id": 77,
+                        "email": "secondary@example.com",
+                        "name": "Secondary User",
+                        "group_id": 5,
+                        "group_name": "secondary-group",
+                    }
+                ],
+            },
+        )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.get("/orchestration/users?upstream_id=secondary")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["upstream_id"] == "secondary"
+    assert payload["items"][0]["upstream_id"] == "secondary"
+    assert payload["items"][0]["email"] == "secondary@example.com"
+    assert calls == [
+        {
+            "method": "GET",
+            "host": "secondary-sub2api.local",
+            "path": "/api/v1/admin/users",
+            "api_key": "secondary-key",
+            "timeout": 18,
+        }
+    ]
+
+    missing_response = client.get("/orchestration/users?upstream_id=missing")
+    assert missing_response.status_code == 422
+    assert "Unknown Sub2API upstream_id: missing" in missing_response.json()["detail"]
+    assert len(calls) == 1
+
+    monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
+    clear_caches()
+
+
+def test_provisioning_flow_uses_selected_upstream_for_start_and_complete(client, tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "multi-upstream.yaml"
+    config_path.write_text(
+        """
+database:
+  url: 127.0.0.1
+  port: 55432
+  username: sub2api_sidecar
+  name: sub2api_sidecar_test
+app:
+  base_url: http://testserver
+openai:
+  oauth_redirect_uri: http://localhost:1455/callback
+sub2api:
+  upstreams:
+    - id: main
+      name: Main Sub2API
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: secondary
+      name: Secondary Sub2API
+      base_url: http://secondary-sub2api.local
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
+    monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-key")
+    clear_caches()
+    login(client)
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        calls.append(
+            {
+                "method": method,
+                "host": urlparse(url).netloc,
+                "path": path,
+                "api_key": self.headers.get("x-api-key"),
+            }
+        )
+        if method == "GET" and path in {"/api/v1/admin/groups/all", "/api/v1/admin/accounts"}:
+            return FakeResponse(200, {"code": 0, "message": "success", "data": []})
+        if method == "POST" and path == "/api/v1/admin/groups":
+            return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": "secondary-group"}})
+        if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "auth_url": f"https://auth.example.com/authorize?state=secondary-{json['state']}",
+                        "session_id": f"session-{json['state']}",
+                    },
+                },
+            )
+        if method == "POST" and path == "/api/v1/admin/openai/exchange-code":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "access_token": "token-123",
+                        "refresh_token": "refresh-123",
+                        "provider_user_id": "provider-1",
+                    },
+                },
+            )
+        if method == "POST" and path == "/api/v1/admin/accounts":
+            return FakeResponse(
+                200,
+                {"code": 0, "message": "success", "data": {"id": "secondary-account", "name": json["name"]}},
+            )
+        if method == "POST" and path == "/api/v1/admin/groups/secondary-group/accounts":
+            return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        start_response = client.post(
+            "/provision/start",
+            json={"email": "secondary@example.com", "upstream_id": "secondary"},
+        )
+        state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={"callback_url": f"http://localhost:1455/callback?code=mock-code&state={state}"},
+        )
+
+    assert start_response.status_code == 200
+    assert start_response.json()["upstream_id"] == "secondary"
+    stored_flow = main.get_flow_store().get_by_flow_id(start_response.json()["flow_id"])
+    assert stored_flow is not None
+    assert stored_flow.upstream_id == "secondary"
+    assert complete_response.status_code == 200
+    assert complete_response.json()["upstream_id"] == "secondary"
+    assert complete_response.json()["oauth_account_id"] == "secondary-account"
+    assert calls
+    assert {call["host"] for call in calls} == {"secondary-sub2api.local"}
+    assert {call["api_key"] for call in calls} == {"secondary-key"}
+
+    monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
+    clear_caches()
 
 
 def test_sub2api_login_exchanges_admin_jwt_for_sidecar_session(client) -> None:
@@ -2481,7 +2823,7 @@ def test_provision_start_reuses_existing_email_named_group(client) -> None:
     assert backend.create_group_calls == 0
 
 
-def test_oauth_complete_reuses_existing_account_and_skips_duplicate_binding(client) -> None:
+def test_provision_start_configures_existing_oauth_account_without_authorization(client) -> None:
     backend = FakeRotationSub2API()
     backend.groups.append(
         {
@@ -2502,6 +2844,11 @@ def test_oauth_complete_reuses_existing_account_and_skips_duplicate_binding(clie
             "platform": "openai",
             "type": "oauth",
             "status": "active",
+            "credentials": {
+                "access_token": "keep-access",
+                "refresh_token": "keep-refresh",
+            },
+            "extra": {"privacy_mode": "standard"},
             "group_ids": [77],
         }
     )
@@ -2509,21 +2856,43 @@ def test_oauth_complete_reuses_existing_account_and_skips_duplicate_binding(clie
     login(client)
     with patch.object(requests.Session, "request", new=backend.request):
         start_response = client.post("/provision/start", json={"email": "repeat@example.com"})
-        state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
-        complete_response = client.post(
-            "/provision/oauth/complete",
-            json={
-                "callback_url": f"http://localhost:1455/callback?code=mock-code&state={state}"
-            },
-        )
 
-    assert complete_response.status_code == 200
-    assert complete_response.json()["oauth_account_id"] == "acct-repeat"
+    assert start_response.status_code == 200
+    payload = start_response.json()
+    assert payload["status"] == "completed"
+    assert payload["oauth_required"] is False
+    assert payload["oauth_url"] is None
+    assert payload["oauth_account_id"] == "acct-repeat"
+    assert payload["group_id"] == 77
+    assert backend.generate_auth_url_calls == 0
+    assert backend.exchange_code_calls == 0
     assert backend.create_account_calls == 0
+    assert len(backend.update_account_calls) == 1
+    update_payload = backend.update_account_calls[0]["json"]
+    assert update_payload["name"] == "repeat@example.com"
+    assert update_payload["provider"] == "openai"
+    assert update_payload["platform"] == "openai"
+    assert update_payload["type"] == "oauth"
+    assert update_payload["group_ids"] == [77]
+    assert update_payload["concurrency"] == 5
+    assert update_payload["credentials"]["access_token"] == "keep-access"
+    assert update_payload["credentials"]["refresh_token"] == "keep-refresh"
+    assert update_payload["credentials"]["temp_unschedulable_enabled"] is True
+    assert update_payload["credentials"]["temp_unschedulable_rules"] == (
+        EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+    )
+    assert update_payload["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
+    assert update_payload["extra"]["privacy_mode"] == "standard"
+    assert update_payload["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
     assert backend.bind_account_calls == []
+    stored_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
+    assert stored_flow is not None
+    assert stored_flow.status.value == "completed"
+    assert stored_flow.oauth_account_id == "acct-repeat"
+    assert stored_flow.oauth_url is None
 
 
-def test_oauth_complete_reuses_existing_account_and_binds_missing_email_group(client) -> None:
+def test_provision_start_configures_existing_oauth_account_and_binds_missing_group(client) -> None:
     backend = FakeRotationSub2API()
     backend.groups.append(
         {
@@ -2551,16 +2920,15 @@ def test_oauth_complete_reuses_existing_account_and_binds_missing_email_group(cl
     login(client)
     with patch.object(requests.Session, "request", new=backend.request):
         start_response = client.post("/provision/start", json={"email": "repeat@example.com"})
-        state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
-        complete_response = client.post(
-            "/provision/oauth/complete",
-            json={
-                "callback_url": f"http://localhost:1455/callback?code=mock-code&state={state}"
-            },
-        )
 
-    assert complete_response.status_code == 200
-    assert complete_response.json()["oauth_account_id"] == "acct-repeat"
+    assert start_response.status_code == 200
+    payload = start_response.json()
+    assert payload["status"] == "completed"
+    assert payload["oauth_required"] is False
+    assert payload["oauth_url"] is None
+    assert payload["oauth_account_id"] == "acct-repeat"
+    assert backend.generate_auth_url_calls == 0
+    assert len(backend.update_account_calls) == 1
     assert backend.create_account_calls == 0
     assert backend.bind_account_calls == [
         {

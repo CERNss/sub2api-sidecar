@@ -11,6 +11,7 @@ CONFIG_ENV_NAMES = (
     "CONFIG_PATH",
     "SUB2API_BASE_URL",
     "SUB2API_ADMIN_API_KEY",
+    "SUB2API_SECONDARY_ADMIN_API_KEY",
     "APP_BASE_URL",
     "APP_BASE_PATH",
     "OPENAI_OAUTH_REDIRECT_URI",
@@ -164,6 +165,83 @@ sub2api:
 
     assert settings.sub2api_base_url == "http://env-sub2api.local"
     assert settings.app_access_key_ttl_hours == 18
+
+
+def test_settings_loads_multiple_sub2api_upstreams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        _database_config_yaml()
+        + """
+app:
+  base_url: http://yaml-sidecar.local
+openai:
+  oauth_redirect_uri: http://localhost:1555/callback
+sub2api:
+  request_timeout_seconds: 12
+  upstreams:
+    - id: main
+      name: Main Sub2API
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: secondary
+      name: Secondary Sub2API
+      base_url: http://secondary-sub2api.local
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+      request_timeout_seconds: 18
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "main-key")
+    monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-key")
+
+    settings = Settings.from_env()
+
+    assert settings.default_sub2api_upstream_id == "main"
+    assert len(settings.sub2api_upstreams) == 2
+    assert settings.sub2api_base_url == "http://main-sub2api.local"
+    assert settings.sub2api_admin_api_key == "main-key"
+    assert settings.get_sub2api_upstream("secondary").base_url == "http://secondary-sub2api.local"
+    assert settings.get_sub2api_upstream("secondary").admin_api_key == "secondary-key"
+    assert settings.get_sub2api_upstream("secondary").request_timeout_seconds == 18
+
+
+def test_settings_rejects_duplicate_sub2api_upstream_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        _database_config_yaml()
+        + """
+app:
+  base_url: http://yaml-sidecar.local
+openai:
+  oauth_redirect_uri: http://localhost:1555/callback
+sub2api:
+  upstreams:
+    - id: dup
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: dup
+      base_url: http://secondary-sub2api.local
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "main-key")
+    monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-key")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "Duplicate Sub2API upstream id" in str(exc_info.value)
 
 
 def test_settings_rejects_direct_database_url_env(monkeypatch) -> None:

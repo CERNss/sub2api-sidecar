@@ -28,8 +28,22 @@ class AuthSessionResponse(BaseModel):
     expires_at: datetime
 
 
+class Sub2APIUpstreamResponse(BaseModel):
+    upstream_id: str
+    name: str
+    base_url: str
+    is_default: bool = False
+
+
+class Sub2APIUpstreamsEnvelope(BaseModel):
+    success: bool = True
+    items: list[Sub2APIUpstreamResponse]
+    default_upstream_id: str
+
+
 class ProvisionStartRequest(BaseModel):
     email: EmailStr
+    upstream_id: str | None = Field(default=None, min_length=1)
 
 
 class ProvisioningRuntimeSettingsResponse(BaseModel):
@@ -48,12 +62,16 @@ class ProvisioningRuntimeSettingsEnvelope(BaseModel):
 
 class ProvisionStartResponse(BaseModel):
     success: bool = True
+    upstream_id: str = "default"
     flow_id: str
     email: EmailStr
     user_id: Any | None = None
     group_id: Any
     account_name: str
-    oauth_url: str
+    status: str
+    oauth_required: bool
+    oauth_account_id: Any | None = None
+    oauth_url: str | None = None
     oauth_redirect_uri: str
 
 
@@ -63,6 +81,7 @@ class ProvisionCompleteRequest(BaseModel):
 
 class ProvisionCompleteResponse(BaseModel):
     success: bool = True
+    upstream_id: str = "default"
     flow_id: str
     email: EmailStr
     group_id: Any
@@ -72,6 +91,7 @@ class ProvisionCompleteResponse(BaseModel):
 
 class ProvisionFlowSummaryResponse(BaseModel):
     flow_id: str
+    upstream_id: str = "default"
     email: EmailStr
     user_id: Any | None = None
     group_id: Any
@@ -113,6 +133,7 @@ class ProvisionFlowsEnvelope(BaseModel):
 
 
 class OrchestrationUserResponse(BaseModel):
+    upstream_id: str = "default"
     user_id: Any
     email: str
     name: str | None = None
@@ -128,11 +149,13 @@ class OrchestrationUserResponse(BaseModel):
 
 class OrchestrationUsersEnvelope(BaseModel):
     success: bool = True
+    upstream_id: str = "default"
     items: list[OrchestrationUserResponse]
     total: int
 
 
 class OrchestrationGroupResponse(BaseModel):
+    upstream_id: str = "default"
     group_id: Any
     name: str
     group_kind: str | None = None
@@ -153,11 +176,13 @@ class OrchestrationGroupResponse(BaseModel):
 
 class OrchestrationGroupsEnvelope(BaseModel):
     success: bool = True
+    upstream_id: str = "default"
     items: list[OrchestrationGroupResponse]
     total: int
 
 
 class OrchestrationAccountResponse(BaseModel):
+    upstream_id: str = "default"
     account_id: Any
     name: str
     email: str | None = None
@@ -184,11 +209,13 @@ class OrchestrationAccountResponse(BaseModel):
 
 class OrchestrationAccountsEnvelope(BaseModel):
     success: bool = True
+    upstream_id: str = "default"
     items: list[OrchestrationAccountResponse]
     total: int
 
 
 class OrchestrationApiKeyResponse(BaseModel):
+    upstream_id: str = "default"
     key_id: Any
     name: str | None = None
     group_id: Any | None = None
@@ -201,6 +228,7 @@ class OrchestrationApiKeyResponse(BaseModel):
 
 class OrchestrationApiKeysEnvelope(BaseModel):
     success: bool = True
+    upstream_id: str = "default"
     items: list[OrchestrationApiKeyResponse]
     total: int
 
@@ -526,6 +554,7 @@ class GroupUsageSchedulerStatusResponse(BaseModel):
 
 
 class OrchestrationAssignRequest(BaseModel):
+    upstream_id: str | None = Field(default=None, min_length=1)
     user_id: Any
     email: str = Field(..., min_length=1)
     source_group_id: Any
@@ -534,6 +563,7 @@ class OrchestrationAssignRequest(BaseModel):
 
 
 class OrchestrationApiKeyAssignRequest(BaseModel):
+    upstream_id: str | None = Field(default=None, min_length=1)
     user_id: Any
     email: str = Field(..., min_length=1)
     key_id: Any
@@ -543,6 +573,7 @@ class OrchestrationApiKeyAssignRequest(BaseModel):
 
 
 class KeyTransferRequest(BaseModel):
+    upstream_id: str | None = Field(default=None, min_length=1)
     source_user_id: Any | None = None
     key_ids: list[Any] | None = None
     dry_run: bool = False

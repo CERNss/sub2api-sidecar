@@ -44,6 +44,7 @@ class ProvisionFlow(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     flow_id: str
+    upstream_id: str = "default"
     email: str
     user_id: Any | None = None
     group_id: Any

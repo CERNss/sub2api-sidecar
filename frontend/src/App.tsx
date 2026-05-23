@@ -88,9 +88,25 @@ type StatusState = {
 type SessionState = "checking" | "authenticated" | "anonymous";
 
 type ProvisionStartPayload = ApiPayload & {
+  upstream_id?: string;
   flow_id?: string;
-  oauth_url?: string;
+  status?: string;
+  oauth_required?: boolean;
+  oauth_account_id?: unknown | null;
+  oauth_url?: string | null;
   oauth_redirect_uri?: string;
+};
+
+type UpstreamInfo = {
+  upstream_id: string;
+  name: string;
+  base_url: string;
+  is_default: boolean;
+};
+
+type UpstreamsPayload = ApiPayload & {
+  items: UpstreamInfo[];
+  default_upstream_id: string;
 };
 
 type FlowStatusFilter = "" | "pending_oauth" | "completed" | "failed";
@@ -101,6 +117,7 @@ type CreditControlTab = "users" | "policies" | "runs" | "audit";
 
 type ProvisionFlowSummary = {
   flow_id: string;
+  upstream_id?: string;
   email: string;
   user_id: unknown;
   group_id: unknown;
@@ -211,6 +228,7 @@ type GroupCapacityFallback = {
 };
 
 type OrchestrationUser = {
+  upstream_id?: string;
   user_id: unknown;
   email: string;
   name: string | null;
@@ -230,6 +248,7 @@ type OrchestrationUsersPayload = ApiPayload & {
 };
 
 type OrchestrationGroup = {
+  upstream_id?: string;
   group_id: unknown;
   name: string;
   group_kind: string | null;
@@ -270,6 +289,7 @@ type OrchestrationGroupsPayload = ApiPayload & {
 };
 
 type OrchestrationAccount = {
+  upstream_id?: string;
   account_id: unknown;
   name: string;
   email: string | null;
@@ -2532,7 +2552,28 @@ function OperatorWorkspace() {
   const [activeCreditTab, setActiveCreditTab] = useState<CreditControlTab>(() =>
     creditControlTabFromPath(currentLogicalPathname())
   );
+  const [upstreams, setUpstreams] = useState<UpstreamInfo[]>([]);
+  const [selectedUpstreamId, setSelectedUpstreamId] = useState("default");
   const [logoutBusy, setLogoutBusy] = useState(false);
+
+  useEffect(() => {
+    async function loadUpstreams() {
+      try {
+        const payload = await requestJson<UpstreamsPayload>(
+          "/api/upstreams",
+          { method: "GET" },
+          "加载上游列表失败"
+        );
+        setUpstreams(payload.items);
+        setSelectedUpstreamId(payload.default_upstream_id || payload.items[0]?.upstream_id || "default");
+      } catch (error: unknown) {
+        if (!handleAuthExpired(error)) {
+          setUpstreams([]);
+        }
+      }
+    }
+    void loadUpstreams();
+  }, []);
 
   useEffect(() => {
     function syncViewFromPath() {
@@ -2667,9 +2708,17 @@ function OperatorWorkspace() {
           onAuthExpired={handleAuthExpired}
         />
       ) : activeView === "keyTransfer" ? (
-        <KeyTransferView onAuthExpired={handleAuthExpired} />
+        <KeyTransferView
+          upstreams={upstreams}
+          selectedUpstreamId={selectedUpstreamId}
+          onSelectedUpstreamIdChange={setSelectedUpstreamId}
+          onAuthExpired={handleAuthExpired}
+        />
       ) : activeView === "provision" ? (
         <ProvisionForm
+          upstreams={upstreams}
+          selectedUpstreamId={selectedUpstreamId}
+          onSelectedUpstreamIdChange={setSelectedUpstreamId}
           onAuthExpired={handleAuthExpired}
           onFlowChanged={() => undefined}
         />
@@ -2677,6 +2726,9 @@ function OperatorWorkspace() {
         <ExistingOrchestrationView
           activeTab={activeOrchestrationTab}
           onTabChange={navigateOrchestrationTab}
+          upstreams={upstreams}
+          selectedUpstreamId={selectedUpstreamId}
+          onSelectedUpstreamIdChange={setSelectedUpstreamId}
           onAuthExpired={handleAuthExpired}
         />
       )}
@@ -2685,8 +2737,14 @@ function OperatorWorkspace() {
 }
 
 function KeyTransferView({
+  upstreams,
+  selectedUpstreamId,
+  onSelectedUpstreamIdChange,
   onAuthExpired
 }: {
+  upstreams: UpstreamInfo[];
+  selectedUpstreamId: string;
+  onSelectedUpstreamIdChange: (upstreamId: string) => void;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [sourceSearch, setSourceSearch] = useState(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
@@ -2716,7 +2774,7 @@ function KeyTransferView({
     setLoadingUsers(true);
     try {
       const payload = await requestJson<OrchestrationUsersPayload>(
-        `/orchestration/users?${compactParams({ email: searchTerm })}`,
+        `/orchestration/users?${compactParams({ email: searchTerm, upstream_id: selectedUpstreamId })}`,
         { method: "GET" },
         "加载 admin 源用户失败"
       );
@@ -2760,7 +2818,7 @@ function KeyTransferView({
     setLoadingKeys(true);
     try {
       const payload = await requestJson<OrchestrationApiKeysPayload>(
-        `/orchestration/users/${encodeURIComponent(userId)}/api-keys`,
+        `/orchestration/users/${encodeURIComponent(userId)}/api-keys?${compactParams({ upstream_id: selectedUpstreamId })}`,
         { method: "GET" },
         "加载 admin API Keys 失败"
       );
@@ -2782,8 +2840,14 @@ function KeyTransferView({
   }
 
   useEffect(() => {
+    setSourceSearch(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
+    setUsers([]);
+    setSourceUserId("");
+    setApiKeys([]);
+    setSelectedKeyIds([]);
+    setTransferResult(null);
     void loadSourceUsers(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
-  }, []);
+  }, [selectedUpstreamId]);
 
   useEffect(() => {
     setSelectedKeyIds([]);
@@ -2832,6 +2896,7 @@ function KeyTransferView({
         {
           method: "POST",
           body: JSON.stringify({
+            upstream_id: selectedUpstreamId,
             source_user_id: selectedUser.user_id,
             key_ids: selectedKeyIds,
             dry_run: dryRun,
@@ -2869,6 +2934,23 @@ function KeyTransferView({
           <h2>密钥转移</h2>
         </div>
         <Space wrap>
+          {upstreams.length > 1 ? (
+            <Select
+              aria-label="选择上游"
+              value={selectedUpstreamId}
+              onChange={(value) => {
+                onSelectedUpstreamIdChange(value);
+                setStatus(emptyStatus);
+              }}
+              style={{ minWidth: 180 }}
+              options={upstreams.map((upstream) => ({
+                value: upstream.upstream_id,
+                label: upstream.name
+              }))}
+            />
+          ) : upstreams[0] ? (
+            <Tag color="blue">{upstreams[0].name}</Tag>
+          ) : null}
           <Tag color={selectedUser ? "green" : "default"}>{selectedUser ? "admin 已定位" : "等待 admin"}</Tag>
           <Tag color={transferKeys.length > 0 ? "blue" : "default"}>{transferKeys.length} 个可转移 Key</Tag>
           <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>已选 {selectedKeyIds.length}</Tag>
@@ -3087,10 +3169,16 @@ function KeyTransferView({
 function ExistingOrchestrationView({
   activeTab,
   onTabChange,
+  upstreams,
+  selectedUpstreamId,
+  onSelectedUpstreamIdChange,
   onAuthExpired
 }: {
   activeTab: OrchestrationTab;
   onTabChange: (tab: OrchestrationTab) => void;
+  upstreams: UpstreamInfo[];
+  selectedUpstreamId: string;
+  onSelectedUpstreamIdChange: (upstreamId: string) => void;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [mode, setMode] = useState<OrchestrationMode>("replace_group");
@@ -3655,6 +3743,7 @@ function ExistingOrchestrationView({
     setLoading(true);
     const searchTerm = (searchOverride !== undefined ? searchOverride : userSearch).trim();
     const params = new URLSearchParams();
+    params.set("upstream_id", selectedUpstreamId);
     if (searchTerm) {
       params.set("email", searchTerm);
     }
@@ -3667,7 +3756,7 @@ function ExistingOrchestrationView({
           "加载用户失败"
         ),
         requestJson<OrchestrationGroupsPayload>(
-          "/orchestration/groups",
+          `/orchestration/groups?${compactParams({ upstream_id: selectedUpstreamId })}`,
           { method: "GET" },
           "加载分组失败"
         )
@@ -3677,7 +3766,7 @@ function ExistingOrchestrationView({
       setGroups(groupsPayload.items);
       try {
         const accountsPayload = await requestJson<OrchestrationAccountsPayload>(
-          "/orchestration/accounts",
+          `/orchestration/accounts?${compactParams({ upstream_id: selectedUpstreamId })}`,
           { method: "GET" },
           "加载上游账号失败"
         );
@@ -3721,7 +3810,7 @@ function ExistingOrchestrationView({
     setLoadingKeys(true);
     try {
       const payload = await requestJson<OrchestrationApiKeysPayload>(
-        `/orchestration/users/${encodeURIComponent(userId)}/api-keys`,
+        `/orchestration/users/${encodeURIComponent(userId)}/api-keys?${compactParams({ upstream_id: selectedUpstreamId })}`,
         { method: "GET" },
         "加载 API Keys 失败"
       );
@@ -3749,7 +3838,7 @@ function ExistingOrchestrationView({
         }
         try {
           const payload = await requestJson<OrchestrationApiKeysPayload>(
-            `/orchestration/users/${encodeURIComponent(userId)}/api-keys`,
+            `/orchestration/users/${encodeURIComponent(userId)}/api-keys?${compactParams({ upstream_id: selectedUpstreamId })}`,
             { method: "GET" },
             "加载 API Keys 失败"
           );
@@ -3767,7 +3856,7 @@ function ExistingOrchestrationView({
 
   useEffect(() => {
     void loadResources("");
-  }, []);
+  }, [selectedUpstreamId]);
 
   useEffect(() => {
     if (!selectedUser) {
@@ -3887,6 +3976,7 @@ function ExistingOrchestrationView({
           {
             method: "POST",
             body: JSON.stringify({
+              upstream_id: selectedUpstreamId,
               user_id: selectedUser.user_id,
               email: selectedUser.email,
               source_group_id: sourceGroupValue,
@@ -3912,6 +4002,7 @@ function ExistingOrchestrationView({
               {
                 method: "POST",
                 body: JSON.stringify({
+                  upstream_id: selectedUpstreamId,
                   user_id: selectedUser.user_id,
                   email: selectedUser.email,
                   key_id: key.key_id,
@@ -4023,6 +4114,27 @@ function ExistingOrchestrationView({
             <Typography.Text strong>关系编排</Typography.Text>
           </Space>
           <Space wrap>
+            {upstreams.length > 1 ? (
+              <Select
+                aria-label="选择上游"
+                value={selectedUpstreamId}
+                onChange={(value) => {
+                  onSelectedUpstreamIdChange(value);
+                  setSelectedUserId("");
+                  setSelectedKeyIds([]);
+                  setApiKeys([]);
+                  setApiKeysByUserId({});
+                  updateGraphGroupFilters([]);
+                }}
+                style={{ minWidth: 180 }}
+                options={upstreams.map((upstream) => ({
+                  value: upstream.upstream_id,
+                  label: upstream.name
+                }))}
+              />
+            ) : upstreams[0] ? (
+              <Tag color="blue">{upstreams[0].name}</Tag>
+            ) : null}
             <AntSegmented
               value={activeTab}
               onChange={(value) => onTabChange(value as OrchestrationTab)}
@@ -6031,9 +6143,15 @@ function summarizeReasons(items?: RotationExecutionPayload[]): RunReasonSummary[
 }
 
 function ProvisionForm({
+  upstreams,
+  selectedUpstreamId,
+  onSelectedUpstreamIdChange,
   onAuthExpired,
   onFlowChanged
 }: {
+  upstreams: UpstreamInfo[];
+  selectedUpstreamId: string;
+  onSelectedUpstreamIdChange: (upstreamId: string) => void;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onFlowChanged: () => void;
 }) {
@@ -6044,11 +6162,17 @@ function ProvisionForm({
   const [busyAction, setBusyAction] = useState<"start" | "complete" | null>(null);
 
   const oauthUrl = typeof startPayload?.oauth_url === "string" ? startPayload.oauth_url : "";
+  const oauthRequired = startPayload
+    ? startPayload.oauth_required !== false && startPayload.status !== "completed"
+    : true;
+  const callbackDisabled = Boolean(startPayload && !oauthRequired);
   const redirectUri =
     typeof startPayload?.oauth_redirect_uri === "string"
       ? startPayload.oauth_redirect_uri
       : FIXED_OAUTH_REDIRECT_URI;
-  const callbackPlaceholder = `${redirectUri}${redirectUri.includes("?") ? "&" : "?"}code=...&state=...`;
+  const callbackPlaceholder = callbackDisabled
+    ? "已有账号已配置完成"
+    : `${redirectUri}${redirectUri.includes("?") ? "&" : "?"}code=...&state=...`;
 
   async function startProvision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -6059,15 +6183,20 @@ function ProvisionForm({
     }
 
     setBusyAction("start");
-    setStatus({ message: "正在创建分组并生成 OAuth 链接", tone: "info" });
+    setStatus({ message: "正在检查账号并准备 OAuth 预配", tone: "info" });
 
     try {
       const payload = await requestJson<ProvisionStartPayload>("/provision/start", {
         method: "POST",
-        body: JSON.stringify({ email: email.trim() })
+        body: JSON.stringify({ email: email.trim(), upstream_id: selectedUpstreamId })
       }, "请求失败");
       setStartPayload(payload);
-      setStatus({ message: "创建成功。完成 OAuth 后粘贴 localhost 回调 URL。", tone: "success" });
+      if (payload.oauth_required === false || payload.status === "completed") {
+        setCallbackUrl("");
+        setStatus({ message: "已有账号已配置完成。", tone: "success" });
+      } else {
+        setStatus({ message: "创建成功。完成 OAuth 后粘贴 localhost 回调 URL。", tone: "success" });
+      }
       onFlowChanged();
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
@@ -6081,6 +6210,10 @@ function ProvisionForm({
 
   async function completeProvision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    if (callbackDisabled) {
+      return;
+    }
 
     if (!callbackUrl.trim()) {
       setStatus({ message: "请先粘贴 localhost 回调地址。", tone: "error" });
@@ -6110,6 +6243,24 @@ function ProvisionForm({
     <div className="workspace provision-workspace">
       <section className="panel form-panel provision-form-panel">
         <form className="form-stack" onSubmit={startProvision}>
+          {upstreams.length > 1 ? (
+            <label className="field">
+              <span>上游</span>
+              <Select
+                value={selectedUpstreamId}
+                onChange={onSelectedUpstreamIdChange}
+                options={upstreams.map((upstream) => ({
+                  value: upstream.upstream_id,
+                  label: upstream.name
+                }))}
+              />
+            </label>
+          ) : upstreams[0] ? (
+            <div className="summary-strip">
+              <span>上游</span>
+              <strong>{upstreams[0].name}</strong>
+            </div>
+          ) : null}
           <label className="field">
             <span>Email</span>
             <input
@@ -6130,11 +6281,11 @@ function ProvisionForm({
               开始创建
             </button>
             <a
-              className={`button tertiary ${oauthUrl ? "" : "disabled"}`}
-              href={oauthUrl || undefined}
+              className={`button tertiary ${oauthUrl && oauthRequired ? "" : "disabled"}`}
+              href={oauthUrl && oauthRequired ? oauthUrl : undefined}
               target="_blank"
               rel="noopener noreferrer"
-              aria-disabled={!oauthUrl}
+              aria-disabled={!oauthUrl || !oauthRequired}
             >
               <ExternalLink size={18} aria-hidden="true" />
               完成 OAuth 授权
@@ -6148,11 +6299,16 @@ function ProvisionForm({
             <textarea
               value={callbackUrl}
               placeholder={callbackPlaceholder}
+              disabled={callbackDisabled}
               onChange={(event) => setCallbackUrl(event.target.value)}
             />
           </label>
           <div className="action-row">
-            <button className="button primary" type="submit" disabled={busyAction === "complete"}>
+            <button
+              className="button primary"
+              type="submit"
+              disabled={busyAction === "complete" || callbackDisabled}
+            >
               {busyAction === "complete" ? (
                 <LoaderCircle className="spin" size={18} aria-hidden="true" />
               ) : (

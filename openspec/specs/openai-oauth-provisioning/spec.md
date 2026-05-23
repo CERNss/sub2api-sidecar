@@ -94,7 +94,7 @@ The system SHALL protect the operator browser experience with ephemeral admin au
 - **THEN** the page provides a way to log out without restarting the service
 
 ### Requirement: Protect provisioning access with ephemeral admin auth
-The system SHALL provide a lightweight admin authentication flow for the local service and SHALL require authenticated access for provisioning APIs.
+The system SHALL provide a lightweight admin authentication flow for the local service, SHALL require authenticated access for provisioning APIs, and SHALL support creating the same sidecar admin session from a verified Sub2API admin browser login when opened as a standalone external service.
 
 #### Scenario: Service startup generates and logs the operator password
 - **GIVEN** the service starts without an explicit auth password override
@@ -121,6 +121,29 @@ The system SHALL provide a lightweight admin authentication flow for the local s
 - **WHEN** the caller invokes `POST /provision/start` or `POST /provision/oauth/complete`
 - **THEN** the system returns an authentication error
 - **THEN** the provisioning flow does not start or continue
+
+#### Scenario: Sub2API admin JWT creates a sidecar session
+- **GIVEN** the sidecar receives `POST /auth/sub2api-login` with a non-empty Sub2API browser JWT
+- **WHEN** the sidecar validates the token by calling Sub2API `/api/v1/auth/me`
+- **THEN** the validation request uses `Authorization: Bearer <token>`
+- **THEN** the validation request does not use the configured Sub2API admin API key
+- **THEN** the returned Sub2API profile has `role=admin`
+- **THEN** the sidecar creates a normal sidecar admin session
+- **THEN** the response sets the existing sidecar access-key cookie
+- **THEN** subsequent protected sidecar APIs authorize through the sidecar session, not through the Sub2API JWT
+
+#### Scenario: Non-admin Sub2API JWT is rejected
+- **GIVEN** the sidecar receives `POST /auth/sub2api-login` with a Sub2API JWT for a non-admin user
+- **WHEN** the sidecar validates the token through Sub2API `/api/v1/auth/me`
+- **THEN** the sidecar returns an authorization error
+- **THEN** it does not create a sidecar session
+- **THEN** it does not set the sidecar session cookie
+
+#### Scenario: Invalid Sub2API JWT is rejected
+- **GIVEN** the sidecar receives `POST /auth/sub2api-login` with an invalid, expired, or empty token
+- **WHEN** token validation fails
+- **THEN** the sidecar returns an authentication error
+- **THEN** it does not create a sidecar session
 
 ### Requirement: Use centralized admin API integration and PostgreSQL flow storage
 The system SHALL centralize Sub2API admin API calls behind a client abstraction, SHALL authenticate those requests with `x-api-key`, and SHALL persist flow context in PostgreSQL.

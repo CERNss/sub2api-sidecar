@@ -4,14 +4,19 @@
 Define the authenticated operator dashboard for inspecting provisioning flows and orchestrating existing Sub2API users, API keys, and groups. The dashboard uses effective admin migration endpoints for existing resources, persists and redacts provisioning timeline data, and renders the React workspace used by operators.
 ## Requirements
 ### Requirement: Existing user/group orchestration API
-The system SHALL expose authenticated APIs for discovering existing Sub2API users, groups, API keys, and moving API key routing between groups.
+The system SHALL expose authenticated APIs for discovering existing Sub2API users, groups, API keys, upstream accounts from the Sub2API admin accounts surface, transferring encoded admin API keys, and moving API key routing between groups.
 
-#### Scenario: Operator discovers existing users, groups, and keys
+#### Scenario: Operator discovers existing users, groups, keys, and upstream accounts
 - **GIVEN** the operator has a valid admin session
-- **WHEN** the operator requests existing user, group, or user API key discovery APIs
+- **WHEN** the operator requests existing user, group, account, or user API key discovery APIs
 - **THEN** the system queries Sub2API admin APIs using the configured admin API key
 - **THEN** users include current group context when upstream or local assignment data provides it
 - **THEN** groups identify whether they are supported for bulk replace-group orchestration
+- **THEN** upstream accounts are discovered from the Sub2API admin accounts API that backs `/admin/accounts`, not from the admin users API
+- **THEN** accounts include their upstream account identity and group binding ids when upstream metadata provides them
+- **THEN** accounts include normalized availability status, availability reason, schedulability, rate-limit, quota, last-error, and freshness fields when upstream metadata provides them
+- **THEN** accounts include concurrency and current concurrency fields when upstream metadata provides them
+- **THEN** accounts include 5-hour and 7-day usage percentages from the Sub2API admin accounts metadata when available
 
 #### Scenario: Operator migrates an existing user from one group to another
 - **GIVEN** the operator has selected an existing user, an old group, and a target group
@@ -33,6 +38,24 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 - **WHEN** the operator attempts bulk replace-group orchestration to that group
 - **THEN** the system rejects the request with a client error
 - **THEN** the operator may still use a supported single-key group update path where appropriate
+
+#### Scenario: Operator transfers admin key ownership by encoded email
+- **GIVEN** the operator has a valid admin session
+- **AND** an admin user's API key name matches the `service:object:version:email` pattern
+- **WHEN** the operator previews or executes the key transfer
+- **THEN** the system resolves `<email>` to exactly one existing Sub2API user by normalized email
+- **THEN** the system does not create users and does not fuzzy-match email values
+- **THEN** the system selects the first available group from the matched user's current or allowed groups
+- **THEN** execution calls the Sub2API admin API to update the API key's `user_id`, `group_id`, and `quota`
+- **THEN** execution preserves the API key string value
+- **THEN** execution sets the API key quota limit to unlimited
+- **THEN** the response reports moved, skipped, and failed keys with reasons
+
+#### Scenario: Key transfer skips unsafe keys
+- **GIVEN** the operator previews or executes the admin key transfer
+- **WHEN** a key name does not contain exactly one valid target email, the target user is missing, or the target user has no available group
+- **THEN** the system skips that key without making an upstream update call
+- **THEN** the response includes a reason for the skipped key
 
 ### Requirement: Authenticated flow inspection API
 The system SHALL expose authenticated read-only APIs for listing provisioning flows and retrieving a single flow with its orchestration timeline.
@@ -114,7 +137,7 @@ The system SHALL redact secrets and provider tokens from orchestration dashboard
 - **THEN** the response payload and rendered UI do not expose the Sub2API admin API key, default user password, or browser session access key
 
 ### Requirement: React dashboard renders orchestration state
-The React UI SHALL provide an authenticated orchestration workspace for moving existing users or keys between groups, browsing provisioning flows, and configuring webhook alert routing for operational signals.
+The React UI SHALL provide an authenticated orchestration workspace for moving existing users or keys between groups, browsing provisioning flows, managing balances, transferring encoded admin API keys, and configuring webhook alert routing for operational signals.
 
 #### Scenario: Authenticated operator opens the dashboard
 - **GIVEN** the operator has a valid admin session
@@ -122,10 +145,23 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **THEN** the default view is existing user/group orchestration
 - **THEN** the UI provides access to the existing OAuth account provisioning form and a flow dashboard view
 - **THEN** the UI provides a top-level notification settings view beside orchestration and OAuth provisioning
-- **THEN** the orchestration view displays a draggable relationship graph ordered left-to-right as all API keys, all users, and all groups
+- **THEN** the UI provides `余额管理` as a top-level authenticated operator tab
+- **THEN** the orchestration view displays a draggable relationship graph ordered left-to-right as all API keys, all users, all groups, and upstream accounts
+- **THEN** group nodes display current group capacity by summing bound account concurrency and current concurrency values in addition to their user, key, and account relationship counts
+- **THEN** capacity displays use green styling below 80% usage, yellow styling at or above 80%, and red styling at or above 100%
+- **THEN** groups are connected to upstream account nodes when account group binding data is available
+- **THEN** upstream account nodes display whether the account is unavailable and show current account capacity with compact 5-hour and 7-day usage percentages
 - **THEN** selecting a user or key in the graph updates the operator selection controls
 - **THEN** the dashboard displays flow summary rows with status, external OAuth account email, group id, account id, and update time
 - **THEN** the dashboard does not present OAuth provisioning flows as Sub2API user creation records
+
+#### Scenario: External Sub2API launch exchanges token before rendering
+- **GIVEN** the sidecar is opened as a standalone page with a `token` query parameter
+- **WHEN** the React app starts
+- **THEN** it calls `POST /auth/sub2api-login`
+- **THEN** it removes the `token` query parameter from the URL after success or failure
+- **THEN** on success it continues to the normal operator workspace using the sidecar session cookie
+- **THEN** on failure it navigates to the normal sidecar login page
 
 #### Scenario: Operator executes existing user/group orchestration
 - **GIVEN** the operator is using the existing user/group orchestration view
@@ -153,6 +189,13 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **GIVEN** the operator is using the dashboard view
 - **WHEN** the operator inspects historical or active flows
 - **THEN** the dashboard does not mutate flow records, retry failed flows, or complete OAuth unless the operator uses the existing paste-back completion form
+
+#### Scenario: Operator previews and runs admin key transfer
+- **GIVEN** the operator is using the key transfer tab
+- **WHEN** the operator previews admin key transfer
+- **THEN** the UI shows moved, skipped, and failed counts and per-key reasons returned by the authenticated API
+- **WHEN** the operator executes admin key transfer
+- **THEN** the UI submits to the authenticated execution API and refreshes orchestration data after completion
 
 ### Requirement: Persist webhook alert configuration server-side
 The system SHALL expose authenticated APIs that read and write the webhook alert center configuration document to durable local storage. The configuration document contains only `webhooks` and `rules`; any unsupported top-level, rule, or webhook field is rejected on write and is not part of the persisted runtime contract.
@@ -319,29 +362,66 @@ The React UI SHALL let operators configure which operational signals are evaluat
 - **THEN** the UI still renders the placeholder webhook so the rule editor has a deliverable target
 
 ### Requirement: Periodic rule evaluation
-The system SHALL periodically evaluate enabled notification rules at the configured `readIntervalMinutes` cadence. Each tick reads the latest sample from the collector and evaluates the trigger condition against the most recent value; there is no separate evaluation window.
+The system SHALL periodically evaluate enabled notification rules at the configured `readIntervalMinutes` cadence. The system SHALL use a neutral operational data pipeline that first collects upstream data on the persisted operational-data runtime interval, then persists normalized local snapshots and metric samples, then evaluates rules from local samples. Rule evaluation SHALL read the latest local metric sample for each rule instead of calling upstream Sub2API collectors per rule.
 
-#### Scenario: Scheduler evaluates each enabled rule on its configured cadence
+#### Scenario: Operational data runtime settings control collection
+- **GIVEN** the service starts
+- **WHEN** operational data runtime settings are loaded
+- **THEN** the system reads operational data enabled state, collection interval, optional expiration, retention window, and storage-size guard from PostgreSQL runtime settings
+- **THEN** deployment config cannot set operational data runtime switches
+- **THEN** an unset operational data expiration means persisted local data does not expire for consumer reads
+
+#### Scenario: Scheduler samples upstream data before evaluating local rules
+- **GIVEN** the service is running with operational data enabled
+- **WHEN** a scheduler tick begins
+- **THEN** the collection stage fetches Sub2API accounts from `Sub2APIClient.list_openai_accounts()`
+- **THEN** the collection stage fetches Sub2API groups from `Sub2APIClient.list_groups(platform="openai")`
+- **THEN** the collection stage fetches Sub2API users from `Sub2APIClient.list_users()`
+- **THEN** the collection stage fetches per-user API keys and user usage where needed by consumers
+- **THEN** the collection stage fetches current-day and previous-day usage from `Sub2APIClient.list_usage_logs(...)`
+- **THEN** the collection stage fetches dashboard group usage stats where needed by group usage balancing
+- **THEN** the persistence stage stores raw source snapshots in PostgreSQL operational data snapshot tables
+- **THEN** the persistence stage stores derived metric samples in PostgreSQL operational metric sample tables
+- **THEN** the persistence stage stores per-source collection status in PostgreSQL source-status tables
+- **THEN** the evaluation stage evaluates due enabled rules using PostgreSQL notification config, local metric samples, and notification rule state
+- **THEN** the system persists the updated rule state regardless of decision
+
+#### Scenario: Rule cadence reads local samples
 - **GIVEN** the service is running with notifications configured
 - **AND** a rule is enabled with `readIntervalMinutes=5`
 - **WHEN** five minutes elapse since the rule's last evaluation
-- **THEN** the system runs the collector for that rule's `signalKey`
-- **THEN** the system runs the evaluator with the collector's latest sample, the rule, and the prior rule state
-- **THEN** the system persists the updated rule state regardless of decision
+- **THEN** the system reads the latest stored sample for that rule's `signalKey`
+- **THEN** the system runs the evaluator with the stored sample, the rule, and the prior rule state
+- **THEN** the system does not perform a per-rule upstream Sub2API fetch
 
 #### Scenario: Disabled rules are skipped
 - **GIVEN** a rule is disabled
 - **WHEN** the scheduler tick runs
-- **THEN** the system does not call the collector for that rule
+- **THEN** the system does not evaluate that rule
 - **THEN** the system does not dispatch any delivery for that rule
 
-#### Scenario: Collector with no data does not trigger an alert
-- **GIVEN** a collector returns no sample for a rule
+#### Scenario: Missing or expired local data does not trigger an alert
+- **GIVEN** no local sample exists for a rule or the latest sample is expired by the configured operational data expiration
 - **WHEN** the scheduler evaluates the rule
 - **THEN** the rule decision is `no_data`
 - **THEN** the system records a `no_data` reason on the rule state
 - **THEN** the system does not dispatch any delivery
 - **THEN** the system does not update `breach_started_at` or `last_alert_at`
+
+#### Scenario: Scheduler status exposes sampling freshness
+- **GIVEN** an authenticated operator
+- **WHEN** the operator requests `GET /api/operational-data/status`
+- **THEN** the response includes whether the scheduler is enabled and running
+- **THEN** the response includes the configured collection interval, expiration, cleanup guards, and current operational-data storage footprint
+- **THEN** the response includes the last sampling start and finish timestamps
+- **THEN** the response includes the last sampling error, sampled signal count, and per-source status details
+
+#### Scenario: Pipeline stage data sources are explicit
+- **GIVEN** a maintainer reads the operational data pipeline specification or status output
+- **WHEN** they inspect how data moves through the pipeline
+- **THEN** the collection stage identifies Sub2API accounts, groups, users, user API keys, user usage, global usage logs, and group usage stats as upstream data sources
+- **THEN** the persistence stage identifies local PostgreSQL snapshot, metric sample, and source-status tables as storage destinations
+- **THEN** the evaluation stage identifies local PostgreSQL notification config, metric sample, and rule-state tables as its only data sources
 
 ### Requirement: Sustained breach, recovery, and cooldown semantics
 The system SHALL enforce sustained-for and cooldown rules so alerts do not fire on transient blips and do not spam. Recovery is detected by the inverse of the trigger comparison applied to the latest sample; there is no separate recovery threshold.
@@ -386,13 +466,14 @@ The system SHALL enforce sustained-for and cooldown rules so alerts do not fire 
 - **THEN** the system does not dispatch any delivery
 
 ### Requirement: On-demand rule evaluation
-The system SHALL expose an authenticated API for evaluating a single rule once and reporting the decision and outbound deliveries.
+The system SHALL expose an authenticated API for evaluating a single rule once and reporting the decision and outbound deliveries. On-demand evaluation SHALL refresh the local operational data first, then evaluate the requested rule from the same local metric sample store used by scheduled evaluation.
 
 #### Scenario: Operator runs an on-demand evaluation
 - **GIVEN** an authenticated operator
 - **AND** an enabled rule whose targeted receivers include at least one enabled receiver with a non-empty URL
 - **WHEN** the operator calls `POST /notifications/evaluate` with that rule id
-- **THEN** the system runs the collector for the rule's `signalKey`
+- **THEN** the system refreshes the local operational data from Sub2API
+- **THEN** the system reads the latest stored sample for the requested rule's `signalKey`
 - **THEN** the system runs the evaluator with the saved prior state
 - **THEN** the system updates the saved rule state
 - **THEN** the system dispatches deliveries when the decision is `fire` or `recover`

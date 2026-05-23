@@ -43,6 +43,7 @@ class Sub2APIClient:
     GENERATE_OPENAI_AUTH_URL_PATH = "/api/v1/admin/openai/generate-auth-url"
     EXCHANGE_OPENAI_CODE_PATH = "/api/v1/admin/openai/exchange-code"
     CREATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts"
+    UPDATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts/{account_id}"
     BIND_ACCOUNT_TO_GROUP_PATH = "/api/v1/admin/groups/{group_id}/accounts"
 
     def __init__(
@@ -482,6 +483,23 @@ class Sub2APIClient:
         )
         return {"id": account_id, "name": name, "raw": data}
 
+    def configure_existing_openai_oauth_account(
+        self,
+        *,
+        account: dict[str, Any],
+        name: str,
+        group_id: Any,
+    ) -> dict[str, Any]:
+        account_id = account["id"]
+        payload = self._build_existing_openai_oauth_account_payload(
+            account=account,
+            name=name,
+            group_id=group_id,
+        )
+        path = self.UPDATE_OPENAI_ACCOUNT_PATH.format(account_id=account_id)
+        data = self._request("PUT", path, json=payload)
+        return {"id": account_id, "name": name, "raw": data}
+
     def bind_account_to_group(self, account_id: Any, group_id: Any) -> dict[str, Any]:
         payload = {"account_id": account_id, "account_ids": [account_id]}
         path = self.BIND_ACCOUNT_TO_GROUP_PATH.format(group_id=group_id)
@@ -552,6 +570,7 @@ class Sub2APIClient:
         payload: dict[str, Any] = {
             "name": name,
             "notes": "",
+            "provider": self.provisioning_defaults.account_provider,
             "platform": self.provisioning_defaults.account_platform,
             "type": self.provisioning_defaults.account_type,
             "credentials": credentials,
@@ -573,6 +592,77 @@ class Sub2APIClient:
                 self.provisioning_defaults.account_ws_mode != "off"
             )
         return payload
+
+    def _build_existing_openai_oauth_account_payload(
+        self,
+        *,
+        account: dict[str, Any],
+        name: str,
+        group_id: Any,
+    ) -> dict[str, Any]:
+        raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
+        credentials = self._merged_dict_from_account(account, raw, "credentials")
+        extra = self._merged_dict_from_account(account, raw, "extra")
+        credentials.update(
+            {
+                "temp_unschedulable_enabled": (
+                    self.provisioning_defaults.account_temporary_unschedulable
+                ),
+                "temp_unschedulable_rules": [
+                    self._serialize_rule(rule)
+                    for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
+                ],
+                "model_mapping": {
+                    model_name: model_name
+                    for model_name in self.provisioning_defaults.account_model_whitelist
+                },
+            }
+        )
+        if self.provisioning_defaults.account_ws_mode:
+            extra["openai_oauth_responses_websockets_v2_mode"] = (
+                self.provisioning_defaults.account_ws_mode
+            )
+            extra["openai_oauth_responses_websockets_v2_enabled"] = (
+                self.provisioning_defaults.account_ws_mode != "off"
+            )
+
+        payload: dict[str, Any] = {
+            "name": name,
+            "provider": self.provisioning_defaults.account_provider,
+            "platform": self.provisioning_defaults.account_platform,
+            "type": self.provisioning_defaults.account_type,
+            "credentials": credentials,
+            "extra": extra,
+            "concurrency": self.provisioning_defaults.account_concurrency,
+            "group_ids": [group_id],
+        }
+        for field_name in (
+            "notes",
+            "proxy_id",
+            "load_factor",
+            "priority",
+            "rate_multiplier",
+            "expires_at",
+            "auto_pause_on_expired",
+        ):
+            if isinstance(raw, dict) and field_name in raw:
+                payload[field_name] = raw[field_name]
+        return payload
+
+    def _merged_dict_from_account(
+        self,
+        account: dict[str, Any],
+        raw: Any,
+        field_name: str,
+    ) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        raw_value = raw.get(field_name) if isinstance(raw, dict) else None
+        if isinstance(raw_value, dict):
+            values.update(raw_value)
+        account_value = account.get(field_name)
+        if isinstance(account_value, dict):
+            values.update(account_value)
+        return values
 
     def _build_openai_oauth_credentials(self, oauth_payload: dict[str, Any]) -> dict[str, Any]:
         credentials: dict[str, Any] = {}

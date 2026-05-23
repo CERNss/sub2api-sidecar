@@ -32,12 +32,24 @@ class ProvisioningService:
         flow_store: PostgresFlowStore,
         sub2api_client: Sub2APIClient,
         openai_oauth_redirect_uri: str,
+        default_upstream_id: str = "default",
     ) -> None:
         self.flow_store = flow_store
         self.sub2api_client = sub2api_client
         self.openai_oauth_redirect_uri = openai_oauth_redirect_uri
+        self.default_upstream_id = default_upstream_id
 
     def start_flow(self, email: str) -> ProvisionStartResponse:
+        return self.start_flow_for_upstream(email=email, upstream_id=self.default_upstream_id)
+
+    def start_flow_for_upstream(
+        self,
+        *,
+        email: str,
+        upstream_id: str,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> ProvisionStartResponse:
+        client = sub2api_client or self.sub2api_client
         logger.info("Starting provisioning flow for email=%s", email)
         flow_id = str(uuid.uuid4())
         requested_state = secrets.token_urlsafe(24)
@@ -49,7 +61,10 @@ class ProvisioningService:
             details={"email": email},
         )
         try:
-            group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(email)
+            group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(
+                email,
+                sub2api_client=client,
+            )
             self._record_event(
                 flow_id=flow_id,
                 event_type=ProvisionEventType.group_resolved,
@@ -61,7 +76,77 @@ class ProvisioningService:
                     "reason": assignment_reason,
                 },
             )
-            oauth = self.sub2api_client.generate_openai_auth_url(
+            existing_account = self._find_oauth_account(email, sub2api_client=client)
+            if existing_account is not None:
+                account, account_action = self._configure_existing_oauth_account(
+                    existing_account=existing_account,
+                    email=email,
+                    group_id=group_id,
+                    sub2api_client=client,
+                )
+                flow = ProvisionFlow(
+                    flow_id=flow_id,
+                    upstream_id=upstream_id,
+                    email=email,
+                    group_id=group_id,
+                    state=requested_state,
+                    status=FlowStatus.completed,
+                    assignment_mode=assignment_mode,
+                    assignment_reason=assignment_reason,
+                    account_name=email,
+                    oauth_url=None,
+                    oauth_session_id=None,
+                    oauth_account_id=account["id"],
+                )
+                self.flow_store.save(flow)
+                self._record_event(
+                    flow_id=flow_id,
+                    event_type=ProvisionEventType.account_created,
+                    status=ProvisionEventStatus.succeeded,
+                    message="Existing OpenAI OAuth account configured",
+                    details={
+                        "account_id": account["id"],
+                        "group_id": group_id,
+                        "action": account_action,
+                    },
+                )
+                self._record_event(
+                    flow_id=flow_id,
+                    event_type=ProvisionEventType.account_bound,
+                    status=ProvisionEventStatus.succeeded,
+                    message="OpenAI OAuth account group assignment resolved",
+                    details={
+                        "account_id": account["id"],
+                        "group_id": group_id,
+                        "action": account_action,
+                    },
+                )
+                self._record_event(
+                    flow_id=flow_id,
+                    event_type=ProvisionEventType.completed,
+                    status=ProvisionEventStatus.succeeded,
+                    message="Provisioning flow completed without OAuth handoff",
+                    details={"oauth_account_id": account["id"], "group_id": group_id},
+                )
+                logger.info(
+                    "Provisioning flow completed with existing account | flow_id=%s | account_id=%s",
+                    flow_id,
+                    account["id"],
+                )
+                return ProvisionStartResponse(
+                    upstream_id=flow.upstream_id,
+                    flow_id=flow.flow_id,
+                    email=flow.email,
+                    group_id=flow.group_id,
+                    account_name=flow.account_name,
+                    status=flow.status.value,
+                    oauth_required=False,
+                    oauth_account_id=flow.oauth_account_id,
+                    oauth_url=None,
+                    oauth_redirect_uri=self.openai_oauth_redirect_uri,
+                )
+
+            oauth = client.generate_openai_auth_url(
                 email=email,
                 state=requested_state,
             )
@@ -88,6 +173,7 @@ class ProvisioningService:
 
         flow = ProvisionFlow(
             flow_id=flow_id,
+            upstream_id=upstream_id,
             email=email,
             group_id=group_id,
             state=state,
@@ -113,10 +199,14 @@ class ProvisioningService:
         )
 
         return ProvisionStartResponse(
+            upstream_id=flow.upstream_id,
             flow_id=flow.flow_id,
             email=flow.email,
             group_id=flow.group_id,
             account_name=flow.account_name,
+            status=flow.status.value,
+            oauth_required=True,
+            oauth_account_id=None,
             oauth_url=flow.oauth_url or "",
             oauth_redirect_uri=self._oauth_redirect_uri_from_url(flow.oauth_url),
         )
@@ -125,6 +215,7 @@ class ProvisioningService:
         code, state = self.parse_oauth_callback_url(callback_url)
         flow = self.complete_oauth(code=code, state=state)
         return ProvisionCompleteResponse(
+            upstream_id=flow.upstream_id,
             flow_id=flow.flow_id,
             email=flow.email,
             group_id=flow.group_id,
@@ -133,6 +224,15 @@ class ProvisioningService:
         )
 
     def complete_oauth(self, code: str, state: str) -> ProvisionFlow:
+        return self.complete_oauth_with_client(code=code, state=state)
+
+    def complete_oauth_with_client(
+        self,
+        *,
+        code: str,
+        state: str,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> ProvisionFlow:
         if not state:
             raise InvalidOAuthStateError("Missing OAuth state")
 
@@ -141,6 +241,7 @@ class ProvisioningService:
             raise FlowNotFoundError("No provisioning flow found for the provided state")
 
         logger.info("Completing OAuth flow | flow_id=%s | email=%s", flow.flow_id, flow.email)
+        client = sub2api_client or self.sub2api_client
         try:
             self._record_event(
                 flow_id=flow.flow_id,
@@ -149,7 +250,7 @@ class ProvisioningService:
                 message="OAuth callback parsed",
                 details={"state": state},
             )
-            exchange = self.sub2api_client.exchange_openai_code(
+            exchange = client.exchange_openai_code(
                 code=code,
                 state=state,
                 session_id=flow.oauth_session_id,
@@ -168,6 +269,7 @@ class ProvisioningService:
                 email=flow.email,
                 oauth_payload=exchange["exchange"],
                 group_id=flow.group_id,
+                sub2api_client=client,
             )
             if account_action == "created":
                 account_message = "OpenAI OAuth account created"
@@ -278,21 +380,33 @@ class ProvisioningService:
     def _build_group_name(self, email: str) -> str:
         return email[:128]
 
-    def _resolve_group_assignment(self, email: str) -> tuple[object, AssignmentMode, str]:
+    def _resolve_group_assignment(
+        self,
+        email: str,
+        *,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> tuple[object, AssignmentMode, str]:
+        client = sub2api_client or self.sub2api_client
         group_name = self._build_group_name(email)
-        existing_group = self._find_group_by_name(group_name)
+        existing_group = self._find_group_by_name(group_name, sub2api_client=client)
         if existing_group is not None:
             return (
                 existing_group["id"],
                 AssignmentMode.dedicated,
                 "existing dedicated provisioning group",
             )
-        group = self.sub2api_client.create_group(group_name)
+        group = client.create_group(group_name)
         return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
 
-    def _find_group_by_name(self, group_name: str) -> dict[str, object] | None:
-        groups = self.sub2api_client.list_groups(
-            platform=self.sub2api_client.provisioning_defaults.group_platform
+    def _find_group_by_name(
+        self,
+        group_name: str,
+        *,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> dict[str, object] | None:
+        client = sub2api_client or self.sub2api_client
+        groups = client.list_groups(
+            platform=client.provisioning_defaults.group_platform
         )
         for group in groups:
             if str(group.get("name") or "").strip().lower() == group_name.strip().lower():
@@ -305,10 +419,12 @@ class ProvisioningService:
         email: str,
         oauth_payload: dict[str, object],
         group_id: object,
+        sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
-        existing = self._find_oauth_account(email)
+        client = sub2api_client or self.sub2api_client
+        existing = self._find_oauth_account(email, sub2api_client=client)
         if existing is None:
-            account = self.sub2api_client.create_openai_account_from_oauth(
+            account = client.create_openai_account_from_oauth(
                 name=email,
                 oauth_payload=oauth_payload,
                 group_id=group_id,
@@ -317,14 +433,40 @@ class ProvisioningService:
 
         account_id = existing["id"]
         if not self._account_has_group(existing, group_id):
-            self.sub2api_client.bind_account_to_group(account_id, group_id)
+            client.bind_account_to_group(account_id, group_id)
             return self._existing_account_payload(existing, email), "bound_existing"
 
         return self._existing_account_payload(existing, email), "already_bound"
 
-    def _find_oauth_account(self, email: str) -> dict[str, object] | None:
+    def _configure_existing_oauth_account(
+        self,
+        *,
+        existing_account: dict[str, object],
+        email: str,
+        group_id: object,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> tuple[dict[str, object], str]:
+        client = sub2api_client or self.sub2api_client
+        account = client.configure_existing_openai_oauth_account(
+            account=existing_account,
+            name=email,
+            group_id=group_id,
+        )
+        account_id = existing_account["id"]
+        if not self._account_has_group(existing_account, group_id):
+            client.bind_account_to_group(account_id, group_id)
+            return account, "configured_and_bound"
+        return account, "configured_existing"
+
+    def _find_oauth_account(
+        self,
+        email: str,
+        *,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> dict[str, object] | None:
+        client = sub2api_client or self.sub2api_client
         needle = email.strip().lower()
-        for account in self.sub2api_client.list_openai_accounts():
+        for account in client.list_openai_accounts():
             candidates = [
                 account.get("name"),
                 account.get("email"),

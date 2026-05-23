@@ -85,16 +85,18 @@
 ### OAuth 预配流程
 
 1. 用户输入 email，调用 `POST /provision/start`
-2. 服务按 email 解析专属分组，并返回 OAuth 登录链接
+2. 服务按 email 解析专属分组，并检查上游是否已有同名或同邮箱 OAuth 账号
    - 如果同名分组已存在则复用；否则创建新分组
    - 分组创建默认携带 `platform=openai`
-3. 用户手动点击 OAuth 登录链接
-4. OAuth 提供方把浏览器跳到上游固定回调地址，通常是某个 localhost 地址
-5. 用户把浏览器地址栏中的完整 callback URL 复制回来
-6. 前端或调用方将该 URL 提交给 `POST /provision/oauth/complete`
-7. 服务解析 `code/state`，继续完成 OAuth 账号创建或复用，以及账号绑组
+3. 如果已有同名或同邮箱 OAuth 账号，服务会保留现有 OAuth token，按默认账号配置更新该账号并补齐分组绑定，然后直接返回 `status=completed`、`oauth_required=false`、`oauth_url=null`
+4. 如果没有匹配账号，服务返回 OAuth 登录链接
+5. 用户手动点击 OAuth 登录链接
+6. OAuth 提供方把浏览器跳到上游固定回调地址，通常是某个 localhost 地址
+7. 用户把浏览器地址栏中的完整 callback URL 复制回来
+8. 前端或调用方将该 URL 提交给 `POST /provision/oauth/complete`
+9. 服务解析 `code/state`，继续完成 OAuth 账号创建，以及账号绑组
    - 账号名称强制使用入口 email
-   - 如果已存在同名或同邮箱 OAuth 账号，则复用该账号
+   - 如果回调期间发现同名或同邮箱 OAuth 账号已经存在，则复用该账号
    - 账号默认按 `openai + oauth` 创建
    - 账号默认打开“临时不可调度”并附带 529/429/503 三条规则
    - `wsmode` 默认设置为 `context_pool`
@@ -222,6 +224,8 @@ cp .env.example .env
 
 ```env
 SUB2API_ADMIN_API_KEY=replace-me
+# 配了多个 sub2api.upstreams 时，每个 admin_api_key_env 都要在这里提供。
+# SUB2API_BACKUP_ADMIN_API_KEY=replace-me-too
 POSTGRES_PASSWORD=change-me-postgres-password
 APP_AUTH_PASSWORD=change-me
 ```
@@ -238,11 +242,11 @@ database:
 
 说明：
 
-- `SUB2API_ADMIN_API_KEY` 是调用 Sub2API admin API 的密钥。
+- `SUB2API_ADMIN_API_KEY` 是调用默认 Sub2API admin API 的密钥。配置多个上游时，每个 `sub2api.upstreams[*].admin_api_key_env` 对应一个 `.env` 密钥。
 - `POSTGRES_PASSWORD` 是 PostgreSQL 密码。数据库 url、port、username、name 写在 `config.yaml` 的 `database` 段；其中 `database.url` 是主机名或 IP，不是整条 DSN。应用会自己拼接连接串，部署时不要提供 `DATABASE_URL`、`POSTGRES_DB` 或 `POSTGRES_USER`。
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
-- URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、`sub2api.base_url` 和 `database.url`；不要写进 `.env`。
+- URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、单上游的 `sub2api.base_url` 或多上游的 `sub2api.upstreams[*].base_url`、以及 `database.url`；不要写进 `.env`。
 - 当前运行时只支持 PostgreSQL，不再支持 SQLite，也不做 SQLite 数据迁移。
 - `app.base_path` 默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
 - 预配页面不再提供 assignment mode 切换；`POST /provision/start` 始终按入口 email 解析或创建专属分组，并把 flow 记录为 `dedicated`。
@@ -252,6 +256,33 @@ database:
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只解析或创建专属 group，并完成 OAuth 账号挂接。
 
 环境变量可以覆盖 `config.yaml` 中的同名配置项；已移除的运行时环境变量不再兼容，出现时会直接启动失败。新部署建议优先改 `config.yaml`。
+
+### 多上游 Sub2API
+
+默认仍兼容单上游写法：
+
+```yaml
+sub2api:
+  base_url: http://sub2api-main:8080
+```
+
+如果一个 sidecar 要管理多个上游账号，把 `sub2api.base_url` 改成 `sub2api.upstreams`：
+
+```yaml
+sub2api:
+  request_timeout_seconds: 30
+  upstreams:
+    - id: main
+      name: Main Sub2API
+      base_url: http://sub2api-main:8080
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: backup
+      name: Backup Sub2API
+      base_url: http://sub2api-backup:8080
+      admin_api_key_env: SUB2API_BACKUP_ADMIN_API_KEY
+```
+
+第一个 upstream 是默认上游；旧 API 不传 `upstream_id` 时会继续使用它。登录后的用户分组编排、密钥转移和 OAuth 预配页面会显示上游选择器；也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集、余额管理、用量分层、自动轮换等后台服务当前仍只跑默认上游，后续需要做数据分区和调度 fan-out 后再扩展到多上游。
 
 ### Nginx Proxy Manager 子路径部署
 
@@ -303,7 +334,7 @@ https://sub2api.example.com/sidecar/
   - `429` -> 暂停 `10` 分钟，关键词 `rate limit, too many requests`
   - `503` -> 暂停 `30` 分钟，关键词 `unavailable, maintenance`
 - 创建 OAuth 账号时会把专属分组 ID 带入 payload
-- 如果已存在同名或同邮箱 OAuth 账号，服务会复用该账号；已有目标分组绑定时跳过重复绑组，缺少绑定时才补绑
+- 如果已存在同名或同邮箱 OAuth 账号，`POST /provision/start` 会跳过授权登录，保留已有 OAuth token，只更新账号默认配置并确保绑定到专属分组
 
 ## 安装依赖
 
@@ -369,7 +400,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-然后按需修改 `config.yaml` 和 `.env`，至少要在 `config.yaml` 设置 `app.base_url`、`openai.oauth_redirect_uri`、`sub2api.base_url` 和 `database` 段，在 `.env` 设置 `SUB2API_ADMIN_API_KEY`、`POSTGRES_PASSWORD` 和 `APP_AUTH_PASSWORD`。新部署直接使用 PostgreSQL 空库启动，不需要也不会执行 SQLite 数据迁移。
+然后按需修改 `config.yaml` 和 `.env`，至少要在 `config.yaml` 设置 `app.base_url`、`openai.oauth_redirect_uri`、`database` 段，以及单上游的 `sub2api.base_url` 或多上游的 `sub2api.upstreams`；在 `.env` 设置对应的 Sub2API admin key、`POSTGRES_PASSWORD` 和 `APP_AUTH_PASSWORD`。新部署直接使用 PostgreSQL 空库启动，不需要也不会执行 SQLite 数据迁移。
 
 拉取镜像并启动：
 
@@ -409,7 +440,7 @@ docker compose logs -f
 - `docker-compose.yaml` 会读取项目根目录下的 `.env`，并把 `config.yaml` 挂载到容器内
 - `docker-compose.yaml` 会启动服务名和容器名均为 `sidecar-postgres` 的 `postgres:17-alpine`，默认创建 `sub2api_sidecar` 用户和同名数据库，用 `POSTGRES_PASSWORD` 设置密码，并用 `postgres-data` volume 持久化 PostgreSQL 数据
 - `docker-compose.yaml` 使用外部 `npm-network`，启动前请确保该网络已存在
-- 如果你的 `sub2api.base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
+- 如果你的 `sub2api.base_url` 或 `sub2api.upstreams[*].base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
 
 ## 镜像构建
 
@@ -491,10 +522,15 @@ curl -X POST 'http://127.0.0.1:8000/provision/start' \
   "user_id": "...",
   "group_id": "...",
   "account_name": "user@example.com",
+  "status": "pending_oauth",
+  "oauth_required": true,
+  "oauth_account_id": null,
   "oauth_url": "https://...",
   "oauth_redirect_uri": "http://localhost:3000/callback"
 }
 ```
+
+如果上游已有同名或同邮箱 OAuth 账号，返回会是 `status=completed`、`oauth_required=false`、`oauth_account_id=<已有账号 ID>`，且 `oauth_url` 为 `null`，调用方无需再打开授权链接或提交 callback。
 
 其中 `oauth_redirect_uri` 只用于本地页面展示和人工核对；Sub2API 的 OAuth URL 生成与 code exchange 请求不再接收这个字段。
 

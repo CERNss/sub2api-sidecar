@@ -49,12 +49,12 @@ The system SHALL support separate operator-managed Landing and Rotation pools so
 - **THEN** the system rejects the request because upstream `replace-group` supports only dedicated standard groups
 - **THEN** the system does not persist that group into the local rotation pool
 
-#### Scenario: Automatic rotation configuration is validated at startup
+#### Scenario: Automatic rotation deployment configuration is minimal
 - **GIVEN** the service starts
 - **WHEN** settings are loaded
-- **THEN** the system validates configured usage bands, cooldown windows, and interval settings
-- **THEN** the V1 usage window must be one of `5h`, `1d`, `7d`, or `30d`
-- **THEN** invalid automatic rotation configuration prevents startup instead of failing later during rotation execution
+- **THEN** deployment config does not contain automatic rotation runtime settings
+- **THEN** automatic rotation enablement, cooldown, usage window, and tunables are governed by the authenticated runtime API/UI and local PostgreSQL state
+- **THEN** invalid automatic rotation runtime values are rejected when the operator saves them instead of being read from deployment config
 
 ### Requirement: Persist current assignment state and rotation audit
 The system SHALL persist each managed user's current group assignment and SHALL persist the outcome of every manual or automatic rotation attempt in durable local storage.
@@ -147,11 +147,30 @@ The system SHALL evaluate eligible users against current Rotation pool usage loa
 - **THEN** the system synchronizes existing upstream users whose current direct group can be inferred unambiguously
 - **THEN** the system treats only users currently assigned to a selected rotation-pool group as automatic rotation candidates
 - **THEN** users without an unambiguous current direct group are skipped instead of guessed from multi-group access data
-- **THEN** the system computes current usage totals per selected Rotation pool group for the configured usage window
+- **THEN** the system computes current usage totals per selected Rotation pool group for the configured usage window using persisted group usage records when all selected groups have records
+- **THEN** the system falls back to summing candidate user usage when group usage records are missing
 - **THEN** the system chooses the lowest-usage target group when a move is needed to reduce usage imbalance
 - **THEN** the system skips users when moving them would not reduce usage imbalance
 - **THEN** the system executes the same group-replacement workflow used by manual rotation for users whose desired group differs from their current group
 - **THEN** the response includes moved, skipped, and failed results for the rotation cycle
+
+#### Scenario: Planner uses persisted group usage records
+- **GIVEN** selected rotation pool groups have persisted group usage records
+- **AND** one selected group has higher configured-window usage than another
+- **WHEN** automatic rotation runs
+- **THEN** the planner uses persisted group usage loads as the source of truth
+- **THEN** the planner selects a move only if simulating the candidate user move reduces the group load spread by at least the configured improvement delta
+
+#### Scenario: Planner records group balancing metadata
+- **GIVEN** automatic rotation plans or executes a group-balancing move
+- **WHEN** the run record is saved
+- **THEN** the result metadata includes group load source, load summaries before the move, source load, target load, and decision type
+
+#### Scenario: Planner falls back when group usage is missing
+- **GIVEN** selected rotation pool groups do not all have persisted group usage records
+- **WHEN** automatic rotation runs
+- **THEN** the planner falls back to summing candidate user usage for missing groups
+- **THEN** dry-run, cooldown, rollback, and pool eligibility behavior remain unchanged
 
 #### Scenario: Operator previews dynamic allocation without mutating upstream
 - **GIVEN** automatic rotation is enabled and the dedicated rotation pool contains at least one target group

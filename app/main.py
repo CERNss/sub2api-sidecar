@@ -107,6 +107,7 @@ from app.models.schemas import (
     OrchestrationUserResponse,
     OrchestrationUsersEnvelope,
     ProvisionCompleteRequest,
+    ProvisionCompleteResponse,
     ProvisionFlowDetailResponse,
     ProvisionFlowsEnvelope,
     ProvisioningRuntimeSettingsEnvelope,
@@ -119,6 +120,8 @@ from app.models.schemas import (
     RotationPoolCandidatesEnvelope,
     RotationPoolGroupRequest,
     Sub2APILoginRequest,
+    Sub2APIUpstreamResponse,
+    Sub2APIUpstreamsEnvelope,
     UsageSegmentationRefreshEnvelope,
     UsageSegmentationSchedulerStatusResponse,
     UserUsageSegmentResponse,
@@ -246,23 +249,37 @@ def get_auth_manager() -> EphemeralAdminAuthManager:
     )
 
 
-@lru_cache(maxsize=1)
-def get_sub2api_client() -> Sub2APIClient:
+@lru_cache(maxsize=None)
+def get_sub2api_client(upstream_id: str | None = None) -> Sub2APIClient:
     settings = get_settings()
+    upstream = settings.get_sub2api_upstream(upstream_id)
     return Sub2APIClient(
-        base_url=settings.sub2api_base_url,
-        admin_api_key=settings.sub2api_admin_api_key,
-        provisioning_defaults=settings.sub2api_provisioning_defaults,
-        timeout_seconds=settings.request_timeout_seconds,
+        base_url=upstream.base_url,
+        admin_api_key=upstream.admin_api_key,
+        provisioning_defaults=upstream.provisioning_defaults,
+        timeout_seconds=upstream.request_timeout_seconds,
     )
+
+
+def normalize_upstream_id(upstream_id: str | None = None) -> str:
+    try:
+        return get_settings().get_sub2api_upstream(upstream_id).upstream_id
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @lru_cache(maxsize=1)
 def get_rotation_service() -> RotationService:
+    return get_rotation_service_for_upstream()
+
+
+@lru_cache(maxsize=None)
+def get_rotation_service_for_upstream(upstream_id: str | None = None) -> RotationService:
     settings = get_settings()
+    selected_upstream_id = settings.get_sub2api_upstream(upstream_id).upstream_id
     return RotationService(
         store=get_flow_store(),
-        sub2api_client=get_sub2api_client(),
+        sub2api_client=get_sub2api_client(selected_upstream_id),
         settings=settings,
     )
 
@@ -274,6 +291,7 @@ def get_provisioning_service() -> ProvisioningService:
         flow_store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
         openai_oauth_redirect_uri=settings.openai_oauth_redirect_uri,
+        default_upstream_id=settings.default_sub2api_upstream_id,
     )
 
 
@@ -698,6 +716,24 @@ def sub2api_login(payload: Sub2APILoginRequest) -> JSONResponse:
     )
     set_auth_cookie(response, session.access_key)
     return response
+
+
+@app.get("/api/upstreams")
+def sub2api_upstreams(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
+    settings = get_settings()
+    payload = Sub2APIUpstreamsEnvelope(
+        items=[
+            Sub2APIUpstreamResponse(
+                upstream_id=upstream.upstream_id,
+                name=upstream.name,
+                base_url=upstream.base_url,
+                is_default=upstream.upstream_id == settings.default_sub2api_upstream_id,
+            )
+            for upstream in settings.sub2api_upstreams
+        ],
+        default_upstream_id=settings.default_sub2api_upstream_id,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
 @app.get("/auth/session")
@@ -1279,9 +1315,11 @@ def optional_float(value: Any) -> float | None:
 @app.get("/orchestration/users")
 def orchestration_users(
     email: str | None = None,
+    upstream_id: str | None = None,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    upstream_users = get_sub2api_client().list_users(email=email)
+    selected_upstream_id = normalize_upstream_id(upstream_id)
+    upstream_users = get_sub2api_client(selected_upstream_id).list_users(email=email)
     local_assignments = {
         str(assignment.user_id): assignment
         for assignment in get_flow_store().list_user_assignments()
@@ -1293,6 +1331,7 @@ def orchestration_users(
         display_name = user.get("display_name")
         items.append(
             OrchestrationUserResponse(
+                upstream_id=selected_upstream_id,
                 user_id=user["id"],
                 email=str(user.get("email") or ""),
                 name=user.get("name"),
@@ -1306,7 +1345,11 @@ def orchestration_users(
                 has_local_assignment=local_assignment is not None,
             )
         )
-    payload = OrchestrationUsersEnvelope(items=items, total=len(items))
+    payload = OrchestrationUsersEnvelope(
+        upstream_id=selected_upstream_id,
+        items=items,
+        total=len(items),
+    )
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
@@ -1711,21 +1754,38 @@ def credit_control_audit(
 
 
 @app.get("/orchestration/groups")
-def orchestration_groups(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
-    groups = get_sub2api_client().list_groups(
-        platform=get_settings().sub2api_provisioning_defaults.group_platform
+def orchestration_groups(
+    upstream_id: str | None = None,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    selected_upstream_id = normalize_upstream_id(upstream_id)
+    client = get_sub2api_client(selected_upstream_id)
+    groups = client.list_groups(
+        platform=client.provisioning_defaults.group_platform
     )
-    items = [group_response(group) for group in groups]
-    payload = OrchestrationGroupsEnvelope(items=items, total=len(items))
+    items = [
+        group_response(group).model_copy(update={"upstream_id": selected_upstream_id})
+        for group in groups
+    ]
+    payload = OrchestrationGroupsEnvelope(
+        upstream_id=selected_upstream_id,
+        items=items,
+        total=len(items),
+    )
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
 @app.get("/orchestration/accounts")
-def orchestration_accounts(_: AuthSession = Depends(require_api_auth)) -> JSONResponse:
-    client = get_sub2api_client()
+def orchestration_accounts(
+    upstream_id: str | None = None,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    selected_upstream_id = normalize_upstream_id(upstream_id)
+    client = get_sub2api_client(selected_upstream_id)
     accounts = client.list_openai_accounts()
     items = [
         OrchestrationAccountResponse(
+            upstream_id=selected_upstream_id,
             account_id=account["id"],
             name=str(account.get("name") or ""),
             email=account.get("email"),
@@ -1751,20 +1811,27 @@ def orchestration_accounts(_: AuthSession = Depends(require_api_auth)) -> JSONRe
         )
         for account in accounts
     ]
-    payload = OrchestrationAccountsEnvelope(items=items, total=len(items))
+    payload = OrchestrationAccountsEnvelope(
+        upstream_id=selected_upstream_id,
+        items=items,
+        total=len(items),
+    )
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
 @app.get("/orchestration/users/{user_id}/api-keys")
 def orchestration_user_api_keys(
     user_id: str,
+    upstream_id: str | None = None,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    response = get_sub2api_client().get_user_api_keys(user_id)
+    selected_upstream_id = normalize_upstream_id(upstream_id)
+    response = get_sub2api_client(selected_upstream_id).get_user_api_keys(user_id)
     items = []
     for item in response["items"]:
         items.append(
             OrchestrationApiKeyResponse(
+                upstream_id=selected_upstream_id,
                 key_id=item.get("id") or item.get("key_id"),
                 name=item.get("name"),
                 group_id=item.get("group_id") or item.get("current_group_id"),
@@ -1775,7 +1842,11 @@ def orchestration_user_api_keys(
                 usage_7d=item.get("usage_7d"),
             )
         )
-    payload = OrchestrationApiKeysEnvelope(items=items, total=response["total"])
+    payload = OrchestrationApiKeysEnvelope(
+        upstream_id=selected_upstream_id,
+        items=items,
+        total=response["total"],
+    )
     return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
@@ -1784,7 +1855,8 @@ def orchestration_replace_group(
     payload: OrchestrationAssignRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    service = get_rotation_service()
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    service = get_rotation_service_for_upstream(selected_upstream_id)
     result = service.orchestrate_existing_assignment(
         user_id=payload.user_id,
         email=payload.email,
@@ -1802,7 +1874,8 @@ def orchestration_update_api_key_group(
     payload: OrchestrationApiKeyAssignRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    service = get_rotation_service()
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    service = get_rotation_service_for_upstream(selected_upstream_id)
     result = service.orchestrate_existing_api_key(
         user_id=payload.user_id,
         email=payload.email,
@@ -1821,7 +1894,8 @@ def orchestration_transfer_admin_api_keys(
     payload: KeyTransferRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    run = get_rotation_service().transfer_admin_api_keys(
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    run = get_rotation_service_for_upstream(selected_upstream_id).transfer_admin_api_keys(
         source_user_id=payload.source_user_id,
         key_ids=payload.key_ids,
         dry_run=payload.dry_run,
@@ -1836,7 +1910,8 @@ def orchestration_migrate_rotom_keys_compat(
     payload: KeyTransferRequest,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    run = get_rotation_service().transfer_admin_api_keys(
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    run = get_rotation_service_for_upstream(selected_upstream_id).transfer_admin_api_keys(
         source_user_id=payload.source_user_id,
         key_ids=payload.key_ids,
         dry_run=payload.dry_run,
@@ -1923,7 +1998,12 @@ def provision_start(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     service = get_provisioning_service()
-    result = service.start_flow(str(payload.email))
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    result = service.start_flow_for_upstream(
+        email=str(payload.email),
+        upstream_id=selected_upstream_id,
+        sub2api_client=get_sub2api_client(selected_upstream_id),
+    )
     return JSONResponse(status_code=200, content=result.model_dump())
 
 
@@ -1933,7 +2013,24 @@ def provision_oauth_complete(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     service = get_provisioning_service()
-    result = service.complete_oauth_from_callback_url(payload.callback_url)
+    code, state = service.parse_oauth_callback_url(payload.callback_url)
+    flow = get_flow_store().get_by_state(state)
+    if flow is None:
+        raise FlowNotFoundError("No provisioning flow found for the provided state")
+    selected_upstream_id = normalize_upstream_id(flow.upstream_id)
+    completed = service.complete_oauth_with_client(
+        code=code,
+        state=state,
+        sub2api_client=get_sub2api_client(selected_upstream_id),
+    )
+    result = ProvisionCompleteResponse(
+        upstream_id=completed.upstream_id,
+        flow_id=completed.flow_id,
+        email=completed.email,
+        group_id=completed.group_id,
+        oauth_account_id=completed.oauth_account_id,
+        status=completed.status.value,
+    )
     return JSONResponse(status_code=200, content=result.model_dump())
 
 
