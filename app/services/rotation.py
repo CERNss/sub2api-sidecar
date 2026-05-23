@@ -34,6 +34,7 @@ from app.services.operational_data import (
 from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
+_DEFAULT_SOURCE_GROUP = object()
 
 
 @dataclass
@@ -321,23 +322,25 @@ class RotationService:
         *,
         user_id: Any,
         email: str,
-        source_group_id: Any,
+        source_group_id: Any | None,
         target_group_id: Any,
         reason: str | None = None,
     ) -> RotationExecutionResult:
-        if source_group_id in (None, ""):
-            raise RotationTargetValidationError("Source group is required")
         if target_group_id in (None, ""):
             raise RotationTargetValidationError("Target group is required")
 
         direct_group_id, direct_group_name = self._get_direct_user_group(user_id)
-        if direct_group_id in (None, ""):
+        effective_source_group_id = source_group_id
+        if direct_group_id not in (None, ""):
+            if source_group_id in (None, ""):
+                effective_source_group_id = direct_group_id
+            elif self._normalize_key(source_group_id) != self._normalize_key(direct_group_id):
+                raise RotationTargetValidationError(
+                    "Source group must match the selected user's direct current group"
+                )
+        elif source_group_id not in (None, ""):
             raise RotationTargetValidationError(
                 "Selected user does not have a direct current group; source group cannot be inferred"
-            )
-        if self._normalize_key(source_group_id) != self._normalize_key(direct_group_id):
-            raise RotationTargetValidationError(
-                "Source group must match the selected user's direct current group"
             )
 
         target_group = self._get_upstream_group(target_group_id)
@@ -356,7 +359,7 @@ class RotationService:
         assignment = UserGroupAssignment(
             user_id=user_id,
             email=email,
-            current_group_id=source_group_id,
+            current_group_id=effective_source_group_id,
             current_group_name=direct_group_name or (existing.current_group_name if existing else None),
             assignment_mode=AssignmentMode.managed_pool,
             last_rotation_at=existing.last_rotation_at if existing else None,
@@ -367,7 +370,7 @@ class RotationService:
         )
 
         request_reason = reason or "existing user/group orchestration"
-        if self._normalize_key(source_group_id) == self._normalize_key(target_group_id):
+        if self._normalize_key(effective_source_group_id) == self._normalize_key(target_group_id):
             assignment.current_group_id = target_group_id
             assignment.current_group_name = target_group["name"]
             assignment.last_decision_reason = "Target group matches the current assignment"
@@ -375,7 +378,7 @@ class RotationService:
             self.store.upsert_user_assignment(assignment)
             return self._record_result(
                 assignment=assignment,
-                source_group_id=source_group_id,
+                source_group_id=effective_source_group_id,
                 target_group_id=target_group_id,
                 trigger_type=RotationTrigger.manual,
                 status=RotationResultStatus.skipped,
@@ -383,20 +386,28 @@ class RotationService:
             )
 
         try:
-            response = self.sub2api_client.replace_exclusive_user_group(
-                user_id=user_id,
-                old_group_id=source_group_id,
-                new_group_id=target_group_id,
-            )
+            if effective_source_group_id in (None, ""):
+                self.sub2api_client.set_user_group(
+                    user_id=user_id,
+                    group_id=target_group_id,
+                )
+                migrated_keys = 0
+            else:
+                response = self.sub2api_client.replace_exclusive_user_group(
+                    user_id=user_id,
+                    old_group_id=effective_source_group_id,
+                    new_group_id=target_group_id,
+                )
+                migrated_keys = int(response.get("migrated_keys") or 0)
         except Sub2APIError as exc:
             logger.exception("Existing assignment orchestration failed for user_id=%s", user_id)
             return self._record_result(
                 assignment=assignment,
-                source_group_id=source_group_id,
+                source_group_id=effective_source_group_id,
                 target_group_id=target_group_id,
                 trigger_type=RotationTrigger.manual,
                 status=RotationResultStatus.failed,
-                reason=f"Upstream replace-group failed: {exc}",
+                reason=f"Upstream group assignment failed: {exc}",
             )
 
         assignment.current_group_id = target_group_id
@@ -407,12 +418,12 @@ class RotationService:
         self.store.upsert_user_assignment(assignment)
         return self._record_result(
             assignment=assignment,
-            source_group_id=source_group_id,
+            source_group_id=effective_source_group_id,
             target_group_id=target_group_id,
             trigger_type=RotationTrigger.manual,
             status=RotationResultStatus.moved,
             reason=request_reason,
-            migrated_keys=int(response.get("migrated_keys") or 0),
+            migrated_keys=migrated_keys,
         )
 
     def _get_direct_user_group(self, user_id: Any) -> tuple[Any | None, str | None]:
@@ -1227,17 +1238,22 @@ class RotationService:
         trigger_type: RotationTrigger,
         status: RotationResultStatus,
         reason: str,
-        source_group_id: Any | None = None,
+        source_group_id: Any | None | object = _DEFAULT_SOURCE_GROUP,
         migrated_keys: int = 0,
         usage_window: AutoRotationUsageWindow | None = None,
         usage_value: float | None = None,
         usage_snapshot: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RotationExecutionResult:
+        recorded_source_group_id = (
+            assignment.current_group_id
+            if source_group_id is _DEFAULT_SOURCE_GROUP
+            else source_group_id
+        )
         result = RotationExecutionResult(
             user_id=assignment.user_id,
             email=assignment.email,
-            source_group_id=source_group_id if source_group_id is not None else assignment.current_group_id,
+            source_group_id=recorded_source_group_id,
             target_group_id=target_group_id,
             trigger_type=trigger_type,
             status=status,

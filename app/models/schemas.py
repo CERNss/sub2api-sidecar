@@ -559,7 +559,7 @@ class OrchestrationAssignRequest(BaseModel):
     upstream_id: str | None = Field(default=None, min_length=1)
     user_id: Any
     email: str = Field(..., min_length=1)
-    source_group_id: Any
+    source_group_id: Any | None = None
     target_group_id: Any
     reason: str | None = None
 

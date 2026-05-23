@@ -1599,7 +1599,10 @@ function AccountUsageRow({
   );
 }
 
-function resolveKnownId(value: string, knownValues: unknown[]): unknown {
+function resolveKnownId(value: string | null | undefined, knownValues: unknown[]): unknown {
+  if (!value) {
+    return null;
+  }
   const known = knownValues.find((item) => idValue(item) === value);
   return known ?? value;
 }
@@ -4009,10 +4012,6 @@ function ExistingOrchestrationView({
     }
     if (!targetGroupId) {
       setStatus({ message: "请选择目标分组。", tone: "error" });
-      return;
-    }
-    if (mode === "replace_group" && !sourceGroupId) {
-      setStatus({ message: "请选择源分组。", tone: "error" });
       return;
     }
     if (mode === "api_key" && selectedKeys.length === 0) {

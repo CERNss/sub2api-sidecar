@@ -33,6 +33,7 @@ class Sub2APIClient:
     REPLACE_EXCLUSIVE_GROUP_PATH = "/api/v1/admin/users/{user_id}/replace-group"
     LIST_GROUPS_PATH = "/api/v1/admin/groups/all"
     LIST_USERS_PATH = "/api/v1/admin/users"
+    UPDATE_USER_PATH = "/api/v1/admin/users/{user_id}"
     LIST_OPENAI_ACCOUNTS_PATH = "/api/v1/admin/accounts"
     USER_API_KEYS_PATH = "/api/v1/admin/users/{user_id}/api-keys"
     UPDATE_USER_BALANCE_PATH = "/api/v1/admin/users/{user_id}/balance"
@@ -163,6 +164,16 @@ class Sub2APIClient:
             "migrated_keys": migrated_keys or 0,
             "raw": data,
         }
+
+    def set_user_group(self, *, user_id: Any, group_id: Any) -> dict[str, Any]:
+        coerced_group_id = self._coerce_numeric_id(group_id)
+        payload = {
+            "group_id": coerced_group_id,
+            "allowed_groups": [coerced_group_id],
+        }
+        path = self.UPDATE_USER_PATH.format(user_id=user_id)
+        data = self._request("PUT", path, json=payload)
+        return {"user_id": user_id, "group_id": group_id, "raw": data}
 
     @staticmethod
     def _coerce_numeric_id(value: Any) -> Any:

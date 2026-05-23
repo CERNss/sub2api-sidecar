@@ -1028,6 +1028,33 @@ def test_sub2api_client_replace_group_sends_numeric_group_ids_as_numbers() -> No
     ]
 
 
+def test_sub2api_client_set_user_group_updates_direct_group() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.set_user_group(user_id=3, group_id="7")
+
+    assert result["user_id"] == 3
+    assert result["group_id"] == "7"
+    assert calls == [
+        {
+            "method": "PUT",
+            "path": "/api/v1/admin/users/3",
+            "json": {"group_id": 7, "allowed_groups": [7]},
+        }
+    ]
+
+
 def test_sub2api_client_create_group_uses_upstream_group_form_payload() -> None:
     calls: list[dict[str, object]] = []
 
@@ -2473,6 +2500,42 @@ def test_existing_user_group_orchestration_requires_direct_source_group(client) 
     assert "direct current group" in response.json()["detail"]
     assert backend.replace_calls == []
     assert backend.set_user_group_calls == []
+
+
+def test_existing_user_group_orchestration_assigns_user_without_source_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = None
+    backend.users[0]["group_name"] = None
+    backend.users[0]["group_ids"] = []
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "source_group_id": None,
+                "target_group_id": 22,
+                "reason": "assign ungrouped user",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "moved"
+    assert payload["source_group_id"] is None
+    assert payload["target_group_id"] == 22
+    assert payload["migrated_keys"] == 0
+    assert backend.replace_calls == []
+    assert backend.set_user_group_calls == [
+        {"user_id": 101, "group_id": 22, "allowed_groups": [22]}
+    ]
+    assignment = main.get_flow_store().get_user_assignment(101)
+    assert assignment is not None
+    assert assignment.current_group_id == 22
+    assert assignment.current_group_name == "rotation-high"
 
 
 def test_existing_user_group_orchestration_rejects_ambiguous_allowed_groups_as_source(client) -> None:
