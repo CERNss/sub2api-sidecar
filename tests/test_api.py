@@ -2561,9 +2561,20 @@ def test_existing_user_group_orchestration_assigns_user_without_source_group(cli
     backend.users[0]["group_id"] = None
     backend.users[0]["group_name"] = None
     backend.users[0]["group_ids"] = []
+    backend.accounts.append(
+        {
+            "id": "acct-ungrouped",
+            "name": "rotate@example.com",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "available": True,
+        }
+    )
     backend.user_api_keys[101] = [
-        {"id": "key-101-primary", "name": "primary", "group_id": None},
-        {"id": "key-101-extra", "name": "extra", "group_id": None},
+        {"id": "key-101-primary", "name": "primary", "group_id": None, "account_id": "acct-ungrouped"},
+        {"id": "key-101-extra", "name": "extra", "group_id": None, "account_id": "acct-ungrouped"},
     ]
     login(client)
     save_operational_snapshots(backend)
@@ -2594,10 +2605,69 @@ def test_existing_user_group_orchestration_assigns_user_without_source_group(cli
         {"key_id": "key-101-primary", "group_id": 22},
         {"key_id": "key-101-extra", "group_id": 22},
     ]
+    assert backend.bind_account_calls == [
+        {
+            "path": "/api/v1/admin/groups/22/accounts",
+            "json": {"account_id": "acct-ungrouped", "account_ids": ["acct-ungrouped"]},
+        }
+    ]
+    assert payload["metadata"]["bound_accounts"] == 1
     assignment = main.get_flow_store().get_user_assignment(101)
     assert assignment is not None
     assert assignment.current_group_id == 22
     assert assignment.current_group_name == "rotation-high"
+
+
+def test_existing_user_group_orchestration_resyncs_resources_when_target_already_matches(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.users[0]["group_ids"] = [22]
+    backend.accounts.append(
+        {
+            "id": "acct-resync",
+            "name": "rotate@example.com",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "available": True,
+        }
+    )
+    backend.user_api_keys[101] = [
+        {"id": "key-101-resync", "name": "resync", "group_id": None, "account_id": "acct-resync"},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "source_group_id": None,
+                "target_group_id": 22,
+                "reason": "resync ungrouped resources",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "moved"
+    assert payload["source_group_id"] == 22
+    assert payload["target_group_id"] == 22
+    assert payload["migrated_keys"] == 1
+    assert payload["metadata"]["bound_accounts"] == 1
+    assert backend.replace_calls == []
+    assert backend.set_user_group_calls == []
+    assert backend.api_key_group_calls == [{"key_id": "key-101-resync", "group_id": 22}]
+    assert backend.bind_account_calls == [
+        {
+            "path": "/api/v1/admin/groups/22/accounts",
+            "json": {"account_id": "acct-resync", "account_ids": ["acct-resync"]},
+        }
+    ]
 
 
 def test_existing_user_group_orchestration_rejects_ambiguous_allowed_groups_as_source(client) -> None:

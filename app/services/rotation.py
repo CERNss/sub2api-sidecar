@@ -371,9 +371,33 @@ class RotationService:
 
         request_reason = reason or "existing user/group orchestration"
         if self._normalize_key(effective_source_group_id) == self._normalize_key(target_group_id):
+            try:
+                resource_sync = self._sync_user_resources_to_group(
+                    user_id=user_id,
+                    email=email,
+                    target_group_id=target_group_id,
+                )
+            except Sub2APIError as exc:
+                logger.exception("Existing assignment resource sync failed for user_id=%s", user_id)
+                return self._record_result(
+                    assignment=assignment,
+                    source_group_id=effective_source_group_id,
+                    target_group_id=target_group_id,
+                    trigger_type=RotationTrigger.manual,
+                    status=RotationResultStatus.failed,
+                    reason=f"Upstream resource sync failed: {exc}",
+                )
+
             assignment.current_group_id = target_group_id
             assignment.current_group_name = target_group["name"]
-            assignment.last_decision_reason = "Target group matches the current assignment"
+            resource_changes = resource_sync["migrated_keys"] + resource_sync["bound_accounts"]
+            assignment.last_decision_reason = (
+                "Target group matches the current assignment"
+                if resource_changes == 0
+                else "Target group matches the current assignment; synchronized user resources"
+            )
+            if resource_changes > 0:
+                assignment.last_rotation_at = now
             assignment.updated_at = now
             self.store.upsert_user_assignment(assignment)
             return self._record_result(
@@ -381,20 +405,30 @@ class RotationService:
                 source_group_id=effective_source_group_id,
                 target_group_id=target_group_id,
                 trigger_type=RotationTrigger.manual,
-                status=RotationResultStatus.skipped,
+                status=(
+                    RotationResultStatus.skipped
+                    if resource_changes == 0
+                    else RotationResultStatus.moved
+                ),
                 reason=assignment.last_decision_reason,
+                migrated_keys=resource_sync["migrated_keys"],
+                metadata={"bound_accounts": resource_sync["bound_accounts"]},
             )
 
+        metadata: dict[str, Any] | None = None
         try:
             if effective_source_group_id in (None, ""):
                 self.sub2api_client.set_user_group(
                     user_id=user_id,
                     group_id=target_group_id,
                 )
-                migrated_keys = self._move_user_api_keys_to_group(
+                resource_sync = self._sync_user_resources_to_group(
                     user_id=user_id,
+                    email=email,
                     target_group_id=target_group_id,
                 )
+                migrated_keys = resource_sync["migrated_keys"]
+                metadata = {"bound_accounts": resource_sync["bound_accounts"]}
             else:
                 response = self.sub2api_client.replace_exclusive_user_group(
                     user_id=user_id,
@@ -427,10 +461,34 @@ class RotationService:
             status=RotationResultStatus.moved,
             reason=request_reason,
             migrated_keys=migrated_keys,
+            metadata=metadata,
         )
 
-    def _move_user_api_keys_to_group(self, *, user_id: Any, target_group_id: Any) -> int:
+    def _sync_user_resources_to_group(
+        self,
+        *,
+        user_id: Any,
+        email: str,
+        target_group_id: Any,
+    ) -> dict[str, int]:
         api_keys = self.sub2api_client.get_user_api_keys(user_id)["items"]
+        bound_accounts = self._bind_user_api_key_accounts_to_group(
+            api_keys=api_keys,
+            email=email,
+            target_group_id=target_group_id,
+        )
+        migrated_keys = self._move_api_keys_to_group(
+            api_keys=api_keys,
+            target_group_id=target_group_id,
+        )
+        return {"migrated_keys": migrated_keys, "bound_accounts": bound_accounts}
+
+    def _move_api_keys_to_group(
+        self,
+        *,
+        api_keys: list[dict[str, Any]],
+        target_group_id: Any,
+    ) -> int:
         moved = 0
         for api_key in api_keys:
             if not isinstance(api_key, dict):
@@ -438,12 +496,186 @@ class RotationService:
             key_id = api_key.get("id") or api_key.get("key_id")
             if key_id in (None, ""):
                 continue
+            if self._normalize_key(api_key.get("group_id") or api_key.get("current_group_id")) == self._normalize_key(target_group_id):
+                continue
             self.sub2api_client.update_api_key_group(
                 key_id=key_id,
                 group_id=target_group_id,
             )
             moved += 1
         return moved
+
+    def _bind_user_api_key_accounts_to_group(
+        self,
+        *,
+        api_keys: list[dict[str, Any]],
+        email: str,
+        target_group_id: Any,
+    ) -> int:
+        if not api_keys:
+            return 0
+
+        accounts = self.sub2api_client.list_openai_accounts()
+        accounts_by_key = {
+            self._normalize_key(account.get("id")): account
+            for account in accounts
+            if account.get("id") not in (None, "")
+        }
+        explicit_account_keys = [
+            account_key
+            for api_key in api_keys
+            if isinstance(api_key, dict)
+            for account_key in self._api_key_account_keys(api_key)
+        ]
+        named_account_keys = [
+            self._normalize_key(account["id"])
+            for api_key in api_keys
+            if isinstance(api_key, dict)
+            for account_name in self._api_key_account_names(api_key)
+            for account in accounts
+            if account.get("id") not in (None, "")
+            and self._account_matches_text(account, account_name)
+        ]
+        candidate_account_keys = [*explicit_account_keys, *named_account_keys]
+        if not candidate_account_keys:
+            candidate_account_keys.extend(
+                self._normalize_key(account["id"])
+                for account in accounts
+                if account.get("id") not in (None, "")
+                and self._account_matches_email(account, email)
+            )
+
+        bound_accounts = 0
+        seen_account_keys: set[str] = set()
+        for account_key in candidate_account_keys:
+            if not account_key or account_key in seen_account_keys:
+                continue
+            seen_account_keys.add(account_key)
+            account = accounts_by_key.get(account_key)
+            account_id = account.get("id") if account else account_key
+            if account and self._account_has_group(account, target_group_id):
+                continue
+            self.sub2api_client.bind_account_to_group(account_id, target_group_id)
+            bound_accounts += 1
+        return bound_accounts
+
+    def _api_key_account_keys(self, api_key: dict[str, Any]) -> list[str]:
+        account_ids: list[str] = []
+
+        def add(value: Any) -> None:
+            if value in (None, ""):
+                return
+            account_key = self._normalize_key(value)
+            if account_key and account_key not in account_ids:
+                account_ids.append(account_key)
+
+        for field_name in (
+            "account_id",
+            "accountId",
+            "openai_account_id",
+            "openaiAccountId",
+            "oauth_account_id",
+            "oauthAccountId",
+            "upstream_account_id",
+            "upstreamAccountId",
+            "provider_account_id",
+            "providerAccountId",
+        ):
+            add(api_key.get(field_name))
+
+        for field_name in ("account", "openai_account", "openaiAccount", "oauth_account", "oauthAccount"):
+            raw_account = api_key.get(field_name)
+            if isinstance(raw_account, dict):
+                add(raw_account.get("id") or raw_account.get("account_id") or raw_account.get("accountId"))
+
+        for field_name in ("accounts", "openai_accounts", "openaiAccounts"):
+            raw_accounts = api_key.get(field_name)
+            if not isinstance(raw_accounts, list):
+                continue
+            for raw_account in raw_accounts:
+                if isinstance(raw_account, dict):
+                    add(raw_account.get("id") or raw_account.get("account_id") or raw_account.get("accountId"))
+                else:
+                    add(raw_account)
+
+        raw_payload = api_key.get("raw")
+        if isinstance(raw_payload, dict):
+            for account_key in self._api_key_account_keys(raw_payload):
+                add(account_key)
+        return account_ids
+
+    def _api_key_account_names(self, api_key: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+
+        def add(value: Any) -> None:
+            text = self._text_or_none(value)
+            if text and text not in names:
+                names.append(text)
+
+        for field_name in (
+            "account_name",
+            "accountName",
+            "openai_account_name",
+            "openaiAccountName",
+            "oauth_account_name",
+            "oauthAccountName",
+        ):
+            add(api_key.get(field_name))
+
+        for field_name in ("account", "openai_account", "openaiAccount", "oauth_account", "oauthAccount"):
+            raw_account = api_key.get(field_name)
+            if isinstance(raw_account, dict):
+                add(raw_account.get("name") or raw_account.get("account_name") or raw_account.get("accountName"))
+
+        raw_payload = api_key.get("raw")
+        if isinstance(raw_payload, dict):
+            for account_name in self._api_key_account_names(raw_payload):
+                add(account_name)
+        return names
+
+    def _account_has_group(self, account: dict[str, Any], group_id: Any) -> bool:
+        group_ids = account.get("group_ids")
+        if not isinstance(group_ids, list):
+            return False
+        group_key = self._normalize_key(group_id)
+        return any(self._normalize_key(value) == group_key for value in group_ids)
+
+    def _account_matches_email(self, account: dict[str, Any], email: str) -> bool:
+        normalized_email = self._normalize_email(email)
+        if not normalized_email:
+            return False
+        return self._account_matches_text(account, normalized_email)
+
+    def _account_matches_text(self, account: dict[str, Any], text: str) -> bool:
+        needle = self._normalize_email(text)
+        if not needle:
+            return False
+        raw = account.get("raw")
+        candidates = [
+            account.get("name"),
+            account.get("email"),
+        ]
+        if isinstance(raw, dict):
+            candidates.extend(
+                [
+                    raw.get("name"),
+                    raw.get("email"),
+                    raw.get("account_name"),
+                    raw.get("account_email"),
+                    raw.get("login_email"),
+                    self._nested_value(raw, "extra.email"),
+                    self._nested_value(raw, "credentials.email"),
+                ]
+            )
+        return any(self._normalize_email(candidate) == needle for candidate in candidates)
+
+    def _nested_value(self, payload: dict[str, Any], path: str) -> Any | None:
+        current: Any = payload
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
 
     def _get_direct_user_group(self, user_id: Any) -> tuple[Any | None, str | None]:
         for user in self._latest_users_snapshot():
