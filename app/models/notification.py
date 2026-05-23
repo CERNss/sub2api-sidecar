@@ -61,6 +61,10 @@ class NotificationWebhook(BaseModel):
         default_factory=lambda: list(DEFAULT_WEBHOOK_PAYLOAD_FIELDS),
         alias="payloadFields",
     )
+    json_template: dict[str, Any] | None = Field(
+        default=None,
+        alias="jsonTemplate",
+    )
     feishu_card_template: dict[str, Any] | None = Field(
         default=None,
         alias="feishuCardTemplate",

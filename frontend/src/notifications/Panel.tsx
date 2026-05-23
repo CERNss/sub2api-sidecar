@@ -209,8 +209,8 @@ export function NotificationPanel({ onAuthExpired }: Props) {
     setSelectedRuleId("");
   }
 
-  async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function saveCurrentSettings(scope: string) {
+    setSaveScope(scope);
     setIsSaving(true);
     setStatus({ message: "正在保存到数据库。", tone: "info" });
     try {
@@ -227,6 +227,11 @@ export function NotificationPanel({ onAuthExpired }: Props) {
     } finally {
       setIsSaving(false);
     }
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await saveCurrentSettings(saveScope || "form");
   }
 
   async function sendTest() {
@@ -292,9 +297,9 @@ export function NotificationPanel({ onAuthExpired }: Props) {
       <>
         <button
           className="button primary compact"
-          type="submit"
+          type="button"
           disabled={isLoading || isSaving}
-          onClick={() => setSaveScope(scope)}
+          onClick={() => void saveCurrentSettings(scope)}
         >
           {isSaving && saveScope === scope ? (
             <LoaderCircle className="spin" size={16} aria-hidden="true" />
