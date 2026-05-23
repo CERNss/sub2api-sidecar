@@ -1,7 +1,9 @@
-import { Popconfirm, Select, Tag } from "antd";
-import { ChevronDown, Eraser, FileJson, Plus, Trash2 } from "lucide-react";
+import { Modal, Popconfirm, Select, Tag } from "antd";
+import { ChevronDown, Clipboard, Eraser, Eye, FileJson, Plus, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import {
+  genericWebhookPayloadExample,
+  notificationPlaceholders,
   NotificationSettings,
   NotificationWebhook,
   WebhookPayloadField,
@@ -28,10 +30,10 @@ type Props = {
 const FEISHU_SAMPLE_CARD_TEMPLATE: Record<string, unknown> = {
   config: { wide_screen_mode: true },
   header: {
-    template: "red",
+    template: "${alert.color}",
     title: {
       tag: "plain_text",
-      content: "🚨 云账号余额告警"
+      content: "${alert.title}"
     }
   },
   elements: [
@@ -42,35 +44,42 @@ const FEISHU_SAMPLE_CARD_TEMPLATE: Record<string, unknown> = {
           is_short: true,
           text: {
             tag: "lark_md",
-            content: "**账号名称**\n${snapshot.data.low_users.0.name}"
+            content: "**状态**\n${alert.status_label}"
           }
         },
         {
           is_short: true,
           text: {
             tag: "lark_md",
-            content: "**云厂商**\n${snapshot.data.low_users.0.provider}"
+            content: "**等级**\n${alert.severity_label}"
           }
         },
         {
           is_short: true,
           text: {
             tag: "lark_md",
-            content: "**当前余额**\n${snapshot.data.min_balance}"
+            content: "**规则**\n${rule.name}"
           }
         },
         {
           is_short: true,
           text: {
             tag: "lark_md",
-            content: "**本月剩余额预估**\n${snapshot.data.month_remaining_estimate}"
+            content: "**信号**\n${signal.key}"
           }
         },
         {
-          is_short: false,
+          is_short: true,
           text: {
             tag: "lark_md",
-            content: "**资金缺口**\n${snapshot.data.funding_gap}"
+            content: "**当前值**\n${signal.value}"
+          }
+        },
+        {
+          is_short: true,
+          text: {
+            tag: "lark_md",
+            content: "**范围**\n${signal.scope_label}"
           }
         }
       ]
@@ -80,14 +89,265 @@ const FEISHU_SAMPLE_CARD_TEMPLATE: Record<string, unknown> = {
       tag: "div",
       text: {
         tag: "lark_md",
-        content: "共 ${snapshot.data.low_user_count} 个账号余额不足以覆盖本月剩余消耗（参考上月同期），请及时充值"
+        content: "**摘要**\n${alert.summary}"
       }
     }
   ]
 };
 
+const GENERIC_SAMPLE_JSON_TEMPLATE: Record<string, unknown> = {
+  status: "${alert.status}",
+  severity: "${alert.severity}",
+  title: "${alert.title}",
+  summary: "${alert.summary}",
+  rule: {
+    id: "${rule.id}",
+    name: "${rule.name}",
+    threshold: "${rule.threshold}",
+    operator: "${rule.operator}"
+  },
+  signal: {
+    key: "${signal.key}",
+    value: "${signal.value}",
+    scope: "${signal.scope_label}"
+  },
+  snapshot: "${snapshot}"
+};
+
 function stringifyTemplate(template: Record<string, unknown> | null): string {
   return template ? JSON.stringify(template, null, 2) : "";
+}
+
+function stringifyJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+type PreviewField = {
+  label: string;
+  value: string;
+};
+
+const previewFields: PreviewField[] = [
+  { label: "状态", value: previewValue(genericWebhookPayloadExample.alert.status_label) },
+  { label: "等级", value: previewValue(genericWebhookPayloadExample.alert.severity_label) },
+  { label: "规则", value: previewValue(genericWebhookPayloadExample.rule.name) },
+  { label: "信号", value: previewValue(genericWebhookPayloadExample.signal.key) },
+  { label: "当前值", value: previewValue(genericWebhookPayloadExample.signal.value) },
+  { label: "范围", value: previewValue(genericWebhookPayloadExample.signal.scope_label) }
+];
+
+const previewContext = {
+  title: previewValue(genericWebhookPayloadExample.alert.title),
+  summary: previewValue(genericWebhookPayloadExample.alert.summary),
+  occurredAt: previewValue(genericWebhookPayloadExample.alert.occurred_at),
+  color: previewValue(genericWebhookPayloadExample.alert.color),
+  fields: previewFields
+};
+
+function previewValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
+function previewObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function previewPath(path: string): unknown {
+  return path.split(".").reduce<unknown>((current, part) => {
+    if (current === null || current === undefined) return undefined;
+    if (Array.isArray(current)) {
+      const index = Number(part);
+      return Number.isInteger(index) ? current[index] : undefined;
+    }
+    if (typeof current === "object") {
+      return (current as Record<string, unknown>)[part];
+    }
+    return undefined;
+  }, genericWebhookPayloadExample);
+}
+
+function renderPreviewTemplate(value: unknown): unknown {
+  if (typeof value === "string") {
+    const fullMatch = value.match(/^\s*\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}\s*$/);
+    if (fullMatch) {
+      const replacement = previewPath(fullMatch[1]);
+      return replacement === undefined ? "" : replacement;
+    }
+    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}/g, (_match, path: string) =>
+      previewValue(previewPath(path))
+    );
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => renderPreviewTemplate(item));
+  }
+  const object = previewObject(value);
+  if (object) {
+    return Object.fromEntries(
+      Object.entries(object).map(([key, entry]) => [key, renderPreviewTemplate(entry)])
+    );
+  }
+  return value;
+}
+
+function previewTone(color: string): string {
+  if (color === "red" || color === "green" || color === "blue") return color;
+  if (color === "orange" || color === "yellow" || color === "gold") return "orange";
+  return "blue";
+}
+
+function previewMarkdownText(text: string): ReactNode {
+  return text.split("\n").map((line, lineIndex) => (
+    <span key={`${line}-${lineIndex}`}>
+      {line.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, partIndex) =>
+        part.startsWith("**") && part.endsWith("**") ? (
+          <strong key={`${part}-${partIndex}`}>{part.slice(2, -2)}</strong>
+        ) : (
+          <span key={`${part}-${partIndex}`}>{part}</span>
+        )
+      )}
+    </span>
+  ));
+}
+
+function previewFeishuText(value: unknown): string {
+  const object = previewObject(value);
+  if (object && "content" in object) return previewValue(object.content);
+  return previewValue(value);
+}
+
+function renderFeishuElement(element: unknown, index: number): ReactNode {
+  const object = previewObject(element);
+  if (!object) return null;
+  const tag = previewValue(object.tag);
+  if (tag === "hr") return <div key={index} className="notif-preview-divider" />;
+
+  const fields = Array.isArray(object.fields) ? object.fields : [];
+  if (fields.length > 0) {
+    return (
+      <div key={index} className="notif-preview-fields">
+        {fields.map((field, fieldIndex) => {
+          const fieldObject = previewObject(field);
+          return (
+            <div key={fieldIndex} className="notif-preview-field">
+              {previewMarkdownText(previewFeishuText(fieldObject?.text))}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  if ("text" in object) {
+    return (
+      <p key={index} className="notif-preview-md">
+        {previewMarkdownText(previewFeishuText(object.text))}
+      </p>
+    );
+  }
+
+  return (
+    <pre key={index} className="notif-preview-json-snippet">
+      {stringifyJson(object)}
+    </pre>
+  );
+}
+
+function WebhookMessagePreview({ webhook }: { webhook: NotificationWebhook }) {
+  if (webhook.provider === "generic") {
+    const requestPreview =
+      webhook.method === "GET"
+        ? {
+            method: "GET",
+            url: webhook.url || "https://example.com/test",
+            queryFields: webhook.payloadFields,
+            payload: genericWebhookPayloadExample
+          }
+        : renderPreviewTemplate(webhook.jsonTemplate ?? genericWebhookPayloadExample);
+    return <pre className="notif-payload-preview">{stringifyJson(requestPreview)}</pre>;
+  }
+
+  if (webhook.provider === "feishu") {
+    const card = previewObject(
+      renderPreviewTemplate(webhook.feishuCardTemplate ?? FEISHU_SAMPLE_CARD_TEMPLATE)
+    );
+    const header = previewObject(card?.header);
+    const title = previewFeishuText(previewObject(header?.title)?.content ?? header?.title);
+    const tone = previewTone(previewValue(header?.template ?? previewContext.color));
+    const elements = Array.isArray(card?.elements) ? card.elements : [];
+
+    return (
+      <div className={`notif-message-preview notif-feishu-preview tone-${tone}`}>
+        <div className="notif-feishu-header">
+          <strong>{title || previewContext.title}</strong>
+        </div>
+        <div className="notif-feishu-body">
+          {elements.length > 0 ? elements.map(renderFeishuElement) : (
+            <p className="notif-preview-md">{previewContext.summary}</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (webhook.provider === "slack") {
+    return (
+      <div className="notif-message-preview notif-slack-preview">
+        <div className="notif-slack-header">{previewContext.title}</div>
+        <p>{previewContext.summary}</p>
+        <div className="notif-preview-fields">
+          {previewContext.fields.map((field) => (
+            <div key={field.label} className="notif-preview-field">
+              <strong>{field.label}</strong>
+              <span>{field.value}</span>
+            </div>
+          ))}
+        </div>
+        <small>发生时间：{previewContext.occurredAt}</small>
+      </div>
+    );
+  }
+
+  if (webhook.provider === "discord") {
+    return (
+      <div className="notif-message-preview notif-discord-preview">
+        <div>
+          <strong>{previewContext.title}</strong>
+          <p>{previewContext.summary}</p>
+        </div>
+        <div className="notif-preview-fields">
+          {previewContext.fields.map((field) => (
+            <div key={field.label} className="notif-preview-field">
+              <strong>{field.label}</strong>
+              <span>{field.value}</span>
+            </div>
+          ))}
+        </div>
+        <small>{previewContext.occurredAt}</small>
+      </div>
+    );
+  }
+
+  return (
+    <div className="notif-message-preview notif-markdown-preview">
+      <h4>{previewContext.title}</h4>
+      <p>{previewContext.summary}</p>
+      {previewContext.fields.map((field) => (
+        <p key={field.label}>
+          <strong>{field.label}</strong>：{field.value}
+        </p>
+      ))}
+      <small>发生时间：{previewContext.occurredAt}</small>
+    </div>
+  );
+}
+
+async function copyPlaceholder(value: string) {
+  await navigator.clipboard?.writeText(value);
 }
 
 export function WebhookEditor({
@@ -101,8 +361,11 @@ export function WebhookEditor({
   savingWebhookToggleId,
   renderSaveAction
 }: Props) {
+  const [jsonTemplateDrafts, setJsonTemplateDrafts] = useState<Record<string, string>>({});
+  const [jsonTemplateErrors, setJsonTemplateErrors] = useState<Record<string, string>>({});
   const [feishuTemplateDrafts, setFeishuTemplateDrafts] = useState<Record<string, string>>({});
   const [feishuTemplateErrors, setFeishuTemplateErrors] = useState<Record<string, string>>({});
+  const [templateDialogWebhookId, setTemplateDialogWebhookId] = useState("");
 
   function syncGetUrlTemplate(url: string, previousFields: WebhookPayloadField[], nextFields: WebhookPayloadField[]): string {
     const addedFields = nextFields.filter((field) => !previousFields.includes(field));
@@ -162,6 +425,39 @@ export function WebhookEditor({
     onChange(webhook.id, partial);
   }
 
+  function updateJsonTemplate(webhook: NotificationWebhook, value: string) {
+    setJsonTemplateDrafts((current) => ({ ...current, [webhook.id]: value }));
+    if (!value.trim()) {
+      setJsonTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+      onChange(webhook.id, { jsonTemplate: null });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setJsonTemplateErrors((current) => ({ ...current, [webhook.id]: "JSON 模板必须是对象。" }));
+        return;
+      }
+      setJsonTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+      onChange(webhook.id, { jsonTemplate: parsed as Record<string, unknown> });
+    } catch {
+      setJsonTemplateErrors((current) => ({ ...current, [webhook.id]: "JSON 格式不正确，修好后才会保存。" }));
+    }
+  }
+
+  function applyGenericSampleTemplate(webhook: NotificationWebhook) {
+    const text = stringifyTemplate(GENERIC_SAMPLE_JSON_TEMPLATE);
+    setJsonTemplateDrafts((current) => ({ ...current, [webhook.id]: text }));
+    setJsonTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+    onChange(webhook.id, { jsonTemplate: GENERIC_SAMPLE_JSON_TEMPLATE });
+  }
+
+  function clearJsonTemplate(webhook: NotificationWebhook) {
+    setJsonTemplateDrafts((current) => ({ ...current, [webhook.id]: "" }));
+    setJsonTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
+    onChange(webhook.id, { jsonTemplate: null });
+  }
+
   function updateFeishuTemplate(webhook: NotificationWebhook, value: string) {
     setFeishuTemplateDrafts((current) => ({ ...current, [webhook.id]: value }));
     if (!value.trim()) {
@@ -193,6 +489,125 @@ export function WebhookEditor({
     setFeishuTemplateDrafts((current) => ({ ...current, [webhook.id]: "" }));
     setFeishuTemplateErrors((current) => ({ ...current, [webhook.id]: "" }));
     onChange(webhook.id, { feishuCardTemplate: null });
+  }
+
+  function renderTemplateDialog(webhook: NotificationWebhook) {
+    const showPlaceholders =
+      webhook.provider === "feishu" || webhook.provider === "generic";
+
+    return (
+      <Modal
+        open={templateDialogWebhookId === webhook.id}
+        title={`${webhook.name || "Webhook"} · 模板与预览`}
+        width={980}
+        footer={
+          <div className="notif-template-modal-footer">
+            {renderSaveAction(`webhook:${webhook.id}`)}
+          </div>
+        }
+        className="notif-template-modal"
+        onCancel={() => setTemplateDialogWebhookId("")}
+      >
+        <div className="notif-template-modal-body">
+          <section className="notif-template-pane">
+            {webhook.provider === "feishu" ? (
+              <div className="notif-template-block">
+                <div className="notif-template-toolbar">
+                  <span>飞书消息卡片</span>
+                  <div>
+                    <button className="button secondary compact" type="button" onClick={() => applyFeishuSampleTemplate(webhook)}>
+                      <FileJson size={16} aria-hidden="true" />
+                      示例模版
+                    </button>
+                    <button className="button tertiary compact" type="button" onClick={() => clearFeishuTemplate(webhook)}>
+                      <Eraser size={16} aria-hidden="true" />
+                      清空
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  className="notif-template-textarea"
+                  value={feishuTemplateDrafts[webhook.id] ?? stringifyTemplate(webhook.feishuCardTemplate)}
+                  placeholder={stringifyTemplate(FEISHU_SAMPLE_CARD_TEMPLATE)}
+                  spellCheck={false}
+                  onChange={(event) => updateFeishuTemplate(webhook, event.target.value)}
+                />
+                <small className={`notif-template-hint ${feishuTemplateErrors[webhook.id] ? "tone-error" : ""}`}>
+                  {feishuTemplateErrors[webhook.id] || "留空时使用内置状态卡片；卡片 JSON 中可以使用下方占位符。"}
+                </small>
+              </div>
+            ) : null}
+
+            {webhook.provider === "generic" && webhook.method === "POST" ? (
+              <div className="notif-template-block">
+                <div className="notif-template-toolbar">
+                  <span>通用 JSON 模板</span>
+                  <div>
+                    <button className="button secondary compact" type="button" onClick={() => applyGenericSampleTemplate(webhook)}>
+                      <FileJson size={16} aria-hidden="true" />
+                      示例模版
+                    </button>
+                    <button className="button tertiary compact" type="button" onClick={() => clearJsonTemplate(webhook)}>
+                      <Eraser size={16} aria-hidden="true" />
+                      清空
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  className="notif-template-textarea"
+                  value={jsonTemplateDrafts[webhook.id] ?? stringifyTemplate(webhook.jsonTemplate)}
+                  placeholder={stringifyTemplate(GENERIC_SAMPLE_JSON_TEMPLATE)}
+                  spellCheck={false}
+                  onChange={(event) => updateJsonTemplate(webhook, event.target.value)}
+                />
+                <small className={`notif-template-hint ${jsonTemplateErrors[webhook.id] ? "tone-error" : ""}`}>
+                  {jsonTemplateErrors[webhook.id] || "留空时发送默认告警 JSON；模板 JSON 中可以使用下方占位符。"}
+                </small>
+              </div>
+            ) : null}
+
+            {webhook.provider === "generic" && webhook.method === "GET" ? (
+              <small className="notif-template-hint">
+                URL 可以使用 <code>{"${alert.status}"}</code>、<code>{"${rule.name}"}</code>、<code>{"${signal.value}"}</code> 这类占位符；没有模板时会把 Query 字段追加到 URL。
+              </small>
+            ) : null}
+
+            {showPlaceholders ? (
+              <div className="notif-placeholder-panel">
+                <div>
+                  <strong>可用占位符</strong>
+                  <small>点击占位符复制。</small>
+                </div>
+                <div className="notif-placeholder-list">
+                  {notificationPlaceholders.map((item) => (
+                    <button
+                      key={item.value}
+                      className="notif-placeholder-chip"
+                      type="button"
+                      title={item.description}
+                      onClick={() => void copyPlaceholder(item.value)}
+                    >
+                      <Clipboard size={13} aria-hidden="true" />
+                      <span>{item.value}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </section>
+
+          <section className="notif-preview-pane">
+            <div className="notif-template-toolbar">
+              <span>实时预览</span>
+              <div>
+                <Tag color="blue">示例数据</Tag>
+              </div>
+            </div>
+            <WebhookMessagePreview webhook={webhook} />
+          </section>
+        </div>
+      </Modal>
+    );
   }
 
   return (
@@ -278,39 +693,41 @@ export function WebhookEditor({
                     </label>
                   </div>
 
-                  <div className="notif-grid-2">
-                    <label className="notif-field">
-                      <span>请求方式</span>
-                      <select
-                        value={webhook.method}
-                        disabled={webhook.provider !== "generic"}
-                        onChange={(event) =>
-                          updateWebhookMethod(webhook, event.target.value as WebhookMethod)
-                        }
-                      >
-                        {webhookMethodOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="notif-field">
-                      <span>{webhook.method === "GET" ? "Query 字段" : "JSON 字段"}</span>
-                      <Select
-                        mode="multiple"
-                        className="notif-webhook-select"
-                        value={webhook.payloadFields}
-                        disabled={webhook.provider !== "generic"}
-                        optionFilterProp="label"
-                        maxTagCount="responsive"
-                        onChange={(values) =>
-                          updateWebhookPayloadFields(webhook, values as WebhookPayloadField[])
-                        }
-                        options={webhookPayloadFieldOptions}
-                      />
-                    </label>
-                  </div>
+                  {webhook.provider === "generic" ? (
+                    <div className="notif-grid-2">
+                      <label className="notif-field">
+                        <span>请求方式</span>
+                        <select
+                          value={webhook.method}
+                          onChange={(event) =>
+                            updateWebhookMethod(webhook, event.target.value as WebhookMethod)
+                          }
+                        >
+                          {webhookMethodOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {webhook.method === "GET" ? (
+                        <label className="notif-field">
+                          <span>Query 字段</span>
+                          <Select
+                            mode="multiple"
+                            className="notif-webhook-select"
+                            value={webhook.payloadFields}
+                            optionFilterProp="label"
+                            maxTagCount="responsive"
+                            onChange={(values) =>
+                              updateWebhookPayloadFields(webhook, values as WebhookPayloadField[])
+                            }
+                            options={webhookPayloadFieldOptions}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <label className="notif-field">
                     <span>Webhook URL</span>
@@ -331,33 +748,16 @@ export function WebhookEditor({
                     />
                   </label>
 
-                  {webhook.provider === "feishu" ? (
-                    <div className="notif-template-block">
-                      <div className="notif-template-toolbar">
-                        <span>飞书消息卡片</span>
-                        <div>
-                          <button className="button secondary compact" type="button" onClick={() => applyFeishuSampleTemplate(webhook)}>
-                            <FileJson size={16} aria-hidden="true" />
-                            示例模版
-                          </button>
-                          <button className="button tertiary compact" type="button" onClick={() => clearFeishuTemplate(webhook)}>
-                            <Eraser size={16} aria-hidden="true" />
-                            清空
-                          </button>
-                        </div>
-                      </div>
-                      <textarea
-                        className="notif-template-textarea"
-                        value={feishuTemplateDrafts[webhook.id] ?? stringifyTemplate(webhook.feishuCardTemplate)}
-                        placeholder={stringifyTemplate(FEISHU_SAMPLE_CARD_TEMPLATE)}
-                        spellCheck={false}
-                        onChange={(event) => updateFeishuTemplate(webhook, event.target.value)}
-                      />
-                      <small className={`notif-template-hint ${feishuTemplateErrors[webhook.id] ? "tone-error" : ""}`}>
-                        {feishuTemplateErrors[webhook.id] || "留空时发送普通文本；可用 $rule_name、${snapshot.value}、${snapshot.data.low_users.0.name} 等占位符。"}
-                      </small>
+                  <div className="notif-template-entry">
+                    <div>
+                      <strong>消息模板与预览</strong>
+                      <small>示例模板、占位符和渲染效果放在弹窗里维护。</small>
                     </div>
-                  ) : null}
+                    <button className="button secondary compact" type="button" onClick={() => setTemplateDialogWebhookId(webhook.id)}>
+                      <Eye size={16} aria-hidden="true" />
+                      打开
+                    </button>
+                  </div>
 
                   <div className="notif-actions notif-webhook-actions">
                     <span className="notif-action-note">
@@ -384,6 +784,7 @@ export function WebhookEditor({
                   </div>
                 </div>
               ) : null}
+              {renderTemplateDialog(webhook)}
             </article>
           );
         })}

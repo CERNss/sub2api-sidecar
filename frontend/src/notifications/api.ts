@@ -54,6 +54,7 @@ const KNOWN_WEBHOOK_KEYS = new Set<keyof NotificationWebhook>([
   "provider",
   "method",
   "payloadFields",
+  "jsonTemplate",
   "feishuCardTemplate",
   "url",
   "secret"
@@ -268,6 +269,7 @@ function hydrateWebhook(raw: unknown, index: number): NotificationWebhook {
     provider,
     method: provider === "generic" ? method : "POST",
     payloadFields: payloadFields.length > 0 ? payloadFields : defaultWebhookPayloadFields,
+    jsonTemplate: optionalObject(source, "jsonTemplate", path),
     feishuCardTemplate: optionalObject(source, "feishuCardTemplate", path),
     url: requireString(source, "url", path),
     secret: requireString(source, "secret", path)

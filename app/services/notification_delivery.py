@@ -30,13 +30,83 @@ logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
-URL_TEMPLATE_VARIABLE_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+URL_TEMPLATE_VARIABLE_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+)
 CARD_TEMPLATE_VARIABLE_RE = re.compile(
     r"\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
 )
 FULL_CARD_TEMPLATE_VARIABLE_RE = re.compile(
     r"^\s*(?:\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}|\$([A-Za-z_][A-Za-z0-9_]*))\s*$"
 )
+SEVERITY_LABELS = {
+    NotificationSeverity.info: "Info",
+    NotificationSeverity.warning: "Warning",
+    NotificationSeverity.critical: "Critical",
+}
+TRIGGER_STATUS = {
+    NotificationDeliveryTrigger.test: "test",
+    NotificationDeliveryTrigger.rule: "firing",
+    NotificationDeliveryTrigger.recovery: "resolved",
+}
+STATUS_LABELS = {
+    "test": "测试消息",
+    "firing": "告警触发",
+    "resolved": "告警恢复",
+}
+CARD_COLOR_VALUES = {
+    "red": 0xE5484D,
+    "orange": 0xF59E0B,
+    "green": 0x10B981,
+    "blue": 0x3B82F6,
+}
+
+DEFAULT_FEISHU_CARD_TEMPLATE: dict[str, object] = {
+    "config": {"wide_screen_mode": True},
+    "header": {
+        "template": "${alert.color}",
+        "title": {
+            "tag": "plain_text",
+            "content": "${alert.title}",
+        },
+    },
+    "elements": [
+        {
+            "tag": "div",
+            "fields": [
+                {
+                    "is_short": True,
+                    "text": {"tag": "lark_md", "content": "**状态**\n${alert.status_label}"},
+                },
+                {
+                    "is_short": True,
+                    "text": {"tag": "lark_md", "content": "**等级**\n${alert.severity_label}"},
+                },
+                {
+                    "is_short": True,
+                    "text": {"tag": "lark_md", "content": "**规则**\n${rule.name}"},
+                },
+                {
+                    "is_short": True,
+                    "text": {"tag": "lark_md", "content": "**信号**\n${signal.key}"},
+                },
+                {
+                    "is_short": True,
+                    "text": {"tag": "lark_md", "content": "**当前值**\n${signal.value}"},
+                },
+                {
+                    "is_short": True,
+                    "text": {"tag": "lark_md", "content": "**范围**\n${signal.scope_label}"},
+                },
+            ],
+        },
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**摘要**\n${alert.summary}"},
+        },
+    ],
+}
 
 
 @dataclass
@@ -65,13 +135,86 @@ def _severity_tag(severity: NotificationSeverity) -> str:
     return f"[{severity.value.upper()}]"
 
 
+def _status_for_trigger(trigger: NotificationDeliveryTrigger) -> str:
+    return TRIGGER_STATUS.get(trigger, "firing")
+
+
+def _alert_color(
+    severity: NotificationSeverity, trigger: NotificationDeliveryTrigger
+) -> str:
+    status = _status_for_trigger(trigger)
+    if status == "resolved":
+        return "green"
+    if status == "test":
+        return "blue"
+    if severity == NotificationSeverity.critical:
+        return "red"
+    if severity == NotificationSeverity.warning:
+        return "orange"
+    return "blue"
+
+
 def _format_text(message: NotificationMessage) -> str:
-    header = f"{_severity_tag(message.severity)} {message.rule_name}"
-    body = message.summary
-    return f"{header}\n{body}\nsignal={message.signal_key}"
+    payload = build_notification_payload(message)
+    alert = payload["alert"]
+    signal = payload["signal"]
+    lines = [
+        f"{_severity_tag(message.severity)} {alert['status_label']} - {message.rule_name}",
+        str(message.summary),
+        f"signal={message.signal_key}",
+    ]
+    if signal.get("value") is not None:
+        lines.append(f"value={signal['value']}")
+    if signal.get("scope_label"):
+        lines.append(f"scope={signal['scope_label']}")
+    return "\n".join(lines)
 
 
-def _build_generic_payload(message: NotificationMessage) -> dict[str, object]:
+def _payload_section(payload: dict[str, object], key: str) -> dict[str, object]:
+    value = payload.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _display_value(value: object) -> str:
+    text = _stringify_template_value(value).strip()
+    return text or "-"
+
+
+def _card_context(message: NotificationMessage) -> dict[str, object]:
+    payload = build_notification_payload(message)
+    alert = _payload_section(payload, "alert")
+    rule = _payload_section(payload, "rule")
+    signal = _payload_section(payload, "signal")
+    fields: list[tuple[str, str]] = [
+        ("状态", _display_value(alert.get("status_label"))),
+        ("等级", _display_value(alert.get("severity_label"))),
+        ("规则", _display_value(rule.get("name"))),
+        ("信号", _display_value(signal.get("key"))),
+    ]
+    if "value" in signal:
+        fields.append(("当前值", _display_value(signal.get("value"))))
+    if signal.get("scope_label"):
+        fields.append(("范围", _display_value(signal.get("scope_label"))))
+    return {
+        "payload": payload,
+        "title": _display_value(alert.get("title")),
+        "summary": _display_value(alert.get("summary")),
+        "fields": fields,
+        "occurred_at": _display_value(alert.get("occurred_at")),
+        "color": _display_value(alert.get("color")),
+    }
+
+
+def _markdown_card_text(message: NotificationMessage) -> str:
+    card = _card_context(message)
+    lines = [f"### {card['title']}", "", str(card["summary"])]
+    for label, value in card["fields"]:
+        lines.extend(["", f"**{label}**：{value}"])
+    lines.extend(["", f"> 发生时间：{card['occurred_at']}"])
+    return "\n".join(lines)
+
+
+def _build_legacy_payload(message: NotificationMessage) -> dict[str, object]:
     payload: dict[str, object] = {
         "rule_id": message.rule_id,
         "rule_name": message.rule_name,
@@ -87,8 +230,47 @@ def _build_generic_payload(message: NotificationMessage) -> dict[str, object]:
     return payload
 
 
+def build_notification_payload(message: NotificationMessage) -> dict[str, object]:
+    """Return the stable alert object used by JSON webhooks and templates."""
+    status = _status_for_trigger(message.trigger)
+    snapshot = message.snapshot if isinstance(message.snapshot, dict) else None
+    rule_payload: dict[str, object] = dict(message.rule_config or {})
+    rule_payload.update(
+        {
+            "id": message.rule_id,
+            "name": message.rule_name,
+            "signal_key": message.signal_key,
+            "signalKey": message.signal_key,
+        }
+    )
+    signal_payload: dict[str, object] = {"key": message.signal_key}
+    if snapshot is not None:
+        if "value" in snapshot:
+            signal_payload["value"] = snapshot["value"]
+        if "scope_key" in snapshot:
+            signal_payload["scope_key"] = snapshot["scope_key"]
+        if "scope_label" in snapshot:
+            signal_payload["scope_label"] = snapshot["scope_label"]
+    return {
+        "alert": {
+            "status": status,
+            "status_label": STATUS_LABELS[status],
+            "severity": message.severity.value,
+            "severity_label": SEVERITY_LABELS[message.severity],
+            "summary": message.summary,
+            "trigger": message.trigger.value,
+            "occurred_at": message.occurred_at.isoformat(),
+            "title": f"{STATUS_LABELS[status]} - {message.rule_name}",
+            "color": _alert_color(message.severity, message.trigger),
+        },
+        "rule": rule_payload,
+        "signal": signal_payload,
+        "snapshot": snapshot,
+    }
+
+
 def _select_payload_fields(receiver: NotificationWebhook, message: NotificationMessage) -> dict[str, object]:
-    payload = _build_generic_payload(message)
+    payload = _template_context(message)
     return {field: payload[field] for field in receiver.payload_fields if field in payload}
 
 
@@ -132,22 +314,33 @@ def _stringify_template_value(value: object) -> str:
     return str(value)
 
 
+def _truncate_text(value: object, limit: int) -> str:
+    text = _display_value(value)
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[:limit]
+    return f"{text[: limit - 1]}…"
+
+
 def _render_url_template(url: str, fields: dict[str, object]) -> tuple[str, bool]:
     matched = False
 
     def replace(match: re.Match[str]) -> str:
         nonlocal matched
-        field = match.group(1)
-        if field not in fields:
+        field = match.group(1) or match.group(2)
+        resolved = _lookup_template_value(fields, field)
+        if resolved is None:
             return match.group(0)
         matched = True
-        return quote(_stringify_url_value(fields[field]), safe="")
+        return quote(_stringify_url_value(resolved), safe="")
 
     return URL_TEMPLATE_VARIABLE_RE.sub(replace, url), matched
 
 
 def _template_context(message: NotificationMessage) -> dict[str, object]:
-    context = _build_generic_payload(message)
+    context = build_notification_payload(message)
+    context.update(_build_legacy_payload(message))
     snapshot = message.snapshot if isinstance(message.snapshot, dict) else {}
     if snapshot:
         context["snapshot"] = snapshot
@@ -220,13 +413,27 @@ def _render_feishu_card_template(
     return rendered
 
 
+def _render_json_template(
+    template: dict[str, object], message: NotificationMessage
+) -> dict[str, object]:
+    rendered = _render_template_payload(template, _template_context(message))
+    if not isinstance(rendered, dict):
+        raise TypeError("jsonTemplate must render to a JSON object")
+    return rendered
+
+
 def _adapter_generic(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
-    selected_payload = _select_payload_fields(receiver, message)
     if receiver.method == WebhookMethod.get:
-        rendered_url, has_template = _render_url_template(receiver.url, _build_generic_payload(message))
+        selected_payload = _select_payload_fields(receiver, message)
+        rendered_url, has_template = _render_url_template(receiver.url, _template_context(message))
         url = rendered_url if has_template else _append_query_fields(receiver.url, selected_payload)
         return PreparedRequest("GET", url, {}, b"")
-    body = json.dumps(selected_payload, ensure_ascii=False).encode("utf-8")
+    payload = (
+        _render_json_template(receiver.json_template, message)
+        if receiver.json_template is not None
+        else build_notification_payload(message)
+    )
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if receiver.secret:
         signature = hmac.new(
@@ -237,32 +444,76 @@ def _adapter_generic(receiver: NotificationWebhook, message: NotificationMessage
 
 
 def _adapter_slack(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
-    body = json.dumps({"text": _format_text(message)}, ensure_ascii=False).encode("utf-8")
+    card = _card_context(message)
+    fields = [
+        {"type": "mrkdwn", "text": f"*{label}*\n{value}"}
+        for label, value in card["fields"]
+    ]
+    payload = {
+        "text": f"{card['title']}\n{card['summary']}",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": _truncate_text(card["title"], 150)},
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": _truncate_text(card["summary"], 3000)},
+            },
+            {"type": "section", "fields": fields[:10]},
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"发生时间：{card['occurred_at']}"},
+                ],
+            },
+        ],
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return PreparedRequest("POST", receiver.url, {"Content-Type": "application/json"}, body)
 
 
 def _adapter_discord(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
-    body = json.dumps({"content": _format_text(message)}, ensure_ascii=False).encode("utf-8")
+    card = _card_context(message)
+    color = CARD_COLOR_VALUES.get(str(card["color"]), CARD_COLOR_VALUES["blue"])
+    payload = {
+        "embeds": [
+            {
+                "title": _truncate_text(card["title"], 256),
+                "description": _truncate_text(card["summary"], 4096),
+                "color": color,
+                "fields": [
+                    {
+                        "name": _truncate_text(label, 256),
+                        "value": _truncate_text(value, 1024),
+                        "inline": True,
+                    }
+                    for label, value in card["fields"][:25]
+                ],
+                "timestamp": card["occurred_at"],
+            }
+        ]
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return PreparedRequest("POST", receiver.url, {"Content-Type": "application/json"}, body)
 
 
 def _adapter_wecom(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
-    payload = {"msgtype": "text", "text": {"content": _format_text(message)}}
+    payload = {"msgtype": "markdown", "markdown": {"content": _markdown_card_text(message)}}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return PreparedRequest("POST", receiver.url, {"Content-Type": "application/json"}, body)
 
 
 def _adapter_feishu(receiver: NotificationWebhook, message: NotificationMessage) -> PreparedRequest:
-    if receiver.feishu_card_template is not None:
-        payload: dict[str, object] = {
-            "msg_type": "interactive",
-            "card": _render_feishu_card_template(receiver.feishu_card_template, message),
-        }
-    else:
-        payload = {
-            "msg_type": "text",
-            "content": {"text": _format_text(message)},
-        }
+    card_template = (
+        receiver.feishu_card_template
+        if receiver.feishu_card_template is not None
+        else DEFAULT_FEISHU_CARD_TEMPLATE
+    )
+    payload: dict[str, object] = {
+        "msg_type": "interactive",
+        "card": _render_feishu_card_template(card_template, message),
+    }
     if receiver.secret:
         timestamp = str(int(time.time()))
         sign_string = f"{timestamp}\n{receiver.secret}"
@@ -290,7 +541,13 @@ def _adapter_dingtalk(receiver: NotificationWebhook, message: NotificationMessag
         extra = urlencode({"timestamp": timestamp, "sign": signature}, quote_via=quote)
         new_qs = f"{existing_qs}&{extra}" if existing_qs else extra
         url = urlunparse(parsed._replace(query=new_qs))
-    payload = {"msgtype": "text", "text": {"content": _format_text(message)}}
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {
+            "title": _truncate_text(_card_context(message)["title"], 64),
+            "text": _markdown_card_text(message),
+        },
+    }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return PreparedRequest("POST", url, {"Content-Type": "application/json"}, body)
 

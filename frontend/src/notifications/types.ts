@@ -48,6 +48,7 @@ export type NotificationWebhook = {
   provider: WebhookProvider;
   method: WebhookMethod;
   payloadFields: WebhookPayloadField[];
+  jsonTemplate: Record<string, unknown> | null;
   feishuCardTemplate: Record<string, unknown> | null;
   url: string;
   secret: string;
@@ -73,6 +74,12 @@ export type NotificationRule = {
 export type NotificationSettings = {
   webhooks: NotificationWebhook[];
   rules: NotificationRule[];
+};
+
+export type NotificationPlaceholder = {
+  value: string;
+  label: string;
+  description: string;
 };
 
 export type NotificationDeliveryOutcome = {
@@ -112,7 +119,7 @@ export type NotificationTestResult = {
 };
 
 export const webhookProviderOptions: { value: WebhookProvider; label: string }[] = [
-  { value: "generic", label: "通用 / 自定义 JSON" },
+  { value: "generic", label: "通用 / JSON Webhook" },
   { value: "feishu", label: "飞书 / Lark 自定义机器人" },
   { value: "dingtalk", label: "钉钉自定义机器人" },
   { value: "wecom", label: "企业微信群机器人" },
@@ -157,6 +164,73 @@ export const webhookPayloadFieldOptions: { value: WebhookPayloadField; label: st
   { value: "includeResolved", label: "配置: 恢复通知" },
   { value: "includeSnapshot", label: "配置: 数据快照" }
 ];
+
+export const notificationPlaceholders: NotificationPlaceholder[] = [
+  { value: "${alert.status}", label: "状态", description: "firing / resolved / test" },
+  { value: "${alert.status_label}", label: "状态文案", description: "告警触发 / 告警恢复" },
+  { value: "${alert.severity}", label: "等级", description: "critical / warning / info" },
+  { value: "${alert.severity_label}", label: "等级文案", description: "Critical / Warning / Info" },
+  { value: "${alert.summary}", label: "摘要", description: "本次告警摘要" },
+  { value: "${alert.occurred_at}", label: "发生时间", description: "ISO 时间" },
+  { value: "${rule.id}", label: "规则 ID", description: "告警规则 id" },
+  { value: "${rule.name}", label: "规则名称", description: "告警规则名称" },
+  { value: "${rule.threshold}", label: "阈值", description: "规则阈值" },
+  { value: "${rule.operator}", label: "条件", description: "比较操作符" },
+  { value: "${signal.key}", label: "信号类型", description: "例如 user_balance_low" },
+  { value: "${signal.value}", label: "当前值", description: "最近一次采样值" },
+  { value: "${signal.scope_label}", label: "范围", description: "用户、账号或分组名称" },
+  { value: "${snapshot.value}", label: "快照值", description: "兼容旧模板路径" },
+  { value: "${snapshot.data.low_users.0.name}", label: "明细示例", description: "快照数组路径" }
+];
+
+export const genericWebhookPayloadExample = {
+  alert: {
+    status: "firing",
+    status_label: "告警触发",
+    severity: "critical",
+    severity_label: "Critical",
+    summary: "Rule '账号失效' firing: value 2 >= threshold 1",
+    trigger: "rule",
+    occurred_at: "2026-05-23T10:30:00+08:00",
+    title: "告警触发 - 账号失效",
+    color: "red"
+  },
+  rule: {
+    id: "rule-account-invalid",
+    name: "账号失效",
+    signalKey: "account_invalid",
+    operator: "gte",
+    threshold: "1",
+    thresholdUnit: "accounts",
+    readIntervalMinutes: 2,
+    forMinutes: 5,
+    cooldownMinutes: 30
+  },
+  signal: {
+    key: "account_invalid",
+    value: 2,
+    scope_key: "",
+    scope_label: ""
+  },
+  snapshot: {
+    trigger: "rule",
+    value: 2,
+    data: {
+      invalid_accounts: [
+        { id: "acct_01", name: "primary-openai", error_message: "token expired" }
+      ]
+    }
+  }
+};
+
+export const webhookRenderShapeLabels: Record<WebhookProvider, string> = {
+  generic: "JSON Payload",
+  feishu: "飞书交互卡片",
+  dingtalk: "钉钉 Markdown",
+  wecom: "企微 Markdown",
+  slack: "Slack Blocks",
+  discord: "Discord Embeds"
+};
 
 export const webhookSecretHints: Record<WebhookProvider, string> = {
   generic: "可选，用于签名或鉴权",

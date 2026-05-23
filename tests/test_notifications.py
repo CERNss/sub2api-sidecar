@@ -23,6 +23,7 @@ from app.models.notification import (
 )
 from app.services.notification_delivery import (
     NotificationDeliveryService,
+    build_notification_payload,
     build_request,
 )
 
@@ -82,6 +83,7 @@ def _webhook_body(**overrides: Any) -> dict[str, Any]:
         "provider": "generic",
         "method": "POST",
         "feishuCardTemplate": None,
+        "jsonTemplate": None,
         "url": "https://hooks.example.com/incoming",
         "secret": "",
     }
@@ -153,6 +155,7 @@ def test_notification_config_round_trip_redacts_secret(client) -> None:
         "snapshot",
         "occurred_at",
     ]
+    assert payload["webhooks"][0]["jsonTemplate"] is None
     assert payload["webhooks"][0]["feishuCardTemplate"] is None
     assert payload["webhooks"][0]["secret"] == "[redacted]"
     assert payload["rules"][0]["targetWebhookIds"] == ["ops"]
@@ -216,6 +219,27 @@ def test_notification_config_persists_generic_payload_fields(client) -> None:
     stored = main.get_flow_store().get_notification_settings()
     assert stored is not None
     assert stored.webhooks[0].payload_fields == ["name", "severity", "threshold"]
+
+
+def test_notification_config_persists_generic_json_template(client) -> None:
+    login(client)
+    template = {
+        "status": "${alert.status}",
+        "rule": "${rule.name}",
+        "value": "${signal.value}",
+    }
+    body = {
+        "webhooks": [_webhook_body(jsonTemplate=template)],
+        "rules": [_rule_body()],
+    }
+
+    response = client.put("/notifications/config", json=body)
+
+    assert response.status_code == 200
+    assert response.json()["webhooks"][0]["jsonTemplate"] == template
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.webhooks[0].json_template == template
 
 
 def test_notification_config_persists_feishu_card_template(client) -> None:
@@ -406,9 +430,10 @@ def test_notification_test_endpoint_delivers_and_audits(client) -> None:
     assert len(captured) == 1
     sent = captured[0]
     body = json.loads(sent["body"])
-    assert body["rule_id"] == "r1"
-    assert body["signal_key"] == "account_invalid"
-    assert body["trigger"] == "test"
+    assert body["rule"]["id"] == "r1"
+    assert body["rule"]["signalKey"] == "account_invalid"
+    assert body["alert"]["trigger"] == "test"
+    assert body["alert"]["status"] == "test"
     assert sent["headers"]["X-Signature"].startswith("sha256=")
 
     deliveries_response = client.get("/notifications/deliveries")
@@ -467,6 +492,19 @@ def test_notification_delivery_retries_transient_then_fails(app_env) -> None:
 # --- Provider adapter payload/signing shape ---
 
 
+def test_notification_payload_uses_abstract_alert_shape() -> None:
+    payload = build_notification_payload(_balance_message())
+
+    assert payload["alert"]["status"] == "firing"
+    assert payload["alert"]["severity"] == "critical"
+    assert payload["alert"]["color"] == "red"
+    assert payload["rule"]["id"] == "rule-balance-low"
+    assert payload["rule"]["name"] == "用户余额低"
+    assert payload["signal"]["key"] == "user_balance_low"
+    assert payload["signal"]["value"] == 3.0
+    assert payload["snapshot"]["data"]["low_users"][0]["name"] == "idle@example.com"
+
+
 def test_provider_generic_signs_with_hmac_when_secret_present() -> None:
     receiver = NotificationWebhook(
         id="g",
@@ -501,7 +539,7 @@ def test_provider_generic_get_uses_empty_body() -> None:
     assert prepared.body == b""
 
 
-def test_provider_generic_post_uses_selected_json_fields() -> None:
+def test_provider_generic_post_uses_abstract_json_payload() -> None:
     receiver = NotificationWebhook(
         id="g",
         enabled=True,
@@ -528,11 +566,39 @@ def test_provider_generic_post_uses_selected_json_fields() -> None:
     prepared = build_request(receiver, message)
     body = json.loads(prepared.body)
 
-    assert body == {
-        "name": "限流/过载",
-        "severity": "warning",
-        "threshold": "1",
-    }
+    assert body["alert"]["severity"] == "warning"
+    assert body["alert"]["status"] == "test"
+    assert body["rule"]["name"] == "Account invalid"
+    assert body["rule"]["threshold"] == "1"
+    assert body["rule"]["signalKey"] == "account_invalid"
+    assert body["signal"]["key"] == "account_invalid"
+    assert "name" not in body
+
+
+def test_provider_generic_post_renders_json_template() -> None:
+    receiver = NotificationWebhook(
+        id="g",
+        enabled=True,
+        provider=WebhookProvider.generic,
+        url="https://example.com/hook",
+        jsonTemplate={
+            "status": "${alert.status}",
+            "rule": "${rule.name}",
+            "value": "${signal.value}",
+            "user": "${snapshot.data.low_users.0.name}",
+            "snapshot": "${snapshot}",
+        },
+    )
+
+    prepared = build_request(receiver, _balance_message())
+    body = json.loads(prepared.body)
+
+    assert body["status"] == "firing"
+    assert body["rule"] == "用户余额低"
+    assert body["value"] == 3.0
+    assert body["user"] == "idle@example.com"
+    assert body["snapshot"]["data"]["low_user_count"] == 1
+    assert "alert" not in body
 
 
 def test_provider_generic_get_uses_selected_query_fields() -> None:
@@ -579,27 +645,56 @@ def test_provider_generic_get_renders_url_template_fields() -> None:
     assert qs["custom"] == ["1"]
 
 
+def test_provider_generic_get_renders_nested_placeholder_fields() -> None:
+    receiver = NotificationWebhook(
+        id="g",
+        enabled=True,
+        provider=WebhookProvider.generic,
+        method=WebhookMethod.get,
+        url="https://example.com/hook?rule=${rule.name}&status=${alert.status}&user=${snapshot.data.low_users.0.name}",
+        payloadFields=[],
+    )
+
+    prepared = build_request(receiver, _balance_message())
+    qs = parse_qs(urlparse(prepared.url).query)
+
+    assert prepared.method == "GET"
+    assert prepared.body == b""
+    assert qs["rule"] == ["用户余额低"]
+    assert qs["status"] == ["firing"]
+    assert qs["user"] == ["idle@example.com"]
+
+
 def test_provider_slack_uses_text_field() -> None:
     receiver = NotificationWebhook(id="s", enabled=True, provider=WebhookProvider.slack, url="https://hooks.slack.com/x")
-    prepared = build_request(receiver, _message())
+    prepared = build_request(receiver, _balance_message())
     body = json.loads(prepared.body)
     assert "text" in body
-    assert "[WARNING]" in body["text"]
+    assert "blocks" in body
+    assert body["blocks"][0]["type"] == "header"
+    assert body["blocks"][0]["text"]["text"] == "告警触发 - 用户余额低"
+    assert body["blocks"][2]["fields"][0]["text"] == "*状态*\n告警触发"
 
 
 def test_provider_discord_uses_content_field() -> None:
     receiver = NotificationWebhook(id="d", enabled=True, provider=WebhookProvider.discord, url="https://discord.com/api/webhooks/1/x")
-    prepared = build_request(receiver, _message())
+    prepared = build_request(receiver, _balance_message())
     body = json.loads(prepared.body)
-    assert "content" in body
+    assert "embeds" in body
+    embed = body["embeds"][0]
+    assert embed["title"] == "告警触发 - 用户余额低"
+    assert embed["color"] == 15026253
+    assert embed["fields"][0]["name"] == "状态"
+    assert embed["fields"][0]["value"] == "告警触发"
 
 
 def test_provider_wecom_uses_msgtype_text() -> None:
     receiver = NotificationWebhook(id="w", enabled=True, provider=WebhookProvider.wecom, url="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x")
-    prepared = build_request(receiver, _message())
+    prepared = build_request(receiver, _balance_message())
     body = json.loads(prepared.body)
-    assert body["msgtype"] == "text"
-    assert "content" in body["text"]
+    assert body["msgtype"] == "markdown"
+    assert "告警触发 - 用户余额低" in body["markdown"]["content"]
+    assert "**状态**：告警触发" in body["markdown"]["content"]
 
 
 def test_provider_feishu_includes_sign_when_secret_present() -> None:
@@ -612,7 +707,8 @@ def test_provider_feishu_includes_sign_when_secret_present() -> None:
     )
     prepared = build_request(receiver, _message())
     body = json.loads(prepared.body)
-    assert body["msg_type"] == "text"
+    assert body["msg_type"] == "interactive"
+    assert body["card"]["header"]["title"]["content"] == "测试消息 - Account invalid"
     assert "timestamp" in body
     assert "sign" in body
     expected = base64.b64encode(
@@ -714,6 +810,27 @@ def test_provider_feishu_renders_interactive_card_template() -> None:
     assert "sign" in body
 
 
+def test_provider_feishu_default_card_renders_alert_context() -> None:
+    receiver = NotificationWebhook(
+        id="f",
+        enabled=True,
+        provider=WebhookProvider.feishu,
+        url="https://open.feishu.cn/open-apis/bot/v2/hook/x",
+    )
+
+    prepared = build_request(receiver, _balance_message())
+    body = json.loads(prepared.body)
+
+    assert body["msg_type"] == "interactive"
+    assert body["card"]["header"]["template"] == "red"
+    assert body["card"]["header"]["title"]["content"] == "告警触发 - 用户余额低"
+    fields = body["card"]["elements"][0]["fields"]
+    assert fields[0]["text"]["content"] == "**状态**\n告警触发"
+    assert fields[1]["text"]["content"] == "**等级**\nCritical"
+    assert fields[2]["text"]["content"] == "**规则**\n用户余额低"
+    assert fields[4]["text"]["content"] == "**当前值**\n3.0"
+
+
 def test_provider_feishu_template_preserves_full_placeholder_type() -> None:
     receiver = NotificationWebhook(
         id="f",
@@ -747,4 +864,6 @@ def test_provider_dingtalk_appends_sign_to_url() -> None:
     ).decode()
     assert qs["sign"][0] == expected
     body = json.loads(prepared.body)
-    assert body["msgtype"] == "text"
+    assert body["msgtype"] == "markdown"
+    assert body["markdown"]["title"] == "测试消息 - Account invalid"
+    assert "**状态**：测试消息" in body["markdown"]["text"]
