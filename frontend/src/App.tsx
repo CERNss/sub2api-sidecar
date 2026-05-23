@@ -2573,6 +2573,8 @@ function OperatorWorkspace() {
   const [upstreams, setUpstreams] = useState<UpstreamInfo[]>([]);
   const [selectedUpstreamId, setSelectedUpstreamId] = useState("default");
   const [logoutBusy, setLogoutBusy] = useState(false);
+  const selectedUpstream =
+    upstreams.find((upstream) => upstream.upstream_id === selectedUpstreamId) ?? upstreams[0] ?? null;
 
   useEffect(() => {
     async function loadUpstreams() {
@@ -2636,6 +2638,10 @@ function OperatorWorkspace() {
     }
   }
 
+  function changeSelectedUpstream(upstreamId: string) {
+    setSelectedUpstreamId(upstreamId);
+  }
+
   async function logout() {
     setLogoutBusy(true);
     try {
@@ -2659,9 +2665,35 @@ function OperatorWorkspace() {
   return (
     <main className="operator-stack">
       <section className="panel operator-toolbar">
-        <div>
+        <div className="operator-current-context">
           <p className="eyebrow">当前用户</p>
           <h2>{DEFAULT_AUTH_USERNAME}</h2>
+          <div className="upstream-switcher" aria-label="Sub2API 上游">
+            <span>Sub2API</span>
+            {upstreams.length > 1 ? (
+              <Select
+                aria-label="选择 Sub2API 上游"
+                value={selectedUpstreamId}
+                onChange={changeSelectedUpstream}
+                popupMatchSelectWidth={false}
+                className="upstream-switcher-select"
+                options={upstreams.map((upstream) => ({
+                  value: upstream.upstream_id,
+                  label: (
+                    <div className="upstream-option">
+                      <strong>{upstream.name}</strong>
+                      <small>{upstream.base_url}</small>
+                    </div>
+                  )
+                }))}
+              />
+            ) : selectedUpstream ? (
+              <strong>{selectedUpstream.name}</strong>
+            ) : (
+              <strong>未配置</strong>
+            )}
+            {selectedUpstream ? <code>{selectedUpstream.base_url}</code> : null}
+          </div>
         </div>
         <div className="toolbar-actions">
           <div className="segmented" role="tablist" aria-label="编排视图">
@@ -2727,16 +2759,12 @@ function OperatorWorkspace() {
         />
       ) : activeView === "keyTransfer" ? (
         <KeyTransferView
-          upstreams={upstreams}
           selectedUpstreamId={selectedUpstreamId}
-          onSelectedUpstreamIdChange={setSelectedUpstreamId}
           onAuthExpired={handleAuthExpired}
         />
       ) : activeView === "provision" ? (
         <ProvisionForm
-          upstreams={upstreams}
           selectedUpstreamId={selectedUpstreamId}
-          onSelectedUpstreamIdChange={setSelectedUpstreamId}
           onAuthExpired={handleAuthExpired}
           onFlowChanged={() => undefined}
         />
@@ -2744,9 +2772,7 @@ function OperatorWorkspace() {
         <ExistingOrchestrationView
           activeTab={activeOrchestrationTab}
           onTabChange={navigateOrchestrationTab}
-          upstreams={upstreams}
           selectedUpstreamId={selectedUpstreamId}
-          onSelectedUpstreamIdChange={setSelectedUpstreamId}
           onAuthExpired={handleAuthExpired}
         />
       )}
@@ -2755,14 +2781,10 @@ function OperatorWorkspace() {
 }
 
 function KeyTransferView({
-  upstreams,
   selectedUpstreamId,
-  onSelectedUpstreamIdChange,
   onAuthExpired
 }: {
-  upstreams: UpstreamInfo[];
   selectedUpstreamId: string;
-  onSelectedUpstreamIdChange: (upstreamId: string) => void;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [transferScope, setTransferScope] = useState<"admin" | "all_users">("admin");
@@ -2990,23 +3012,6 @@ function KeyTransferView({
           <h2>密钥转移</h2>
         </div>
         <Space wrap>
-          {upstreams.length > 1 ? (
-            <Select
-              aria-label="选择上游"
-              value={selectedUpstreamId}
-              onChange={(value) => {
-                onSelectedUpstreamIdChange(value);
-                setStatus(emptyStatus);
-              }}
-              style={{ minWidth: 180 }}
-              options={upstreams.map((upstream) => ({
-                value: upstream.upstream_id,
-                label: upstream.name
-              }))}
-            />
-          ) : upstreams[0] ? (
-            <Tag color="blue">{upstreams[0].name}</Tag>
-          ) : null}
           <Tag color={isAllUsersScope || selectedUser ? "green" : "default"}>
             {isAllUsersScope ? "全部用户" : selectedUser ? "admin 已定位" : "等待 admin"}
           </Tag>
@@ -3249,16 +3254,12 @@ function KeyTransferView({
 function ExistingOrchestrationView({
   activeTab,
   onTabChange,
-  upstreams,
   selectedUpstreamId,
-  onSelectedUpstreamIdChange,
   onAuthExpired
 }: {
   activeTab: OrchestrationTab;
   onTabChange: (tab: OrchestrationTab) => void;
-  upstreams: UpstreamInfo[];
   selectedUpstreamId: string;
-  onSelectedUpstreamIdChange: (upstreamId: string) => void;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [mode, setMode] = useState<OrchestrationMode>("replace_group");
@@ -3360,6 +3361,8 @@ function ExistingOrchestrationView({
     const primaryGroup = mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup;
     return primaryGroup ? [primaryGroup] : [];
   }, [mode, selectedKeyPrimaryGroup, selectedUserDirectGroup]);
+  const sourceGroupPlaceholder =
+    mode === "api_key" ? "所选 Key 无路由组" : selectedUser ? "无源分组，将直接分配" : "先选择用户";
   const targetGroups = useMemo(() => {
     const currentGroup = mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup;
     const currentGroupValue = idValue(currentGroup?.group_id);
@@ -4190,27 +4193,6 @@ function ExistingOrchestrationView({
             <Typography.Text strong>关系编排</Typography.Text>
           </Space>
           <Space wrap>
-            {upstreams.length > 1 ? (
-              <Select
-                aria-label="选择上游"
-                value={selectedUpstreamId}
-                onChange={(value) => {
-                  onSelectedUpstreamIdChange(value);
-                  setSelectedUserId("");
-                  setSelectedKeyIds([]);
-                  setApiKeys([]);
-                  setApiKeysByUserId({});
-                  updateGraphGroupFilters([]);
-                }}
-                style={{ minWidth: 180 }}
-                options={upstreams.map((upstream) => ({
-                  value: upstream.upstream_id,
-                  label: upstream.name
-                }))}
-              />
-            ) : upstreams[0] ? (
-              <Tag color="blue">{upstreams[0].name}</Tag>
-            ) : null}
             <AntSegmented
               value={activeTab}
               onChange={(value) => onTabChange(value as OrchestrationTab)}
@@ -4315,7 +4297,7 @@ function ExistingOrchestrationView({
                   <Select
                     className="group-select"
                     value={sourceGroupId || undefined}
-                    placeholder="当前用户无直接用户组"
+                    placeholder={sourceGroupPlaceholder}
                     disabled
                     optionFilterProp="searchText"
                     options={sourceGroupOptions}
@@ -6219,15 +6201,11 @@ function summarizeReasons(items?: RotationExecutionPayload[]): RunReasonSummary[
 }
 
 function ProvisionForm({
-  upstreams,
   selectedUpstreamId,
-  onSelectedUpstreamIdChange,
   onAuthExpired,
   onFlowChanged
 }: {
-  upstreams: UpstreamInfo[];
   selectedUpstreamId: string;
-  onSelectedUpstreamIdChange: (upstreamId: string) => void;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onFlowChanged: () => void;
 }) {
@@ -6319,24 +6297,6 @@ function ProvisionForm({
     <div className="workspace provision-workspace">
       <section className="panel form-panel provision-form-panel">
         <form className="form-stack" onSubmit={startProvision}>
-          {upstreams.length > 1 ? (
-            <label className="field">
-              <span>上游</span>
-              <Select
-                value={selectedUpstreamId}
-                onChange={onSelectedUpstreamIdChange}
-                options={upstreams.map((upstream) => ({
-                  value: upstream.upstream_id,
-                  label: upstream.name
-                }))}
-              />
-            </label>
-          ) : upstreams[0] ? (
-            <div className="summary-strip">
-              <span>上游</span>
-              <strong>{upstreams[0].name}</strong>
-            </div>
-          ) : null}
           <label className="field">
             <span>Email</span>
             <input

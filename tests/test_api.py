@@ -1639,6 +1639,60 @@ def test_sub2api_login_exchanges_admin_jwt_for_sidecar_session(client) -> None:
     ]
 
 
+def test_sub2api_login_uses_default_upstream_only(client, tmp_path, monkeypatch, app_env) -> None:
+    config_path = tmp_path / "multi-upstream-login.yaml"
+    config_path.write_text(
+        f"""
+{database_config_from_app_env(app_env)}
+app:
+  base_url: http://testserver
+openai:
+  oauth_redirect_uri: http://localhost:1455/callback
+sub2api:
+  upstreams:
+    - id: main
+      name: Main Sub2API
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: secondary
+      name: Secondary Sub2API
+      base_url: http://secondary-sub2api.local
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
+    monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-secret")
+    clear_caches()
+    calls: list[str] = []
+
+    def fake_request(method: str, url: str, headers=None, timeout=None):
+        calls.append(url)
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "id": 1,
+                    "email": "admin@example.com",
+                    "username": "admin-user",
+                    "role": "admin",
+                },
+            },
+        )
+
+    with patch.object(requests, "request", new=fake_request):
+        response = client.post("/auth/sub2api-login", json={"token": "jwt-123"})
+
+    assert response.status_code == 200
+    assert calls == ["http://main-sub2api.local/api/v1/auth/me"]
+
+    monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
+    clear_caches()
+
+
 def test_sub2api_login_rejects_non_admin_jwt(client) -> None:
     def fake_request(method: str, url: str, headers=None, timeout=None):
         return FakeResponse(

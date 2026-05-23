@@ -26,8 +26,10 @@ from app.models.operational_data import (
     OperationalMetricSample,
 )
 from app.services.operational_data import (
+    MultiUpstreamOperationalDataCollector,
     OperationalDataCollectionResult,
     OperationalDataCollector,
+    UpstreamOperationalDataCollector,
 )
 from app.services.notification_collector import (
     CollectorRegistry,
@@ -692,6 +694,43 @@ def test_operational_data_collector_records_source_failures(client) -> None:
     assert "groups unavailable" in statuses["groups"].error_message
     assert result.error_message is not None
     assert main.get_flow_store().get_latest_operational_metric_sample("account_invalid")
+
+
+def test_multi_upstream_operational_data_collector_prefixes_secondary_sources(client) -> None:
+    primary = OperationalDataCollector(
+        client=_FakeSub2APIClient(),
+        store=main.get_flow_store(),
+    )
+    secondary = OperationalDataCollector(
+        client=_FakeSub2APIClient(),
+        store=main.get_flow_store(),
+        source_key_prefix="upstream:secondary:",
+        metric_key_prefix="upstream:secondary:",
+    )
+    collector = MultiUpstreamOperationalDataCollector(
+        [
+            UpstreamOperationalDataCollector(
+                upstream_id="main",
+                name="主站 Sub2API",
+                collector=primary,
+            ),
+            UpstreamOperationalDataCollector(
+                upstream_id="secondary",
+                name="从站 Sub2API",
+                collector=secondary,
+            ),
+        ]
+    )
+
+    result = collector.collect(now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc))
+
+    source_keys = {status.source_key for status in result.source_statuses}
+    assert "accounts" in source_keys
+    assert "upstream:secondary:accounts" in source_keys
+    assert main.get_flow_store().get_latest_operational_metric_sample("account_invalid") is not None
+    assert main.get_flow_store().get_latest_operational_metric_sample("upstream:secondary:account_invalid") is not None
+    assert main.get_flow_store().get_latest_operational_data_snapshot("accounts") is not None
+    assert main.get_flow_store().get_latest_operational_data_snapshot("upstream:secondary:accounts") is not None
 
 
 def test_notification_refresh_samples_runs_operational_data_cleanup(client) -> None:

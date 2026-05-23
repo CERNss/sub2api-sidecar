@@ -140,7 +140,11 @@ from app.services.notification import (
     redact_settings,
 )
 from app.services.notification_delivery import NotificationDeliveryService
-from app.services.operational_data import OperationalDataCollector
+from app.services.operational_data import (
+    MultiUpstreamOperationalDataCollector,
+    OperationalDataCollector,
+    UpstreamOperationalDataCollector,
+)
 from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
 from app.services.rotation import KeyTransferRun, RotationExecutionResult, RotationService
@@ -308,12 +312,32 @@ def get_provisioning_service() -> ProvisioningService:
 @lru_cache(maxsize=1)
 def get_notification_service() -> NotificationService:
     store = get_flow_store()
+    settings = get_settings()
     return NotificationService(
         store=store,
         delivery=NotificationDeliveryService(store=store),
-        operational_data_collector=OperationalDataCollector(
-            client=get_sub2api_client(),
-            store=store,
+        operational_data_collector=MultiUpstreamOperationalDataCollector(
+            [
+                UpstreamOperationalDataCollector(
+                    upstream_id=upstream.upstream_id,
+                    name=upstream.name,
+                    collector=OperationalDataCollector(
+                        client=get_sub2api_client(upstream.upstream_id),
+                        store=store,
+                        source_key_prefix=(
+                            ""
+                            if upstream.upstream_id == settings.default_sub2api_upstream_id
+                            else f"upstream:{upstream.upstream_id}:"
+                        ),
+                        metric_key_prefix=(
+                            ""
+                            if upstream.upstream_id == settings.default_sub2api_upstream_id
+                            else f"upstream:{upstream.upstream_id}:"
+                        ),
+                    ),
+                )
+                for upstream in settings.sub2api_upstreams
+            ]
         ),
     )
 

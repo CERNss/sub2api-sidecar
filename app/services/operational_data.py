@@ -68,10 +68,14 @@ class OperationalDataCollector:
         client: Sub2APIClient,
         store: PostgresFlowStore,
         timezone_name: str = LOCAL_TIMEZONE,
+        source_key_prefix: str = "",
+        metric_key_prefix: str = "",
     ) -> None:
         self.client = client
         self.store = store
         self.timezone_name = timezone_name
+        self.source_key_prefix = source_key_prefix
+        self.metric_key_prefix = metric_key_prefix
 
     def collect(self, *, now: datetime | None = None) -> OperationalDataCollectionResult:
         started_at = now or datetime.now(timezone.utc)
@@ -222,12 +226,13 @@ class OperationalDataCollector:
         item_count: Callable[[Any], int],
     ) -> tuple[Any | None, OperationalDataSourceStatus]:
         started_at = datetime.now(timezone.utc)
+        status_source_key = self._source_key(source_key)
         try:
             value = fetch()
         except Exception as exc:
             finished_at = datetime.now(timezone.utc)
             status = OperationalDataSourceStatus(
-                source_key=source_key,
+                source_key=status_source_key,
                 status="failed",
                 started_at=started_at,
                 finished_at=finished_at,
@@ -238,14 +243,14 @@ class OperationalDataCollector:
             self.store.save_operational_data_source_status(status)
             logger.warning(
                 "Notification sample source failed | source=%s error=%s",
-                source_key,
+                status_source_key,
                 exc,
             )
             return None, status
 
         finished_at = datetime.now(timezone.utc)
         status = OperationalDataSourceStatus(
-            source_key=source_key,
+            source_key=status_source_key,
             status="succeeded",
             started_at=started_at,
             finished_at=finished_at,
@@ -436,7 +441,7 @@ class OperationalDataCollector:
                 return
             samples.append(
                 OperationalMetricSample(
-                    metric_key=metric_key,
+                    metric_key=self._metric_key(metric_key),
                     value=sample.value,
                     scope_key=sample.scope_key,
                     scope_label=sample.scope_label,
@@ -551,12 +556,75 @@ class OperationalDataCollector:
                 continue
             self.store.save_operational_data_snapshot(
                 OperationalDataSnapshot(
-                    source_key=source_key,
+                    source_key=self._source_key(source_key),
                     observed_at=observed_at,
                     collected_at=collected_at,
                     payload=payload,
                 )
             )
+
+    def _source_key(self, source_key: str) -> str:
+        return f"{self.source_key_prefix}{source_key}"
+
+    def _metric_key(self, metric_key: str) -> str:
+        return f"{self.metric_key_prefix}{metric_key}"
+
+
+@dataclass(frozen=True)
+class UpstreamOperationalDataCollector:
+    upstream_id: str
+    name: str
+    collector: OperationalDataCollector
+
+
+class MultiUpstreamOperationalDataCollector:
+    def __init__(self, collectors: list[UpstreamOperationalDataCollector]) -> None:
+        self.collectors = collectors
+
+    def collect(self, *, now: datetime | None = None) -> OperationalDataCollectionResult:
+        started_at = now or datetime.now(timezone.utc)
+        samples: list[OperationalMetricSample] = []
+        source_statuses: list[OperationalDataSourceStatus] = []
+        errors: list[str] = []
+
+        for target in self.collectors:
+            try:
+                result = target.collector.collect(now=started_at)
+            except Exception as exc:
+                finished_at = datetime.now(timezone.utc)
+                source_statuses.append(
+                    OperationalDataSourceStatus(
+                        source_key=target.collector._source_key("collector"),
+                        status="failed",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        error_message=str(exc),
+                        item_count=None,
+                        updated_at=finished_at,
+                    )
+                )
+                target.collector.store.save_operational_data_source_status(source_statuses[-1])
+                errors.append(f"{target.upstream_id}: {exc}")
+                logger.exception(
+                    "Operational data collector failed | upstream_id=%s name=%s",
+                    target.upstream_id,
+                    target.name,
+                )
+                continue
+
+            samples.extend(result.samples)
+            source_statuses.extend(result.source_statuses)
+            if result.error_message:
+                errors.append(f"{target.upstream_id}: {result.error_message}")
+
+        finished_at = datetime.now(timezone.utc)
+        return OperationalDataCollectionResult(
+            samples=samples,
+            source_statuses=source_statuses,
+            started_at=started_at,
+            finished_at=finished_at,
+            error_message="; ".join(errors) if errors else None,
+        )
 
 
 def _usage_item_count(value: Any) -> int:

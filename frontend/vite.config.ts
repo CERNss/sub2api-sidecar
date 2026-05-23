@@ -70,6 +70,19 @@ const mockUsers = [
     has_local_assignment: false
   },
   {
+    user_id: "user-ungrouped",
+    email: "ungrouped@example.com",
+    name: "ungrouped",
+    username: "ungrouped",
+    display_name: "Ungrouped User",
+    status: "active",
+    current_group_id: null,
+    current_group_name: null,
+    local_group_id: null,
+    local_group_name: null,
+    has_local_assignment: false
+  },
+  {
     user_id: "user-qiao",
     email: "qiao@example.com",
     name: "qiao",
@@ -232,6 +245,27 @@ function keyTransferMockApi(): Plugin {
           });
           return;
         }
+        if (method === "GET" && url.pathname === "/api/upstreams") {
+          sendJson(response, {
+            success: true,
+            default_upstream_id: "main",
+            items: [
+              {
+                upstream_id: "main",
+                name: "主站 Sub2API",
+                base_url: "http://sub2api-main:8080",
+                is_default: true
+              },
+              {
+                upstream_id: "secondary",
+                name: "从站 Sub2API",
+                base_url: "http://sub2api-secondary:8080",
+                is_default: false
+              }
+            ]
+          });
+          return;
+        }
         if (method === "GET" && url.pathname === "/api/operational-data/status") {
           sendJson(response, {
             success: true,
@@ -260,6 +294,45 @@ function keyTransferMockApi(): Plugin {
           });
           return;
         }
+        if (method === "GET" && url.pathname === "/orchestration/groups") {
+          sendJson(response, {
+            success: true,
+            upstream_id: url.searchParams.get("upstream_id") || "main",
+            items: [
+              {
+                group_id: "grp-admin",
+                name: "Admin Holding",
+                group_kind: "exclusive",
+                platform: "openai",
+                status: "active",
+                is_exclusive: true,
+                is_subscription: false,
+                rotation_supported: true,
+                unsupported_reason: null
+              },
+              {
+                group_id: "grp-codex-a",
+                name: "Codex 可用组 A",
+                group_kind: "exclusive",
+                platform: "openai",
+                status: "active",
+                is_exclusive: true,
+                is_subscription: false,
+                rotation_supported: true,
+                unsupported_reason: null
+              }
+            ]
+          });
+          return;
+        }
+        if (method === "GET" && url.pathname === "/orchestration/accounts") {
+          sendJson(response, {
+            success: true,
+            upstream_id: url.searchParams.get("upstream_id") || "main",
+            items: []
+          });
+          return;
+        }
         if (method === "GET" && url.pathname === "/orchestration/users") {
           const search = (url.searchParams.get("email") ?? "").toLowerCase();
           const items = mockUsers.filter((user) =>
@@ -270,8 +343,41 @@ function keyTransferMockApi(): Plugin {
           sendJson(response, { success: true, items, total: items.length });
           return;
         }
-        if (method === "GET" && url.pathname === "/orchestration/users/admin-001/api-keys") {
+        if (method === "GET" && url.pathname.startsWith("/orchestration/users/") && url.pathname.endsWith("/api-keys")) {
           sendJson(response, { success: true, items: mockSourceKeys, total: mockSourceKeys.length });
+          return;
+        }
+        if (method === "POST" && url.pathname === "/orchestration/assignments/replace-group") {
+          let body = "";
+          devRequest.on("data", (chunk) => {
+            body += String(chunk);
+          });
+          devRequest.on("end", () => {
+            const payload = body
+              ? JSON.parse(body) as {
+                  user_id?: unknown;
+                  email?: string;
+                  source_group_id?: unknown | null;
+                  target_group_id?: unknown | null;
+                  reason?: string;
+                }
+              : {};
+            sendJson(response, {
+              success: true,
+              run_id: "mock-manual-user-group",
+              run_kind: "manual",
+              tag: "manual_user_group",
+              user_id: payload.user_id ?? "user-ungrouped",
+              email: payload.email ?? "ungrouped@example.com",
+              source_group_id: payload.source_group_id ?? null,
+              target_group_id: payload.target_group_id ?? "grp-codex-a",
+              trigger_type: "manual",
+              status: "moved",
+              reason: payload.reason || "mock direct assignment",
+              migrated_keys: 0,
+              metadata: null
+            });
+          });
           return;
         }
         if (

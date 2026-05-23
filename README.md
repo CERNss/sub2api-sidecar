@@ -273,16 +273,16 @@ sub2api:
   request_timeout_seconds: 30
   upstreams:
     - id: main
-      name: Main Sub2API
+      name: 主站 Sub2API
       base_url: http://sub2api-main:8080
       admin_api_key_env: SUB2API_ADMIN_API_KEY
-    - id: backup
-      name: Backup Sub2API
-      base_url: http://sub2api-backup:8080
-      admin_api_key_env: SUB2API_BACKUP_ADMIN_API_KEY
+    - id: secondary
+      name: 从站 Sub2API
+      base_url: http://sub2api-secondary:8080
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
 ```
 
-第一个 upstream 是默认上游；旧 API 不传 `upstream_id` 时会继续使用它。登录后的用户分组编排、密钥转移和 OAuth 预配页面会显示上游选择器；也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集、余额管理、用量分层、自动轮换等后台服务当前仍只跑默认上游，后续需要做数据分区和调度 fan-out 后再扩展到多上游。
+第一个 upstream 是默认上游，也是 Sub2API 跳转携带 `token` 登录 sidecar 时唯一验证 JWT 的主站；后续 upstream 按从站处理，不参与跳转 token 登录。登录后的顶部“当前用户”区域会显示全局 Sub2API 切换器，切换目标后，用户分组编排、密钥转移和 OAuth 预配会把对应 `upstream_id` 发给后端并访问该从站。也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集会遍历所有 upstream：主站继续写入原有 source/metric key，从站写入 `upstream:<id>:` 前缀的 source/metric key，避免不同站点数据混在一起；余额管理、用量分层、自动轮换仍消费主站的兼容 key。
 
 ### Nginx Proxy Manager 子路径部署
 

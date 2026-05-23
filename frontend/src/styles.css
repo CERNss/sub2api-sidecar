@@ -474,6 +474,61 @@ pre {
   gap: 16px;
 }
 
+.operator-current-context {
+  min-width: min(100%, 360px);
+  display: grid;
+  gap: 8px;
+}
+
+.upstream-switcher {
+  display: grid;
+  grid-template-columns: auto minmax(150px, max-content);
+  align-items: center;
+  gap: 6px 10px;
+  color: #526174;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.upstream-switcher > code {
+  grid-column: 1 / -1;
+  max-width: min(66vw, 420px);
+  padding: 3px 7px;
+  border: 1px solid #dbe4ee;
+  border-radius: 6px;
+  overflow: hidden;
+  color: #334155;
+  background: #f8fafc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upstream-switcher-select {
+  min-width: min(56vw, 260px);
+}
+
+.upstream-option {
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+}
+
+.upstream-option strong,
+.upstream-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upstream-option small {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .toolbar-actions {
   display: flex;
   align-items: center;
