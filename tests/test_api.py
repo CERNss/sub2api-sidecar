@@ -213,6 +213,8 @@ class FakeRotationSub2API:
             },
         ]
         self.user_api_keys: dict[int, list[dict[str, object]]] = {}
+        self.users_page_size: int | None = None
+        self.api_keys_page_size: int | None = None
         self.replace_calls: list[dict[str, object]] = []
         self.set_user_group_calls: list[dict[str, object]] = []
         self.api_key_group_calls: list[dict[str, object]] = []
@@ -289,6 +291,26 @@ class FakeRotationSub2API:
         if method == "GET" and path == "/api/v1/admin/groups/all":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.groups})
         if method == "GET" and path == "/api/v1/admin/users":
+            if self.users_page_size:
+                page = int((params or {}).get("page") or 1)
+                page_size = int((params or {}).get("page_size") or self.users_page_size)
+                start = (page - 1) * page_size
+                items = self.users[start : start + page_size]
+                pages = (len(self.users) + page_size - 1) // page_size
+                return FakeResponse(
+                    200,
+                    {
+                        "code": 0,
+                        "message": "success",
+                        "data": {
+                            "items": items,
+                            "total": len(self.users),
+                            "page": page,
+                            "page_size": page_size,
+                            "pages": pages,
+                        },
+                    },
+                )
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
         if method == "POST" and path.startswith("/api/v1/admin/users/") and path.endswith("/balance"):
             user_id = int(path.split("/")[5])
@@ -467,7 +489,7 @@ class FakeRotationSub2API:
             self.api_key_group_calls.append({"key_id": key_id, "group_id": json["group_id"]})
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "GET" and path.startswith("/api/v1/admin/users/") and path.endswith("/api-keys"):
-            return self._api_keys_response(int(path.split("/")[5]))
+            return self._api_keys_response(int(path.split("/")[5]), params=params)
         if method == "GET" and path == "/api/v1/admin/usage/stats":
             return FakeResponse(
                 200,
@@ -512,7 +534,7 @@ class FakeRotationSub2API:
             )
         return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
 
-    def _api_keys_response(self, user_id: int) -> FakeResponse:
+    def _api_keys_response(self, user_id: int, params=None) -> FakeResponse:
         items = self.user_api_keys.get(
             user_id,
             [
@@ -527,17 +549,25 @@ class FakeRotationSub2API:
                 }
             ],
         )
+        page = int((params or {}).get("page") or 1)
+        page_size = int((params or {}).get("page_size") or self.api_keys_page_size or 1000)
+        if self.api_keys_page_size:
+            start = (page - 1) * page_size
+            page_items = items[start : start + page_size]
+        else:
+            page_items = items
+        pages = (len(items) + page_size - 1) // page_size if page_size else 1
         return FakeResponse(
             200,
             {
                 "code": 0,
                 "message": "success",
                 "data": {
-                    "items": items,
+                    "items": page_items,
                     "total": len(items),
-                    "page": 1,
-                    "page_size": 1000,
-                    "pages": 1,
+                    "page": page,
+                    "page_size": page_size,
+                    "pages": pages,
                 },
             },
         )
@@ -849,6 +879,87 @@ def test_sub2api_client_updates_single_api_key_group_with_admin_endpoint() -> No
             "path": "/api/v1/admin/api-keys/key-1",
             "json": {"group_id": 123},
         }
+    ]
+
+
+def test_sub2api_client_lists_all_user_api_keys_with_user_context() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        calls.append({"method": method, "path": path, "params": dict(params or {})})
+        if path == "/api/v1/admin/users":
+            page = int(params["page"])
+            users = [
+                {"id": 1, "email": "admin@example.com", "name": "Admin"},
+                {"id": 2, "email": "source@example.com", "name": "Source"},
+            ]
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "items": [users[page - 1]],
+                        "total": 2,
+                        "page": page,
+                        "page_size": 1,
+                        "pages": 2,
+                    },
+                },
+            )
+        if path == "/api/v1/admin/users/1/api-keys":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "items": [{"id": "admin-key", "name": "admin-key"}],
+                        "total": 1,
+                        "page": 1,
+                        "page_size": 1,
+                        "pages": 1,
+                    },
+                },
+            )
+        if path == "/api/v1/admin/users/2/api-keys":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "items": [{"id": "source-key", "name": "source-key"}],
+                        "total": 1,
+                        "page": 1,
+                        "page_size": 1,
+                        "pages": 1,
+                    },
+                },
+            )
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.list_all_user_api_keys(page_size=1)
+
+    assert result["total"] == 2
+    keys_by_id = {item["id"]: item for item in result["items"]}
+    assert keys_by_id["admin-key"]["user_id"] == 1
+    assert keys_by_id["admin-key"]["owner_email"] == "admin@example.com"
+    assert keys_by_id["source-key"]["user_id"] == 2
+    assert keys_by_id["source-key"]["owner_email"] == "source@example.com"
+    assert [call["path"] for call in calls] == [
+        "/api/v1/admin/users",
+        "/api/v1/admin/users",
+        "/api/v1/admin/users/1/api-keys",
+        "/api/v1/admin/users/2/api-keys",
     ]
 
 
@@ -2413,6 +2524,125 @@ def test_key_transfer_accepts_any_service_object_version_email_prefix(client) ->
     assert statuses["xuzhilin"] == "planned"
     assert statuses["luozhaobin"] == "planned"
     assert statuses["invalid-email"] == "skipped"
+
+
+def test_all_user_api_keys_endpoint_aggregates_paginated_users_and_keys(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+        },
+        {
+            "id": 2,
+            "email": "source@example.com",
+            "name": "Source",
+            "status": "active",
+            "group_id": 22,
+        },
+    ]
+    backend.users_page_size = 1
+    backend.api_keys_page_size = 1
+    backend.user_api_keys[1] = [
+        {"id": "admin-a", "user_id": 1, "name": "admin-a", "group_id": 11},
+        {"id": "admin-b", "user_id": 1, "name": "admin-b", "group_id": 11},
+    ]
+    backend.user_api_keys[2] = [
+        {"id": "source-a", "user_id": 2, "name": "source-a", "group_id": 22},
+    ]
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.get("/orchestration/api-keys")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    keys_by_id = {item["key_id"]: item for item in payload["items"]}
+    assert keys_by_id["admin-a"]["user_email"] == "admin@example.com"
+    assert keys_by_id["source-a"]["user_id"] == 2
+    assert keys_by_id["source-a"]["user_email"] == "source@example.com"
+
+
+def test_key_transfer_all_users_moves_matching_keys_from_non_admin_sources(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+        },
+        {
+            "id": 2,
+            "email": "source@example.com",
+            "name": "Source",
+            "status": "active",
+            "group_id": 11,
+        },
+        {
+            "id": 202,
+            "email": "idle@example.com",
+            "name": "idle@example.com",
+            "status": "active",
+            "group_id": 22,
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": "admin-key",
+            "user_id": 1,
+            "key": "sk-admin",
+            "name": "rotom:codex:v1:missing@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        }
+    ]
+    backend.user_api_keys[2] = [
+        {
+            "id": "source-key",
+            "user_id": 2,
+            "key": "sk-source",
+            "name": "rotom:codex:v1:idle@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        }
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={
+                "scope": "all_users",
+                "dry_run": False,
+                "key_ids": ["source-key"],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "all_users"
+    assert payload["source_user_id"] is None
+    assert payload["moved_count"] == 1
+    assert payload["items"][0]["source_user_id"] == 2
+    assert payload["items"][0]["target_user_id"] == 202
+    assert backend.api_key_owner_calls == [
+        {
+            "key_id": "source-key",
+            "user_id": 202,
+            "group_id": 22,
+            "quota": 0.0,
+            "reset_quota": True,
+        }
+    ]
+    assert [key["id"] for key in backend.user_api_keys[2]] == []
+    assert backend.user_api_keys[202][-1]["key"] == "sk-source"
 
 
 def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) -> None:

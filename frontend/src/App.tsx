@@ -355,6 +355,8 @@ type OrchestrationGraphData = {
 type OrchestrationApiKey = {
   key_id: unknown;
   name: string | null;
+  user_id?: unknown | null;
+  user_email?: string | null;
   group_id: unknown | null;
   group_name: string | null;
   status: string | null;
@@ -402,7 +404,8 @@ type KeyTransferPayload = ApiPayload & {
   run_kind?: string | null;
   tag?: string | null;
   dry_run: boolean;
-  source_user_id: unknown;
+  source_user_id: unknown | null;
+  scope: string;
   key_name_pattern: string;
   planned_count: number;
   moved_count: number;
@@ -1345,6 +1348,18 @@ function apiKeyRouteLabel(key: OrchestrationApiKey): string {
   }
   const groupName = key.group_name?.trim();
   return groupName ? `路由组 ${groupName} (${groupId})` : `路由组 ${groupId}`;
+}
+
+function apiKeyOwnerLabel(key: OrchestrationApiKey): string {
+  const userId = idValue(key.user_id);
+  const email = key.user_email?.trim();
+  if (email && userId) {
+    return `${email} · User ${userId}`;
+  }
+  if (email) {
+    return email;
+  }
+  return userId ? `User ${userId}` : "未知用户";
 }
 
 function userDirectGroupLabel(user: OrchestrationUser): string {
@@ -2689,6 +2704,7 @@ function KeyTransferView({
 }: {
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
+  const [transferScope, setTransferScope] = useState<"admin" | "all_users">("admin");
   const [sourceSearch, setSourceSearch] = useState(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
   const [users, setUsers] = useState<OrchestrationUser[]>([]);
   const [sourceUserId, setSourceUserId] = useState("");
@@ -2710,6 +2726,7 @@ function KeyTransferView({
   const allTransferKeysSelected =
     transferKeyIds.length > 0 && transferKeyIds.every((keyId) => selectedTransferKeySet.has(keyId));
   const userOptions = users.map(buildUserOption);
+  const isAllUsersScope = transferScope === "all_users";
 
   async function loadSourceUsers(searchOverride = sourceSearch) {
     const searchTerm = searchOverride.trim() || DEFAULT_KEY_TRANSFER_SOURCE_SEARCH;
@@ -2750,6 +2767,35 @@ function KeyTransferView({
     options: { clearResult?: boolean } = {}
   ) {
     const shouldClearResult = options.clearResult ?? true;
+    if (isAllUsersScope) {
+      setLoadingKeys(true);
+      try {
+        const payload = await requestJson<OrchestrationApiKeysPayload>(
+          "/orchestration/api-keys",
+          { method: "GET" },
+          "加载全部用户 API Keys 失败"
+        );
+        setApiKeys(payload.items);
+        if (shouldClearResult) {
+          setTransferResult(null);
+        }
+        setStatus({
+          message: `已加载全部用户 ${payload.total} 个 Key`,
+          tone: payload.total > 0 ? "success" : "info"
+        });
+      } catch (error: unknown) {
+        if (!onAuthExpired(error, setStatus)) {
+          setApiKeys([]);
+          if (shouldClearResult) {
+            setTransferResult(null);
+          }
+          setStatus({ message: getErrorMessage(error, "加载全部用户 API Keys 失败"), tone: "error" });
+        }
+      } finally {
+        setLoadingKeys(false);
+      }
+      return;
+    }
     if (!userId) {
       setApiKeys([]);
       if (shouldClearResult) {
@@ -2789,7 +2835,7 @@ function KeyTransferView({
     setSelectedKeyIds([]);
     setTransferResult(null);
     void loadSourceKeys(sourceUserId);
-  }, [sourceUserId]);
+  }, [sourceUserId, transferScope]);
 
   useEffect(() => {
     const allowedIds = new Set(transferKeyIds);
@@ -2812,7 +2858,7 @@ function KeyTransferView({
   }
 
   async function runKeyTransfer(dryRun: boolean) {
-    if (!selectedUser) {
+    if (!isAllUsersScope && !selectedUser) {
       setStatus({ message: "请先定位 admin 源用户。", tone: "error" });
       return;
     }
@@ -2832,10 +2878,17 @@ function KeyTransferView({
         {
           method: "POST",
           body: JSON.stringify({
-            source_user_id: selectedUser.user_id,
+            source_user_id: isAllUsersScope ? null : selectedUser?.user_id,
             key_ids: selectedKeyIds,
             dry_run: dryRun,
-            reason: selectedKeyIds.length === 1 ? "密钥转移单个 Key" : "密钥转移多个 Key"
+            scope: transferScope,
+            reason: isAllUsersScope
+              ? selectedKeyIds.length === 1
+                ? "全用户密钥转移单个 Key"
+                : "全用户密钥转移多个 Key"
+              : selectedKeyIds.length === 1
+              ? "密钥转移单个 Key"
+              : "密钥转移多个 Key"
           })
         },
         dryRun ? "密钥转移预览失败" : "密钥转移失败"
@@ -2849,7 +2902,7 @@ function KeyTransferView({
         tone: payload.failed_count > 0 ? "error" : payload.planned_count + payload.moved_count + payload.skipped_count > 0 ? "success" : "info"
       });
       if (!dryRun) {
-        await loadSourceKeys(idValue(selectedUser.user_id), { clearResult: false });
+        await loadSourceKeys(isAllUsersScope ? "" : idValue(selectedUser?.user_id), { clearResult: false });
         setSelectedKeyIds([]);
       }
     } catch (error: unknown) {
@@ -2869,7 +2922,9 @@ function KeyTransferView({
           <h2>密钥转移</h2>
         </div>
         <Space wrap>
-          <Tag color={selectedUser ? "green" : "default"}>{selectedUser ? "admin 已定位" : "等待 admin"}</Tag>
+          <Tag color={isAllUsersScope || selectedUser ? "green" : "default"}>
+            {isAllUsersScope ? "全部用户" : selectedUser ? "admin 已定位" : "等待 admin"}
+          </Tag>
           <Tag color={transferKeys.length > 0 ? "blue" : "default"}>{transferKeys.length} 个可转移 Key</Tag>
           <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>已选 {selectedKeyIds.length}</Tag>
         </Space>
@@ -2880,23 +2935,39 @@ function KeyTransferView({
           <div className="data-sync-pane-head">
             <Space>
               <UserOutlined />
-              <Typography.Text strong>admin 源用户</Typography.Text>
+              <Typography.Text strong>扫描范围</Typography.Text>
             </Space>
             <AntButton
               size="small"
               icon={<ReloadOutlined />}
-              loading={loadingUsers}
-              onClick={() => void loadSourceUsers()}
+              loading={isAllUsersScope ? loadingKeys : loadingUsers}
+              onClick={() => {
+                if (isAllUsersScope) {
+                  void loadSourceKeys();
+                } else {
+                  void loadSourceUsers();
+                }
+              }}
             >
               刷新
             </AntButton>
           </div>
+          <AntSegmented
+            block
+            value={transferScope}
+            options={[
+              { label: "admin 用户", value: "admin" },
+              { label: "全部用户", value: "all_users" }
+            ]}
+            onChange={(value) => setTransferScope(value as "admin" | "all_users")}
+          />
           <div className="data-sync-source-row">
             <Input.Search
               value={sourceSearch}
               placeholder="admin / admin@example.com"
               enterButton="查询"
               loading={loadingUsers}
+              disabled={isAllUsersScope}
               onChange={(event) => setSourceSearch(event.target.value)}
               onSearch={(value) => {
                 setSourceSearch(value || DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
@@ -2907,6 +2978,7 @@ function KeyTransferView({
               value={sourceUserId || undefined}
               placeholder="选择 admin 用户"
               loading={loadingUsers}
+              disabled={isAllUsersScope}
               options={userOptions}
               optionFilterProp="searchText"
               optionRender={renderUserOption}
@@ -2915,15 +2987,19 @@ function KeyTransferView({
             />
           </div>
           <div className="summary-grid data-sync-summary-grid">
-            <SummaryItem label="User ID" value={unknownToText(selectedUser?.user_id)} />
-            <SummaryItem label="Email" value={selectedUser?.email || "-"} />
-            <SummaryItem label="admin 分组" value={selectedUser?.current_group_name || unknownToText(selectedUser?.current_group_id)} />
+            <SummaryItem label="范围" value={isAllUsersScope ? "全部用户" : "admin 用户"} />
+            <SummaryItem label="源用户" value={isAllUsersScope ? "N+1 聚合" : unknownToText(selectedUser?.user_id)} />
+            <SummaryItem label="Email" value={isAllUsersScope ? "全部" : selectedUser?.email || "-"} />
             <SummaryItem label="已选 Key" value={`${selectedKeyIds.length} / ${transferKeys.length}`} />
           </div>
           <Alert
             showIcon
             type="info"
-            message={`选择 admin 用户下 ${KEY_TRANSFER_NAME_PATTERN} 格式的 Key 后，可按单个或多个执行转移；系统会按邮箱找到已有目标用户，改到目标用户第一个可用分组，并移除 Key 额度限制。`}
+            message={
+              isAllUsersScope
+                ? `扫描全部用户下 ${KEY_TRANSFER_NAME_PATTERN} 格式的 Key；系统逐个读取用户 Key 后按邮箱解析目标用户。`
+                : `选择 admin 用户下 ${KEY_TRANSFER_NAME_PATTERN} 格式的 Key 后，可按单个或多个执行转移；系统会按邮箱找到已有目标用户，改到目标用户第一个可用分组，并移除 Key 额度限制。`
+            }
           />
         </section>
 
@@ -2943,7 +3019,7 @@ function KeyTransferView({
             <AntButton
               icon={<Search />}
               loading={submitting === "preview"}
-              disabled={!selectedUser || selectedKeyIds.length === 0 || submitting !== null}
+              disabled={(!isAllUsersScope && !selectedUser) || selectedKeyIds.length === 0 || submitting !== null}
               onClick={() => void runKeyTransfer(true)}
             >
               预览选中
@@ -2952,7 +3028,7 @@ function KeyTransferView({
               type="primary"
               icon={<SyncOutlined />}
               loading={submitting === "execute"}
-              disabled={!selectedUser || selectedKeyIds.length === 0 || submitting !== null}
+              disabled={(!isAllUsersScope && !selectedUser) || selectedKeyIds.length === 0 || submitting !== null}
               onClick={() => void runKeyTransfer(false)}
             >
               转移选中
@@ -2960,7 +3036,7 @@ function KeyTransferView({
             <AntButton
               icon={<ReloadOutlined />}
               loading={loadingKeys}
-              disabled={!selectedUser}
+              disabled={!isAllUsersScope && !selectedUser}
               onClick={() => void loadSourceKeys()}
             >
               刷新 Key
@@ -3037,6 +3113,7 @@ function KeyTransferView({
             pagination={{ pageSize: 8, hideOnSinglePage: true }}
             columns={[
               { title: "Key", dataIndex: "key_name", render: (value, item) => value || unknownToText(item.key_id) },
+              { title: "源用户", dataIndex: "source_user_id", render: (value) => unknownToText(value) },
               { title: "目标邮箱", dataIndex: "target_email", render: (value) => value || "-" },
               { title: "目标用户", dataIndex: "target_user_id", render: (value) => unknownToText(value) },
               { title: "目标分组", dataIndex: "target_group_id", render: (value) => unknownToText(value) },
@@ -3053,7 +3130,7 @@ function KeyTransferView({
             className="data-sync-key-list"
             size="small"
             dataSource={transferKeys}
-            locale={{ emptyText: loadingKeys ? "正在加载 Key" : "当前 admin 用户暂无可转移 Key" }}
+            locale={{ emptyText: loadingKeys ? "正在加载 Key" : isAllUsersScope ? "全部用户暂无可转移 Key" : "当前 admin 用户暂无可转移 Key" }}
             renderItem={(key) => {
               const keyId = idValue(key.key_id);
               const checked = selectedTransferKeySet.has(keyId);
@@ -3071,7 +3148,7 @@ function KeyTransferView({
                   <List.Item.Meta
                     avatar={<KeyOutlined />}
                     title={key.name || unknownToText(key.key_id)}
-                    description={`${apiKeyRouteLabel(key)} · Key ID ${unknownToText(key.key_id)}`}
+                    description={`${isAllUsersScope ? `${apiKeyOwnerLabel(key)} · ` : ""}${apiKeyRouteLabel(key)} · Key ID ${unknownToText(key.key_id)}`}
                   />
                   <Tag color={statusTagColor(key.status)}>{key.status || "unknown"}</Tag>
                 </List.Item>

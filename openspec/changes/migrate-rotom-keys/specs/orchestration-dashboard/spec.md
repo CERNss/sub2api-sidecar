@@ -15,6 +15,14 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 - **THEN** execution sets the API key quota limit to unlimited
 - **THEN** the response reports moved, skipped, and failed keys with reasons
 
+#### Scenario: Operator transfers keys discovered across all users
+- **GIVEN** the operator has a valid admin session
+- **WHEN** the operator previews or executes key transfer with all-user scope
+- **THEN** the system lists upstream users through the Sub2API admin users API
+- **THEN** the system reads each user's API keys through the existing per-user API keys API
+- **THEN** the system applies the same exact-email, first-available-group, preserved-key-value, and unlimited-quota rules as admin key transfer
+- **THEN** the response identifies each key's source user and reports moved, skipped, and failed keys with reasons
+
 #### Scenario: Key transfer skips unsafe keys
 - **GIVEN** the operator previews or executes the admin key transfer
 - **WHEN** a key name does not contain exactly one valid target email, the target user is missing, or the target user has no available group
@@ -26,6 +34,8 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 
 #### Scenario: Operator previews and runs admin key transfer
 - **GIVEN** the operator is using the key transfer tab
+- **WHEN** the operator switches between admin-user scope and all-user scope
+- **THEN** the UI refreshes the candidate key list from the matching authenticated API
 - **WHEN** the operator previews admin key transfer
 - **THEN** the UI shows moved/skipped/failed counts and per-key reasons returned by the authenticated API
 - **WHEN** the operator executes admin key transfer
