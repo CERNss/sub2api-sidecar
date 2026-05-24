@@ -2907,6 +2907,120 @@ def test_key_transfer_limits_processing_to_selected_key_ids(client) -> None:
     assert [key["id"] for key in backend.user_api_keys[1]] == ["unselected"]
 
 
+def test_key_transfer_accepts_explicit_non_admin_source_user(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 17,
+            "name": "target-yuchenning",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.users = [
+        {
+            "id": 1,
+            "email": "dev-ai@jihuanshe.com",
+            "name": "AI",
+            "status": "active",
+            "allowed_groups": [2, 4, 6, 7, 8, 17],
+        },
+        {
+            "id": 2,
+            "email": "yuchenning@jihuanshe.com",
+            "name": "yuchenning",
+            "status": "active",
+            "group_id": 17,
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": 36,
+            "user_id": 1,
+            "key": "sk-dev-ai",
+            "name": "rotom:shelley:v1:yuchenning@jihuanshe.com",
+            "group_id": 6,
+            "quota": 200.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"source_user_id": 1, "key_ids": [36], "dry_run": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "admin"
+    assert payload["source_user_id"] == 1
+    assert payload["planned_count"] == 1
+    assert payload["items"][0]["source_user_id"] == 1
+    assert payload["items"][0]["target_user_id"] == 2
+    assert payload["items"][0]["target_group_id"] == 17
+
+
+def test_key_transfer_selected_keys_without_source_falls_back_to_all_users(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 17,
+            "name": "target-yuchenning",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.users = [
+        {
+            "id": 1,
+            "email": "dev-ai@jihuanshe.com",
+            "name": "AI",
+            "status": "active",
+            "allowed_groups": [2, 4, 6, 7, 8, 17],
+        },
+        {
+            "id": 2,
+            "email": "yuchenning@jihuanshe.com",
+            "name": "yuchenning",
+            "status": "active",
+            "group_id": 17,
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": 36,
+            "user_id": 1,
+            "key": "sk-dev-ai",
+            "name": "rotom:shelley:v1:yuchenning@jihuanshe.com",
+            "group_id": 6,
+            "quota": 200.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"key_ids": [36], "dry_run": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "all_users"
+    assert payload["source_user_id"] is None
+    assert payload["planned_count"] == 1
+    assert payload["items"][0]["source_user_id"] == 1
+    assert payload["items"][0]["target_user_id"] == 2
+    assert payload["items"][0]["target_group_id"] == 17
+
+
 def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(client) -> None:
     backend = FakeRotationSub2API()
     backend.users = [
