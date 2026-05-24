@@ -2502,6 +2502,10 @@ def test_credit_control_recurring_policy_round_trips_dashboard_schedule(client) 
 
 def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups(client) -> None:
     backend = FakeRotationSub2API()
+    backend.user_api_keys[101] = [
+        {"id": "key-101", "name": "primary", "group_id": 11},
+        {"id": "key-101-unassigned", "name": "unassigned", "group_id": None},
+    ]
     login(client)
     save_operational_snapshots(backend)
 
@@ -2519,11 +2523,13 @@ def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups
 
     assert response.status_code == 200
     assert response.json()["status"] == "moved"
-    assert response.json()["migrated_keys"] == 2
+    assert response.json()["migrated_keys"] == 3
+    assert response.json()["metadata"]["supplemental_migrated_keys"] == 1
     assert backend.set_user_group_calls == []
     assert backend.replace_calls == [
         {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
     ]
+    assert backend.api_key_group_calls == [{"key_id": "key-101-unassigned", "group_id": 22}]
     assignment = main.get_flow_store().get_user_assignment(101)
     assert assignment is not None
     assert assignment.current_group_id == 22

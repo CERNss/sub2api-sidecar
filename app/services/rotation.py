@@ -435,7 +435,17 @@ class RotationService:
                     old_group_id=effective_source_group_id,
                     new_group_id=target_group_id,
                 )
-                migrated_keys = int(response.get("migrated_keys") or 0)
+                resource_sync = self._sync_user_resources_to_group(
+                    user_id=user_id,
+                    email=email,
+                    target_group_id=target_group_id,
+                    only_unassigned_keys=True,
+                )
+                migrated_keys = int(response.get("migrated_keys") or 0) + resource_sync["migrated_keys"]
+                metadata = {
+                    "bound_accounts": resource_sync["bound_accounts"],
+                    "supplemental_migrated_keys": resource_sync["migrated_keys"],
+                }
         except Sub2APIError as exc:
             logger.exception("Existing assignment orchestration failed for user_id=%s", user_id)
             return self._record_result(
@@ -470,8 +480,16 @@ class RotationService:
         user_id: Any,
         email: str,
         target_group_id: Any,
+        only_unassigned_keys: bool = False,
     ) -> dict[str, int]:
         api_keys = self.sub2api_client.get_user_api_keys(user_id)["items"]
+        if only_unassigned_keys:
+            api_keys = [
+                api_key
+                for api_key in api_keys
+                if isinstance(api_key, dict)
+                and self._api_key_group_id(api_key) in (None, "")
+            ]
         bound_accounts = self._bind_user_api_key_accounts_to_group(
             api_keys=api_keys,
             email=email,
@@ -496,7 +514,7 @@ class RotationService:
             key_id = api_key.get("id") or api_key.get("key_id")
             if key_id in (None, ""):
                 continue
-            if self._normalize_key(api_key.get("group_id") or api_key.get("current_group_id")) == self._normalize_key(target_group_id):
+            if self._normalize_key(self._api_key_group_id(api_key)) == self._normalize_key(target_group_id):
                 continue
             self.sub2api_client.update_api_key_group(
                 key_id=key_id,
@@ -558,6 +576,24 @@ class RotationService:
             self.sub2api_client.bind_account_to_group(account_id, target_group_id)
             bound_accounts += 1
         return bound_accounts
+
+    def _api_key_group_id(self, api_key: dict[str, Any]) -> Any | None:
+        for field_name in ("group_id", "current_group_id", "groupId", "currentGroupId"):
+            value = api_key.get(field_name)
+            if value not in (None, ""):
+                return value
+
+        for field_name in ("group", "current_group", "currentGroup"):
+            raw_group = api_key.get(field_name)
+            if isinstance(raw_group, dict):
+                value = raw_group.get("id") or raw_group.get("group_id") or raw_group.get("groupId")
+                if value not in (None, ""):
+                    return value
+
+        raw_payload = api_key.get("raw")
+        if isinstance(raw_payload, dict) and raw_payload is not api_key:
+            return self._api_key_group_id(raw_payload)
+        return None
 
     def _api_key_account_keys(self, api_key: dict[str, Any]) -> list[str]:
         account_ids: list[str] = []
