@@ -30,6 +30,7 @@ class Sub2APIClient:
     CURRENT_USER_PATH = "/api/v1/auth/me"
     CREATE_GROUP_PATH = "/api/v1/admin/groups"
     UPDATE_API_KEY_GROUP_PATH = "/api/v1/admin/api-keys/{key_id}"
+    TRANSFER_API_KEY_PATH = "/api/v1/admin/api-keys/{key_id}/transfer"
     REPLACE_EXCLUSIVE_GROUP_PATH = "/api/v1/admin/users/{user_id}/replace-group"
     LIST_GROUPS_PATH = "/api/v1/admin/groups/all"
     LIST_USERS_PATH = "/api/v1/admin/users"
@@ -117,13 +118,13 @@ class Sub2APIClient:
         reset_quota: bool = True,
     ) -> dict[str, Any]:
         payload = {
-            "user_id": user_id,
-            "group_id": group_id,
+            "target_user_id": user_id,
+            "target_group_id": group_id,
             "quota": quota,
             "reset_quota": reset_quota,
         }
-        path = self.UPDATE_API_KEY_GROUP_PATH.format(key_id=key_id)
-        data = self._request("PUT", path, json=payload)
+        path = self.TRANSFER_API_KEY_PATH.format(key_id=key_id)
+        data = self._request("POST", path, json=payload)
         body = self._unwrap_data(data)
         api_key = self._extract_value(body, "api_key", "data.api_key", "result.api_key")
         if not isinstance(api_key, dict):

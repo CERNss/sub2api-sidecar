@@ -579,7 +579,7 @@ class KeyTransferRequest(BaseModel):
     source_user_id: Any | None = None
     key_ids: list[Any] | None = None
     dry_run: bool = False
-    scope: str = "admin"
+    scope: str = "all_users"
     reason: str | None = None
 
 
@@ -604,7 +604,7 @@ class KeyTransferEnvelope(BaseModel):
     dry_run: bool = False
     key_name_pattern: str
     source_user_id: Any | None = None
-    scope: str = "admin"
+    scope: str = "all_users"
     planned_count: int = 0
     moved_count: int = 0
     skipped_count: int = 0

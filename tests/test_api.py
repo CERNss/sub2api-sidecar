@@ -462,49 +462,52 @@ class FakeRotationSub2API:
             )
         if method == "POST" and path == "/api/v1/admin/users/303/replace-group":
             return FakeResponse(500, {"message": "boom"})
+        if method == "POST" and path.startswith("/api/v1/admin/api-keys/") and path.endswith("/transfer"):
+            key_id = path.split("/")[5]
+            self.api_key_owner_calls.append(
+                {
+                    "key_id": key_id,
+                    "user_id": json["target_user_id"],
+                    "group_id": json["target_group_id"],
+                    "quota": json["quota"],
+                    "reset_quota": json["reset_quota"],
+                }
+            )
+            key_record: dict[str, object] | None = None
+            source_user_id: int | None = None
+            for user_id, keys in self.user_api_keys.items():
+                for candidate in keys:
+                    if str(candidate.get("id") or candidate.get("key_id")) == key_id:
+                        key_record = candidate
+                        source_user_id = user_id
+                        break
+                if key_record is not None:
+                    break
+            if key_record is None:
+                return FakeResponse(404, {"message": "api key not found"})
+            if source_user_id is not None:
+                self.user_api_keys[source_user_id] = [
+                    candidate
+                    for candidate in self.user_api_keys[source_user_id]
+                    if str(candidate.get("id") or candidate.get("key_id")) != key_id
+                ]
+            key_record["user_id"] = json["target_user_id"]
+            key_record["group_id"] = json["target_group_id"]
+            key_record["quota"] = json["quota"]
+            if json.get("reset_quota"):
+                key_record["quota_used"] = 0.0
+            target_user_id = int(json["target_user_id"])
+            self.user_api_keys.setdefault(target_user_id, []).append(key_record)
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"api_key": key_record},
+                },
+            )
         if method == "PUT" and path.startswith("/api/v1/admin/api-keys/"):
             key_id = path.split("/")[5]
-            if "user_id" in json:
-                self.api_key_owner_calls.append(
-                    {
-                        "key_id": key_id,
-                        "user_id": json["user_id"],
-                        "group_id": json["group_id"],
-                        "quota": json["quota"],
-                        "reset_quota": json["reset_quota"],
-                    }
-                )
-                key_record: dict[str, object] | None = None
-                source_user_id: int | None = None
-                for user_id, keys in self.user_api_keys.items():
-                    for candidate in keys:
-                        if str(candidate.get("id") or candidate.get("key_id")) == key_id:
-                            key_record = candidate
-                            source_user_id = user_id
-                            break
-                    if key_record is not None:
-                        break
-                if key_record is None:
-                    return FakeResponse(404, {"message": "api key not found"})
-                if source_user_id is not None:
-                    self.user_api_keys[source_user_id] = [
-                        candidate
-                        for candidate in self.user_api_keys[source_user_id]
-                        if str(candidate.get("id") or candidate.get("key_id")) != key_id
-                    ]
-                key_record["user_id"] = json["user_id"]
-                key_record["group_id"] = json["group_id"]
-                key_record["quota"] = json["quota"]
-                target_user_id = int(json["user_id"])
-                self.user_api_keys.setdefault(target_user_id, []).append(key_record)
-                return FakeResponse(
-                    200,
-                    {
-                        "code": 0,
-                        "message": "success",
-                        "data": {"api_key": key_record},
-                    },
-                )
             self.api_key_group_calls.append({"key_id": key_id, "group_id": json["group_id"]})
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "GET" and path.startswith("/api/v1/admin/users/") and path.endswith("/api-keys"):
@@ -2905,6 +2908,120 @@ def test_key_transfer_limits_processing_to_selected_key_ids(client) -> None:
     assert {item["key_id"] for item in payload["items"]} == {"xuzhilin", "luozhaobin"}
     assert [call["key_id"] for call in backend.api_key_owner_calls] == ["xuzhilin", "luozhaobin"]
     assert [key["id"] for key in backend.user_api_keys[1]] == ["unselected"]
+
+
+def test_key_transfer_accepts_explicit_non_admin_source_user(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 17,
+            "name": "target-yuchenning",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.users = [
+        {
+            "id": 1,
+            "email": "dev-ai@jihuanshe.com",
+            "name": "AI",
+            "status": "active",
+            "allowed_groups": [2, 4, 6, 7, 8, 17],
+        },
+        {
+            "id": 2,
+            "email": "yuchenning@jihuanshe.com",
+            "name": "yuchenning",
+            "status": "active",
+            "group_id": 17,
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": 36,
+            "user_id": 1,
+            "key": "sk-dev-ai",
+            "name": "rotom:shelley:v1:yuchenning@jihuanshe.com",
+            "group_id": 6,
+            "quota": 200.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"source_user_id": 1, "key_ids": [36], "dry_run": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "admin"
+    assert payload["source_user_id"] == 1
+    assert payload["planned_count"] == 1
+    assert payload["items"][0]["source_user_id"] == 1
+    assert payload["items"][0]["target_user_id"] == 2
+    assert payload["items"][0]["target_group_id"] == 17
+
+
+def test_key_transfer_selected_keys_without_source_falls_back_to_all_users(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 17,
+            "name": "target-yuchenning",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.users = [
+        {
+            "id": 1,
+            "email": "dev-ai@jihuanshe.com",
+            "name": "AI",
+            "status": "active",
+            "allowed_groups": [2, 4, 6, 7, 8, 17],
+        },
+        {
+            "id": 2,
+            "email": "yuchenning@jihuanshe.com",
+            "name": "yuchenning",
+            "status": "active",
+            "group_id": 17,
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": 36,
+            "user_id": 1,
+            "key": "sk-dev-ai",
+            "name": "rotom:shelley:v1:yuchenning@jihuanshe.com",
+            "group_id": 6,
+            "quota": 200.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"key_ids": [36], "dry_run": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "all_users"
+    assert payload["source_user_id"] is None
+    assert payload["planned_count"] == 1
+    assert payload["items"][0]["source_user_id"] == 1
+    assert payload["items"][0]["target_user_id"] == 2
+    assert payload["items"][0]["target_group_id"] == 17
 
 
 def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(client) -> None:

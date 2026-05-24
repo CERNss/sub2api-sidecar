@@ -792,20 +792,26 @@ class RotationService:
         scope_key = scope.strip().lower() if scope else "admin"
         if scope_key not in {"admin", "all_users"}:
             raise RotationExecutionError("Unsupported key transfer scope")
+        if scope_key == "all_users" and source_user_id not in (None, ""):
+            scope_key = "admin"
         if scope_key == "all_users":
-            if source_user_id not in (None, ""):
-                raise RotationExecutionError("All-user key transfer does not accept a source user")
             source_user_id = None
             source_user_key = None
             source_keys = self.sub2api_client.list_all_user_api_keys()["items"]
         else:
-            admin_user_id = self._resolve_admin_user_id()
             if source_user_id in (None, ""):
-                source_user_id = admin_user_id
-            elif self._normalize_key(source_user_id) != self._normalize_key(admin_user_id):
-                raise RotationExecutionError("Key transfer only supports the admin source user")
-            source_user_key = self._normalize_key(source_user_id)
-            source_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
+                if key_ids is not None:
+                    scope_key = "all_users"
+                    source_user_key = None
+                    source_keys = self.sub2api_client.list_all_user_api_keys()["items"]
+                else:
+                    admin_user_id = self._resolve_admin_user_id()
+                    source_user_id = admin_user_id
+                    source_user_key = self._normalize_key(source_user_id)
+                    source_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
+            else:
+                source_user_key = self._normalize_key(source_user_id)
+                source_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
         selected_key_ids = self._normalize_selected_key_ids(key_ids)
         if selected_key_ids is not None:
             source_keys = [
@@ -814,6 +820,8 @@ class RotationService:
                 if isinstance(key_item, dict)
                 and self._normalize_key(key_item.get("id") or key_item.get("key_id")) in selected_key_ids
             ]
+        if scope_key == "all_users" and selected_key_ids is not None:
+            source_keys = self._hydrate_selected_keys_from_owners(source_keys)
         target_emails = {
             target_email
             for key_item in source_keys
@@ -851,6 +859,40 @@ class RotationService:
             run_record=run_record,
             items=items,
         )
+
+    def _hydrate_selected_keys_from_owners(
+        self,
+        source_keys: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        hydrated: list[dict[str, Any]] = []
+        for key_item in source_keys:
+            if not isinstance(key_item, dict):
+                continue
+            source_user_id = key_item.get("user_id") or key_item.get("owner_user_id")
+            key_id = key_item.get("id") or key_item.get("key_id")
+            if source_user_id in (None, "") or key_id in (None, ""):
+                hydrated.append(key_item)
+                continue
+            user_keys = self.sub2api_client.get_user_api_keys(source_user_id)["items"]
+            replacement = next(
+                (
+                    user_key
+                    for user_key in user_keys
+                    if isinstance(user_key, dict)
+                    and self._normalize_key(user_key.get("id") or user_key.get("key_id"))
+                    == self._normalize_key(key_id)
+                ),
+                None,
+            )
+            if replacement is None:
+                hydrated.append(key_item)
+                continue
+            hydrated_key = dict(replacement)
+            hydrated_key.setdefault("user_id", source_user_id)
+            hydrated_key.setdefault("owner_user_id", source_user_id)
+            hydrated_key.setdefault("owner_email", key_item.get("owner_email"))
+            hydrated.append(hydrated_key)
+        return hydrated
 
     def migrate_rotom_keys(
         self,

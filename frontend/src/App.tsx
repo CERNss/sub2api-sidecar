@@ -2787,7 +2787,7 @@ function KeyTransferView({
   selectedUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
-  const [transferScope, setTransferScope] = useState<"admin" | "all_users">("admin");
+  const [transferScope, setTransferScope] = useState<"admin" | "all_users">("all_users");
   const [sourceSearch, setSourceSearch] = useState(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
   const [users, setUsers] = useState<OrchestrationUser[]>([]);
   const [sourceUserId, setSourceUserId] = useState("");
@@ -2917,7 +2917,7 @@ function KeyTransferView({
     setApiKeys([]);
     setSelectedKeyIds([]);
     setTransferResult(null);
-    void loadSourceUsers(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
+    void loadSourceKeys("", { clearResult: false });
   }, [selectedUpstreamId]);
 
   useEffect(() => {
