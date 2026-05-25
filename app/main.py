@@ -52,6 +52,10 @@ from app.models.schemas import (
     AutoRotationRunResponse,
     AutoRotationRunsEnvelope,
     AutoRotationSchedulerStatusResponse,
+    ApiKeyAutomationEnvelope,
+    ApiKeyAutomationItemResponse,
+    ApiKeyAutomationRequest,
+    ApiTokenResponse,
     AuthSessionResponse,
     CreditControlAdjustmentEnvelope,
     CreditControlAdjustmentItemResponse,
@@ -128,6 +132,7 @@ from app.models.schemas import (
     UserUsageSegmentsEnvelope,
 )
 from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
+from app.services.api_key_automation import ApiKeyAutomationService
 from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.credit_control import CreditControlError, CreditControlService
 from app.services.credit_scheduler import CreditControlScheduler
@@ -295,6 +300,15 @@ def get_rotation_service_for_upstream(upstream_id: str | None = None) -> Rotatio
         store=get_flow_store(),
         sub2api_client=get_sub2api_client(selected_upstream_id),
         settings=settings,
+    )
+
+
+@lru_cache(maxsize=None)
+def get_api_key_automation_service(upstream_id: str | None = None) -> ApiKeyAutomationService:
+    selected_upstream_id = normalize_upstream_id(upstream_id)
+    return ApiKeyAutomationService(
+        sub2api_client=get_sub2api_client(selected_upstream_id),
+        rotation_service=get_rotation_service_for_upstream(selected_upstream_id),
     )
 
 
@@ -775,6 +789,15 @@ def auth_session(session: AuthSession = Depends(require_api_auth)) -> AuthSessio
     return AuthSessionResponse(username=session.username, expires_at=session.expires_at)
 
 
+@app.post("/auth/api-token")
+def auth_api_token(session: AuthSession = Depends(require_api_auth)) -> ApiTokenResponse:
+    token_session = get_auth_manager().create_api_token(username=session.username)
+    return ApiTokenResponse(
+        username=token_session.username,
+        access_key=token_session.access_key,
+    )
+
+
 @app.post("/auth/logout")
 def auth_logout(request: Request) -> JSONResponse:
     get_auth_manager().revoke(extract_access_key(request))
@@ -830,6 +853,45 @@ def ping() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/v1/apikey")
+@app.post("/sidecar/api/v1/apikey")
+def api_key_automation(
+    payload: ApiKeyAutomationRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    service = get_api_key_automation_service(selected_upstream_id)
+    if payload.action == "create":
+        if not payload.name:
+            raise HTTPException(status_code=422, detail="name is required for create")
+        extra_options = getattr(payload, "model_extra", None) or {}
+        key_options = {**extra_options, **payload.options}
+        create_result = service.create_named_key(
+            name=payload.name,
+            key_options=key_options,
+        )
+        item = dict(create_result.api_key)
+        item["target_email"] = create_result.target_email
+        item["user_email"] = create_result.user_email
+        item["group_id"] = create_result.group_id
+        response = ApiKeyAutomationEnvelope(
+            action="create",
+            fallback_to_admin=create_result.fallback_to_admin,
+            fallback_reason=create_result.fallback_reason,
+            item=api_key_automation_item_response(item, include_key_value=True),
+            total=1,
+        )
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+    items = service.list_encoded_keys(email=str(payload.email) if payload.email else None)
+    response = ApiKeyAutomationEnvelope(
+        action="list",
+        items=[api_key_automation_item_response(item) for item in items],
+        total=len(items),
+    )
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
 def rotation_execution_response(
     result: RotationExecutionResult,
     *,
@@ -883,6 +945,29 @@ def key_transfer_response(run: KeyTransferRun) -> KeyTransferEnvelope:
             )
             for item in run.items
         ],
+    )
+
+
+def api_key_automation_item_response(
+    item: dict[str, Any],
+    *,
+    include_key_value: bool = False,
+) -> ApiKeyAutomationItemResponse:
+    return ApiKeyAutomationItemResponse(
+        key_id=item.get("id") or item.get("key_id"),
+        name=item.get("name"),
+        key_value=item.get("key") if include_key_value else None,
+        target_email=item.get("target_email"),
+        user_id=item.get("user_id") or item.get("owner_user_id"),
+        user_email=item.get("user_email") or item.get("owner_email"),
+        group_id=item.get("group_id") or item.get("current_group_id"),
+        group_name=item.get("group_name") or item.get("current_group_name"),
+        status=item.get("status"),
+        quota=item.get("quota"),
+        quota_used=item.get("quota_used"),
+        usage_5h=item.get("usage_5h"),
+        usage_1d=item.get("usage_1d"),
+        usage_7d=item.get("usage_7d"),
     )
 
 

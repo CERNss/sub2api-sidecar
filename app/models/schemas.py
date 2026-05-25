@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class LoginRequest(BaseModel):
@@ -22,10 +22,17 @@ class LoginResponse(BaseModel):
     expires_at: datetime
 
 
+class ApiTokenResponse(BaseModel):
+    success: bool = True
+    username: str
+    access_key: str
+    token_type: str = "bearer"
+
+
 class AuthSessionResponse(BaseModel):
     success: bool = True
     username: str
-    expires_at: datetime
+    expires_at: datetime | None
 
 
 class Sub2APIUpstreamResponse(BaseModel):
@@ -610,6 +617,44 @@ class KeyTransferEnvelope(BaseModel):
     skipped_count: int = 0
     failed_count: int = 0
     items: list[KeyTransferItemResponse] = Field(default_factory=list)
+
+
+class ApiKeyAutomationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    action: str = Field(..., pattern="^(create|list)$")
+    upstream_id: str | None = Field(default=None, min_length=1)
+    name: str | None = Field(default=None, min_length=1)
+    email: EmailStr | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApiKeyAutomationItemResponse(BaseModel):
+    key_id: Any | None = None
+    name: str | None = None
+    key_value: str | None = None
+    target_email: str | None = None
+    user_id: Any | None = None
+    user_email: str | None = None
+    group_id: Any | None = None
+    group_name: str | None = None
+    status: str | None = None
+    quota: Any | None = None
+    quota_used: Any | None = None
+    usage_5h: float | None = None
+    usage_1d: float | None = None
+    usage_7d: float | None = None
+
+
+class ApiKeyAutomationEnvelope(BaseModel):
+    success: bool = True
+    action: str
+    key_name_pattern: str = "service:object:version:email"
+    fallback_to_admin: bool | None = None
+    fallback_reason: str | None = None
+    item: ApiKeyAutomationItemResponse | None = None
+    items: list[ApiKeyAutomationItemResponse] = Field(default_factory=list)
+    total: int = 0
 
 
 class RotationPoolGroupRequest(BaseModel):

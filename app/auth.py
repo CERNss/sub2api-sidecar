@@ -15,7 +15,8 @@ class AuthSession:
     access_key: str
     username: str
     created_at: datetime
-    expires_at: datetime
+    expires_at: datetime | None
+    purpose: str
 
 
 class EphemeralAdminAuthManager:
@@ -51,19 +52,55 @@ class EphemeralAdminAuthManager:
         return self.create_external_session(username=self.username)
 
     def create_external_session(self, username: str) -> AuthSession:
+        return self._create_session(
+            username=username,
+            purpose="external",
+            expires_in=self.access_key_ttl,
+        )
+
+    def create_api_token(self, username: str) -> AuthSession:
+        revoked_count = self.revoke_api_tokens(username=username)
+        session = self._create_session(username=username, purpose="api_token", expires_in=None)
+        logger.info(
+            "Admin API token rotated | username=%s | revoked_count=%s",
+            username,
+            revoked_count,
+        )
+        return session
+
+    def revoke_api_tokens(self, username: str) -> int:
+        token_keys = [
+            access_key
+            for access_key, session in self._sessions.items()
+            if session.username == username and session.purpose == "api_token"
+        ]
+        for access_key in token_keys:
+            self._sessions.pop(access_key, None)
+        return len(token_keys)
+
+    def _create_session(
+        self,
+        *,
+        username: str,
+        purpose: str,
+        expires_in: timedelta | None,
+    ) -> AuthSession:
         self._purge_expired_sessions()
         now = datetime.now(timezone.utc)
+        expires_at = now + expires_in if expires_in is not None else None
         session = AuthSession(
             access_key=secrets.token_urlsafe(32),
             username=username,
             created_at=now,
-            expires_at=now + self.access_key_ttl,
+            expires_at=expires_at,
+            purpose=purpose,
         )
         self._sessions[session.access_key] = session
         logger.info(
-            "Admin session issued | username=%s | expires_at=%s",
+            "Admin session issued | username=%s | purpose=%s | expires_at=%s",
             session.username,
-            session.expires_at.isoformat(),
+            purpose,
+            session.expires_at.isoformat() if session.expires_at is not None else "never",
         )
         return session
 
@@ -76,7 +113,7 @@ class EphemeralAdminAuthManager:
         if not session:
             return None
 
-        if session.expires_at <= datetime.now(timezone.utc):
+        if session.expires_at is not None and session.expires_at <= datetime.now(timezone.utc):
             self._sessions.pop(access_key, None)
             return None
         return session
@@ -96,7 +133,7 @@ class EphemeralAdminAuthManager:
         expired_keys = [
             access_key
             for access_key, session in self._sessions.items()
-            if session.expires_at <= now
+            if session.expires_at is not None and session.expires_at <= now
         ]
         for access_key in expired_keys:
             self._sessions.pop(access_key, None)

@@ -109,6 +109,11 @@ type UpstreamsPayload = ApiPayload & {
   default_upstream_id: string;
 };
 
+type ApiTokenPayload = ApiPayload & {
+  access_key: string;
+  token_type: string;
+};
+
 type FlowStatusFilter = "" | "pending_oauth" | "completed" | "failed";
 type AssignmentModeFilter = "" | "dedicated" | "managed_pool";
 type OperatorView = "orchestration" | "provision" | "keyTransfer" | "notification" | "creditControl";
@@ -2719,7 +2724,7 @@ function OperatorWorkspace() {
               onClick={() => navigateView("keyTransfer")}
             >
               <KeyOutlined />
-              密钥转移
+              密钥管理
             </button>
             <button
               className={activeView === "notification" ? "active" : ""}
@@ -2798,6 +2803,21 @@ function KeyTransferView({
   const [submitting, setSubmitting] = useState<"preview" | "execute" | null>(null);
   const [transferResult, setTransferResult] = useState<KeyTransferPayload | null>(null);
   const [selectedKeyIds, setSelectedKeyIds] = useState<string[]>([]);
+  const [apiTokenModalOpen, setApiTokenModalOpen] = useState(false);
+  const [apiToken, setApiToken] = useState<ApiTokenPayload | null>(null);
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const apiTokenValue = apiToken?.access_key || "$SIDECAR_API_TOKEN";
+  const apiKeyEndpointUrl = `${window.location.origin}${apiUrl("/api/v1/apikey")}`;
+  const createApiKeyPayload = '{"action":"create","name":"service:object:v1:user@example.com","quota":0}';
+  const listApiKeyPayload = '{"action":"list","email":"user@example.com"}';
+  const createApiKeyExample = `curl -sS -X POST ${apiKeyEndpointUrl}
+-H "Authorization: Bearer ${apiTokenValue}"
+-H "Content-Type: application/json"
+-d '${createApiKeyPayload}'`;
+  const listApiKeyExample = `curl -sS -X POST ${apiKeyEndpointUrl}
+-H "Authorization: Bearer ${apiTokenValue}"
+-H "Content-Type: application/json"
+-d '${listApiKeyPayload}'`;
   const selectedUser = users.find((user) => idValue(user.user_id) === sourceUserId) ?? null;
   const transferKeys = useMemo(() => apiKeys.filter(isTransferKey), [apiKeys]);
   const transferKeyIds = useMemo(() => transferKeys.map((key) => idValue(key.key_id)).filter(Boolean), [transferKeys]);
@@ -3004,12 +3024,31 @@ function KeyTransferView({
     }
   }
 
+  async function generateApiToken() {
+    setTokenBusy(true);
+    try {
+      const payload = await requestJson<ApiTokenPayload>(
+        "/auth/api-token",
+        { method: "POST" },
+        "刷新 API Token 失败"
+      );
+      setApiToken(payload);
+      setStatus({ message: "API Token 已刷新，请更新调用方配置。", tone: "success" });
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "刷新 API Token 失败"), tone: "error" });
+      }
+    } finally {
+      setTokenBusy(false);
+    }
+  }
+
   return (
     <section className="panel data-sync-shell">
       <header className="data-sync-header">
         <div>
-          <p className="eyebrow">Key Transfer</p>
-          <h2>密钥转移</h2>
+          <p className="eyebrow">Key Management</p>
+          <h2>密钥管理</h2>
         </div>
         <Space wrap>
           <Tag color={isAllUsersScope || selectedUser ? "green" : "default"}>
@@ -3017,6 +3056,13 @@ function KeyTransferView({
           </Tag>
           <Tag color={transferKeys.length > 0 ? "blue" : "default"}>{transferKeys.length} 个可转移 Key</Tag>
           <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>已选 {selectedKeyIds.length}</Tag>
+          <AntButton
+            size="small"
+            icon={<KeyOutlined />}
+            onClick={() => setApiTokenModalOpen(true)}
+          >
+            查看 API Token
+          </AntButton>
         </Space>
       </header>
 
@@ -3247,6 +3293,73 @@ function KeyTransferView({
           />
         )}
       </section>
+      <Modal
+        title="API Token"
+        width={920}
+        open={apiTokenModalOpen}
+        onCancel={() => setApiTokenModalOpen(false)}
+        footer={[
+          <AntButton key="close" onClick={() => setApiTokenModalOpen(false)}>
+            关闭
+          </AntButton>,
+          <AntButton
+            key="refresh"
+            type="primary"
+            icon={<ReloadOutlined />}
+            loading={tokenBusy}
+            onClick={() => void generateApiToken()}
+          >
+            刷新 API Token
+          </AntButton>
+        ]}
+      >
+        <Space direction="vertical" size="middle" className="api-token-modal">
+          <Alert
+            showIcon
+            type={apiToken ? "info" : "warning"}
+            message={
+              apiToken
+                ? "下方 Token 仅本次可见。刷新会生成新的长期 Token，并使旧 API Token 立即失效。"
+                : "当前页面没有可显示的 Token。点击刷新会生成新的长期 Token，并使旧 API Token 立即失效。"
+            }
+          />
+          {apiToken ? (
+            <>
+              <Typography.Paragraph copyable={{ text: apiToken.access_key }}>
+                <Typography.Text code>{apiToken.access_key}</Typography.Text>
+              </Typography.Paragraph>
+              <Typography.Paragraph copyable={{ text: `Authorization: Bearer ${apiToken.access_key}` }}>
+                <Typography.Text code>{`Authorization: Bearer ${apiToken.access_key}`}</Typography.Text>
+              </Typography.Paragraph>
+            </>
+          ) : (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可显示 Token" />
+          )}
+          <div className="api-token-api-list">
+            <Typography.Text strong>可用 API</Typography.Text>
+            <div className="api-token-api-item">
+              <Space wrap>
+                <Tag color="blue">POST</Tag>
+                <Typography.Text code>{apiKeyEndpointUrl}</Typography.Text>
+              </Space>
+              <Typography.Text type="secondary">创建指定名称的 API key，name 使用 {KEY_TRANSFER_NAME_PATTERN} 格式，quota=0 表示无限制。</Typography.Text>
+              <Typography.Paragraph copyable={{ text: createApiKeyExample }}>
+                <pre>{createApiKeyExample}</pre>
+              </Typography.Paragraph>
+            </div>
+            <div className="api-token-api-item">
+              <Space wrap>
+                <Tag color="blue">POST</Tag>
+                <Typography.Text code>{apiKeyEndpointUrl}</Typography.Text>
+              </Space>
+              <Typography.Text type="secondary">查询 {KEY_TRANSFER_NAME_PATTERN} 格式的 API key，可按 email 精确筛选。</Typography.Text>
+              <Typography.Paragraph copyable={{ text: listApiKeyExample }}>
+                <pre>{listApiKeyExample}</pre>
+              </Typography.Paragraph>
+            </div>
+          </div>
+        </Space>
+      </Modal>
     </section>
   );
 }

@@ -44,6 +44,12 @@
 - `POST /orchestration/api-keys/update-group`
   - 对单个 API key 执行分组调整
   - 调用 upstream `PUT /api/v1/admin/api-keys/{key_id}`
+- `POST /api/v1/apikey`
+  - Bearer token / `X-Access-Key` 鉴权的自动化接口
+  - `action=create` 按指定 `name` 创建 API key，复用密钥管理里的邮箱解析和首个可用分组选择逻辑
+  - `action=list` 列出 `service:object:version:email` 格式 key，可用 `email` 精确过滤
+- `POST /auth/api-token`
+  - 登录后生成可用于自动化调用的长期 bearer-compatible API token
 - `POST /auth/logout`
   - 注销当前浏览器或 API 会话
 - `GET /rotation/pool/candidates`
@@ -79,6 +85,28 @@
 4. 执行后本地记录 assignment 或 rotation event，方便后续轮换和审计
 
 整体替换只允许目标为专属标准分组，因为 upstream `replace-group` 当前只支持这类分组。订阅分组不要走 `replace-group`；需要按实际 upstream 能力使用单 key 更新或其他专用接口。
+
+## 自动化 API Key 接口
+
+在 `密钥管理` 页面点击 `查看 API Token` 打开弹窗，再点击弹窗里的 `刷新 API Token` 获取长期 token；也可以用已登录会话调用 `POST /auth/api-token` 获取长期 token。每次刷新会让同一用户之前生成的 API token 失效，但不会影响当前浏览器登录会话。调用方可以用 `Authorization: Bearer <token>` 或 `X-Access-Key: <token>` 访问：
+
+```bash
+curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
+  -H "Authorization: Bearer $SIDECAR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"create","name":"svc:obj:v1:user@example.com","quota":0}'
+```
+
+创建时如果 key 名最后一段邮箱能精确匹配一个 Sub2API 用户，会放到该用户第一个可用分组；无法匹配邮箱或没有对应账号时默认放到 admin 用户下。请求里的 `group_id` / `group_ids` 会被忽略，分组只由 sidecar 选择。
+
+```bash
+curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
+  -H "Authorization: Bearer $SIDECAR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"list","email":"user@example.com"}'
+```
+
+列表接口只返回 `service:object:version:email` 格式的 key，不返回原始 key 值。
 
 ## 关键流程
 
@@ -282,7 +310,7 @@ sub2api:
       admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
 ```
 
-第一个 upstream 是默认上游，也是 Sub2API 跳转携带 `token` 登录 sidecar 时唯一验证 JWT 的主站；后续 upstream 按从站处理，不参与跳转 token 登录。登录后的顶部“当前用户”区域会显示全局 Sub2API 切换器，切换目标后，用户分组编排、密钥转移和 OAuth 预配会把对应 `upstream_id` 发给后端并访问该从站。也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集会遍历所有 upstream：主站继续写入原有 source/metric key，从站写入 `upstream:<id>:` 前缀的 source/metric key，避免不同站点数据混在一起；余额管理、用量分层、自动轮换仍消费主站的兼容 key。
+第一个 upstream 是默认上游，也是 Sub2API 跳转携带 `token` 登录 sidecar 时唯一验证 JWT 的主站；后续 upstream 按从站处理，不参与跳转 token 登录。登录后的顶部“当前用户”区域会显示全局 Sub2API 切换器，切换目标后，用户分组编排、密钥管理和 OAuth 预配会把对应 `upstream_id` 发给后端并访问该从站。也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集会遍历所有 upstream：主站继续写入原有 source/metric key，从站写入 `upstream:<id>:` 前缀的 source/metric key，避免不同站点数据混在一起；余额管理、用量分层、自动轮换仍消费主站的兼容 key。
 
 ### Nginx Proxy Manager 子路径部署
 

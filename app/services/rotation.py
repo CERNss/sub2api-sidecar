@@ -1694,6 +1694,12 @@ class RotationService:
                 duplicate_emails.add(email_key)
         return users_by_email, duplicate_emails
 
+    def users_by_exact_emails(
+        self,
+        emails: set[str],
+    ) -> tuple[dict[str, dict[str, Any]], set[str]]:
+        return self._users_by_exact_emails(emails)
+
     def _available_groups_by_key(self) -> dict[str, dict[str, Any]]:
         groups = self.sub2api_client.list_groups(
             platform=self.settings.sub2api_provisioning_defaults.group_platform
@@ -1708,6 +1714,9 @@ class RotationService:
                 continue
             available[self._normalize_key(group_id)] = group
         return available
+
+    def first_available_group_id_for_user(self, user: dict[str, Any]) -> Any | None:
+        return self._first_available_user_group_id(user, self._available_groups_by_key())
 
     def _resolve_admin_user_id(self) -> Any:
         candidates: list[dict[str, Any]] = []
@@ -1733,6 +1742,9 @@ class RotationService:
         if not candidates:
             raise RotationExecutionError("Admin source user was not found")
         raise RotationExecutionError("Admin source user is ambiguous")
+
+    def resolve_admin_user_id(self) -> Any:
+        return self._resolve_admin_user_id()
 
     def _plan_key_transfer(
         self,
@@ -2031,6 +2043,9 @@ class RotationService:
         except EmailNotValidError:
             return None
         return normalized.lower()
+
+    def extract_transfer_email(self, key_name: str | None) -> str | None:
+        return self._extract_transfer_email(key_name)
 
     def _first_available_user_group_id(
         self,
@@ -2468,8 +2483,14 @@ class RotationService:
     def _normalize_key(self, value: Any) -> str:
         return str(value)
 
+    def normalize_key_value(self, value: Any) -> str:
+        return self._normalize_key(value)
+
     def _normalize_email(self, value: Any) -> str:
         return str(value or "").strip().lower()
+
+    def normalize_email_value(self, value: Any) -> str:
+        return self._normalize_email(value)
 
     def _text_or_none(self, value: Any) -> str | None:
         if value in (None, ""):

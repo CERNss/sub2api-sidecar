@@ -1,0 +1,8 @@
+- [x] Add OpenSpec delta for the token-authenticated API key surface.
+- [x] Extend auth manager with explicit API token creation.
+- [x] Add Sub2API client support for creating a user API key.
+- [x] Add sidecar request/response schemas and POST `/api/v1/apikey` handlers.
+- [x] Reuse key-transfer user/group resolution for create fallback and list filtering.
+- [x] Add key management UI button for long-lived API token generation.
+- [x] Add backend tests for token auth, create fallback, list filtering, and upstream payloads.
+- [x] Run targeted backend tests and frontend build.

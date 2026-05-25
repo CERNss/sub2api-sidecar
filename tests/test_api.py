@@ -219,6 +219,7 @@ class FakeRotationSub2API:
         self.set_user_group_calls: list[dict[str, object]] = []
         self.api_key_group_calls: list[dict[str, object]] = []
         self.api_key_owner_calls: list[dict[str, object]] = []
+        self.api_key_create_calls: list[dict[str, object]] = []
         self.balance_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
         self.create_account_calls = 0
@@ -506,6 +507,30 @@ class FakeRotationSub2API:
                     "data": {"api_key": key_record},
                 },
             )
+        if method == "POST" and path.startswith("/api/v1/admin/users/") and path.endswith("/api-keys"):
+            user_id = int(path.split("/")[5])
+            self.api_key_create_calls.append(
+                {"user_id": user_id, "path": path, "json": dict(json or {})}
+            )
+            key_id = f"created-{len(self.api_key_create_calls)}"
+            key_record = {
+                "id": key_id,
+                "key": f"sk-{key_id}",
+                "user_id": user_id,
+                "name": json["name"],
+                "group_id": json.get("group_id"),
+                "quota": json.get("quota"),
+                "status": "active",
+            }
+            self.user_api_keys.setdefault(user_id, []).append(key_record)
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"api_key": key_record},
+                },
+            )
         if method == "PUT" and path.startswith("/api/v1/admin/api-keys/"):
             key_id = path.split("/")[5]
             self.api_key_group_calls.append({"key_id": key_id, "group_id": json["group_id"]})
@@ -602,6 +627,7 @@ def clear_caches() -> None:
     main.get_sub2api_client.cache_clear()
     main.get_rotation_service.cache_clear()
     main.get_rotation_service_for_upstream.cache_clear()
+    main.get_api_key_automation_service.cache_clear()
     main.get_provisioning_service.cache_clear()
     main.get_notification_service.cache_clear()
     main.get_credit_control_service.cache_clear()
@@ -998,6 +1024,56 @@ def test_sub2api_client_lists_all_user_api_keys_with_user_context() -> None:
         "/api/v1/admin/users",
         "/api/v1/admin/users/1/api-keys",
         "/api/v1/admin/users/2/api-keys",
+    ]
+
+
+def test_sub2api_client_creates_user_api_key_without_forwarding_group_override() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "api_key": {
+                        "id": "key-1",
+                        "key": "sk-created",
+                        "name": json["name"],
+                        "user_id": 2,
+                        "group_id": json["group_id"],
+                    }
+                },
+            },
+        )
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.create_user_api_key(
+            user_id=2,
+            name="svc:obj:v1:user@example.com",
+            group_id=22,
+            options={"quota": 300, "group_id": 11, "user_id": 1},
+        )
+
+    assert result["key"] == "sk-created"
+    assert calls == [
+        {
+            "method": "POST",
+            "path": "/api/v1/admin/users/2/api-keys",
+            "json": {
+                "quota": 300,
+                "name": "svc:obj:v1:user@example.com",
+                "group_id": 22,
+            },
+        }
     ]
 
 
@@ -3305,6 +3381,206 @@ def test_key_transfer_all_users_moves_matching_keys_from_non_admin_sources(clien
     ]
     assert [key["id"] for key in backend.user_api_keys[2]] == []
     assert backend.user_api_keys[202][-1]["key"] == "sk-source"
+
+
+def test_api_token_endpoint_issues_bearer_compatible_token(client) -> None:
+    login_payload = login(client)
+    login_access_key = login_payload["access_key"]
+
+    response = client.post("/auth/api-token")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["access_key"]
+    assert payload["token_type"] == "bearer"
+    assert "expires_at" not in payload
+    session_response = client.get(
+        "/auth/session",
+        headers={"Authorization": f"Bearer {payload['access_key']}"},
+    )
+    assert session_response.status_code == 200
+    assert session_response.json()["expires_at"] is None
+
+    rotated_response = client.post("/auth/api-token")
+
+    assert rotated_response.status_code == 200
+    rotated_payload = rotated_response.json()
+    assert rotated_payload["access_key"]
+    assert rotated_payload["access_key"] != payload["access_key"]
+    old_token_response = client.get(
+        "/auth/session",
+        headers={"Authorization": f"Bearer {payload['access_key']}"},
+    )
+    assert old_token_response.status_code == 401
+    new_token_response = client.get(
+        "/auth/session",
+        headers={"Authorization": f"Bearer {rotated_payload['access_key']}"},
+    )
+    assert new_token_response.status_code == 200
+    browser_session_response = client.get(
+        "/auth/session",
+        headers={"Authorization": f"Bearer {login_access_key}"},
+    )
+    assert browser_session_response.status_code == 200
+
+
+def test_token_apikey_api_creates_key_for_matching_email_user(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "username": "admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users.append(
+        {
+            "id": 303,
+            "email": "target@example.com",
+            "name": "Target",
+            "status": "active",
+            "allowed_groups": [22, 11],
+        }
+    )
+    access_key = login(client)["access_key"]
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/api/v1/apikey",
+            headers={"Authorization": f"Bearer {access_key}"},
+            json={
+                "action": "create",
+                "name": "svc:obj:v1:target@example.com",
+                "quota": 250,
+                "group_id": 11,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "create"
+    assert payload["fallback_to_admin"] is False
+    assert payload["item"]["key_value"] == "sk-created-1"
+    assert payload["item"]["user_id"] == 303
+    assert payload["item"]["target_email"] == "target@example.com"
+    assert payload["item"]["group_id"] == 22
+    assert backend.api_key_create_calls == [
+        {
+            "user_id": 303,
+            "path": "/api/v1/admin/users/303/api-keys",
+            "json": {"quota": 250, "name": "svc:obj:v1:target@example.com", "group_id": 22},
+        }
+    ]
+
+
+def test_token_apikey_api_falls_back_to_admin_when_email_account_missing(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "username": "admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    access_key = login(client)["access_key"]
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/sidecar/api/v1/apikey",
+            headers={"x-access-key": access_key},
+            json={
+                "action": "create",
+                "name": "svc:obj:v1:missing@example.com",
+                "options": {"quota": 100},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["fallback_to_admin"] is True
+    assert payload["fallback_reason"] == "USER_NOT_FOUND"
+    assert payload["item"]["user_id"] == 1
+    assert payload["item"]["group_id"] == 11
+    assert backend.api_key_create_calls == [
+        {
+            "user_id": 1,
+            "path": "/api/v1/admin/users/1/api-keys",
+            "json": {
+                "quota": 100,
+                "name": "svc:obj:v1:missing@example.com",
+                "group_id": 11,
+            },
+        }
+    ]
+
+
+def test_token_apikey_api_lists_encoded_keys_and_filters_by_email(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {"id": 1, "email": "admin@example.com", "name": "Admin", "group_id": 11},
+        {"id": 2, "email": "source@example.com", "name": "Source", "group_id": 22},
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": "admin-a",
+            "user_id": 1,
+            "name": "svc:obj:v1:target@example.com",
+            "key": "sk-secret",
+            "group_id": 11,
+            "quota": 10,
+        },
+        {
+            "id": "ordinary",
+            "user_id": 1,
+            "name": "ordinary",
+            "key": "sk-secret-2",
+            "group_id": 11,
+        },
+    ]
+    backend.user_api_keys[2] = [
+        {
+            "id": "source-a",
+            "user_id": 2,
+            "name": "svc:obj:v1:other@example.com",
+            "key": "sk-secret-3",
+            "group_id": 22,
+        },
+    ]
+    access_key = login(client)["access_key"]
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/api/v1/apikey",
+            headers={"Authorization": f"Bearer {access_key}"},
+            json={"action": "list", "email": "target@example.com"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["key_id"] == "admin-a"
+    assert payload["items"][0]["target_email"] == "target@example.com"
+    assert payload["items"][0]["user_email"] == "admin@example.com"
+    assert payload["items"][0]["key_value"] is None
+
+
+def test_token_apikey_api_requires_auth(client) -> None:
+    response = client.post(
+        "/api/v1/apikey",
+        json={"action": "list"},
+    )
+
+    assert response.status_code == 401
 
 
 def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) -> None:

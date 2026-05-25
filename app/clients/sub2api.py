@@ -37,6 +37,7 @@ class Sub2APIClient:
     UPDATE_USER_PATH = "/api/v1/admin/users/{user_id}"
     LIST_OPENAI_ACCOUNTS_PATH = "/api/v1/admin/accounts"
     USER_API_KEYS_PATH = "/api/v1/admin/users/{user_id}/api-keys"
+    CREATE_USER_API_KEY_PATH = "/api/v1/admin/users/{user_id}/api-keys"
     UPDATE_USER_BALANCE_PATH = "/api/v1/admin/users/{user_id}/balance"
     USAGE_LIST_PATH = "/api/v1/admin/usage"
     USAGE_STATS_PATH = "/api/v1/admin/usage/stats"
@@ -226,6 +227,30 @@ class Sub2APIClient:
             if isinstance(envelope.get("total"), int):
                 total = envelope["total"]
         return {"items": items, "total": total if total is not None else len(items), "raw": last_raw}
+
+    def create_user_api_key(
+        self,
+        *,
+        user_id: Any,
+        name: str,
+        group_id: Any,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = self._build_api_key_payload(name=name, group_id=group_id, options=options or {})
+        path = self.CREATE_USER_API_KEY_PATH.format(user_id=user_id)
+        data = self._request("POST", path, json=payload)
+        body = self._unwrap_data(data)
+        api_key = self._extract_value(body, "api_key", "data.api_key", "result.api_key")
+        if isinstance(api_key, dict):
+            result = dict(api_key)
+        elif isinstance(body, dict):
+            result = dict(body)
+        else:
+            result = {}
+        result.setdefault("name", name)
+        result.setdefault("user_id", user_id)
+        result.setdefault("group_id", group_id)
+        return result
 
     def list_all_user_api_keys(self, page_size: int = 1000) -> dict[str, Any]:
         users = self.list_users(page_size=page_size)
@@ -579,6 +604,35 @@ class Sub2APIClient:
                 "haiku_mapped_model": "gpt-5.4-mini",
                 "exact_model_mappings": {},
             }
+        return payload
+
+    def _build_api_key_payload(
+        self,
+        *,
+        name: str,
+        group_id: Any,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = {
+            key: value
+            for key, value in options.items()
+            if key
+            not in {
+                "id",
+                "key_id",
+                "key",
+                "api_key",
+                "user_id",
+                "owner_user_id",
+                "target_user_id",
+                "group_id",
+                "group_ids",
+                "current_group_id",
+                "target_group_id",
+            }
+        }
+        payload["name"] = name
+        payload["group_id"] = group_id
         return payload
 
     def _build_openai_oauth_account_payload(
