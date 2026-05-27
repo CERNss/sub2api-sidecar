@@ -1160,6 +1160,12 @@ def test_sub2api_client_create_group_uses_upstream_group_form_payload() -> None:
     assert payload["daily_limit_usd"] is None
     assert payload["weekly_limit_usd"] is None
     assert payload["monthly_limit_usd"] is None
+    assert payload["allow_image_generation"] is True
+    assert payload["image_rate_independent"] is True
+    assert payload["image_rate_multiplier"] == 1
+    assert payload["image_price_1k"] is None
+    assert payload["image_price_2k"] is None
+    assert payload["image_price_4k"] is None
     assert payload["require_oauth_only"] is False
     assert payload["messages_dispatch_model_config"] == {
         "opus_mapped_model": "gpt-5.4",
