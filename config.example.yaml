@@ -1,7 +1,6 @@
 app:
-  base_url: http://127.0.0.1:8000
-  # Set to /sidecar when this service is exposed behind a path-stripping proxy.
-  base_path: ""
+  base_url: https://sub2api.tcgcard.jp/sidecar
+  base_path: /sidecar
   auth_username: admin
   access_key_ttl_hours: 12
 
@@ -12,35 +11,35 @@ database:
   name: sub2api_sidecar
 
 openai:
-  oauth_redirect_uri: http://localhost:1455/auth/callback
+  oauth_redirect_uri: https://sub2api.tcgcard.jp/sidecar/auth/callback
 
 sub2api:
   request_timeout_seconds: 30
-  # The first upstream is the primary site used by token handoff login.
-  # Later upstreams are managed secondary sites: the UI can switch to them for
-  # configuration, orchestration, provisioning, and data collection targets.
   upstreams:
     - id: main
       name: 主站 Sub2API
-      base_url: http://localhost:8080
+      base_url: http://sub2api:8080
       admin_api_key_env: SUB2API_ADMIN_API_KEY
-    # - id: secondary
-    #   name: 从站 Sub2API
-    #   base_url: http://sub2api-secondary:8080
-    #   admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
-    #   request_timeout_seconds: 30
+
+    - id: us-proxy-2
+      name: US Proxy 2
+      base_url: https://us-proxy-2.sub2api.tcgcard.jp
+      admin_api_key_env: SUB2API_US_PROXY_2_ADMIN_API_KEY
+
   provisioning_defaults:
+    account_concurrency: 6
     group_platform: openai
     account_provider: openai
     account_platform: openai
     account_type: oauth
     account_ws_mode: context_pool
-    account_concurrency: 5
     account_model_whitelist:
       - gpt-5.3-codex
       - gpt-5.4
       - gpt-5.4-mini
       - gpt-5.5
+      - codex-auto-review
+      - gpt-images-2
     account_temporary_unschedulable: true
     account_temporary_unschedulable_rules:
       - error_code: "529"

@@ -656,6 +656,8 @@ class Sub2APIClient:
                 "api_key",
                 "user_id",
                 "owner_user_id",
+                "target",
+                "target_email",
                 "target_user_id",
                 "group_id",
                 "group_ids",

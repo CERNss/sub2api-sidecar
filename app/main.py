@@ -132,7 +132,7 @@ from app.models.schemas import (
     UserUsageSegmentsEnvelope,
 )
 from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
-from app.services.api_key_automation import ApiKeyAutomationService
+from app.services.api_key_automation import ApiKeyAutomationService, ApiKeyCreateTargetError
 from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.credit_control import CreditControlError, CreditControlService
 from app.services.credit_scheduler import CreditControlScheduler
@@ -868,8 +868,23 @@ def api_key_automation(
         key_options = {**extra_options, **payload.options}
         create_result = service.create_named_key(
             name=payload.name,
+            target=payload.target,
             key_options=key_options,
         )
+        if isinstance(create_result, ApiKeyCreateTargetError):
+            response = ApiKeyAutomationEnvelope(
+                success=False,
+                action="create",
+                status=create_result.status,
+                fallback_to_admin=False,
+                item=ApiKeyAutomationItemResponse(
+                    target_email=create_result.target_email,
+                    status=create_result.status,
+                ),
+                total=0,
+            )
+            return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
         item = dict(create_result.api_key)
         item["target_email"] = create_result.target_email
         item["user_email"] = create_result.user_email

@@ -2809,7 +2809,7 @@ function KeyTransferView({
   const [tokenBusy, setTokenBusy] = useState(false);
   const apiTokenValue = apiToken?.access_key || "$SIDECAR_API_TOKEN";
   const apiKeyEndpointUrl = `${window.location.origin}${apiUrl("/api/v1/apikey")}`;
-  const createApiKeyPayload = '{"action":"create","name":"service:object:v1:user@example.com","quota":0}';
+  const createApiKeyPayload = '{"action":"create","name":"service:object:v1:user@example.com","target":"user@example.com","quota":0}';
   const listApiKeyPayload = '{"action":"list","email":"user@example.com"}';
   const createApiKeyExample = `curl -sS -X POST ${apiKeyEndpointUrl}
 -H "Authorization: Bearer ${apiTokenValue}"

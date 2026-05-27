@@ -97,7 +97,18 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
   -d '{"action":"create","name":"svc:obj:v1:user@example.com","quota":0}'
 ```
 
-创建时如果 key 名最后一段邮箱能精确匹配一个 Sub2API 用户，会放到该用户第一个可用分组；无法匹配邮箱或没有对应账号时默认放到 admin 用户下。请求里的 `group_id` / `group_ids` 会被忽略，分组只由 sidecar 选择。
+创建时如果 `target` 为空，会沿用 key 名最后一段邮箱作为目标用户；如果能精确匹配一个 Sub2API 用户，会放到该用户第一个可用分组；无法匹配邮箱或没有对应账号时默认放到 admin 用户下。请求里的 `group_id` / `group_ids` 会被忽略，分组只由 sidecar 选择。
+
+也可以显式传 `target` 强制指定用户：
+
+```bash
+curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
+  -H "Authorization: Bearer $SIDECAR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"create","name":"svc:obj:v1:user@example.com","target":"forced@example.com","quota":0}'
+```
+
+显式 `target` 不存在或不唯一时不会 fallback 到 admin，会返回 `{"success":false,"status":"USER_NOT_FOUND"}` 或 `{"success":false,"status":"USER_EMAIL_NOT_UNIQUE"}`。
 
 ```bash
 curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
@@ -277,11 +288,11 @@ database:
 - URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、`sub2api.upstreams[*].base_url`、以及 `database.url`；不要写进 `.env`。
 - 当前运行时只支持 PostgreSQL，不再支持 SQLite，也不做 SQLite 数据迁移。
 - `app.base_path` 默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
-- 预配页面不再提供 assignment mode 切换；`POST /provision/start` 始终按入口 email 解析或创建专属分组，并把 flow 记录为 `dedicated`。
+- 预配页面不再提供 assignment mode 切换；`POST /provision/start` 会先复用入口 email 的专属分组。没有专属分组且配置了 landing pool 时，新 OAuth 账号会进入优先级最高的 landing 分组并把 flow 记录为 `managed_pool`；landing pool 为空时才创建新的 email 专属分组并记录为 `dedicated`。
 - 自动轮换执行开关和业务策略通过动态编排页面或 `/rotation/auto/config` 运行时配置；已登录管理员可请求 `GET /rotation/auto/scheduler` 查看后台调度线程和当前运行时开关。
 - 自动充值后台执行开关通过额度控制页面或 `/api/credit-control/settings` 运行时配置；已登录管理员可请求 `GET /api/credit-control/scheduler` 查看状态。
 - 运行态数据采集开关、`collect_interval_seconds`、`expiration`、`retention_seconds` 和 `max_storage_mb` 通过全局设置或 `/api/operational-data/settings` 运行时配置，不写进 `config.yaml`。采集线程默认 60 秒一轮，按当前 PostgreSQL 设置调整间隔，按顺序拉取 Sub2API accounts、groups、users、用户 usage、用户 API keys、当天 usage、昨天 usage，先落 PostgreSQL raw snapshots 和派生 metrics，再由告警、自动编排、额度控制读取本地数据。`expiration` 不设置表示本地数据永不过期，设置为正整数秒时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。`retention_seconds` 按时间删除旧 snapshots/metrics，`max_storage_mb` 按大小从最老记录开始清理并保留每个 source/metric 的最新记录。已登录管理员可请求 `GET /api/operational-data/status` 查看采样状态、当前占用、每个数据源状态、最近一次 tick 时间和错误。
-- 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只解析或创建专属 group，并完成 OAuth 账号挂接。
+- 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只解析目标 group，并完成 OAuth 账号挂接。
 
 环境变量可以覆盖 `config.yaml` 中的同名配置项；已移除的运行时环境变量不再兼容，出现时会直接启动失败。新部署建议优先改 `config.yaml`。
 
@@ -295,12 +306,12 @@ sub2api:
   upstreams:
     - id: main
       name: 主站 Sub2API
-      base_url: http://sub2api-main:8080
+      base_url: http://sub2api:8080
       admin_api_key_env: SUB2API_ADMIN_API_KEY
-    - id: secondary
-      name: 从站 Sub2API
-      base_url: http://sub2api-secondary:8080
-      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+    - id: us-proxy-2
+      name: US Proxy 2
+      base_url: https://us-proxy-2.sub2api.tcgcard.jp
+      admin_api_key_env: SUB2API_US_PROXY_2_ADMIN_API_KEY
 ```
 
 第一个 upstream 是默认上游，也是 Sub2API 跳转携带 `token` 登录 sidecar 时唯一验证 JWT 的主站；后续 upstream 按从站处理，不参与跳转 token 登录。登录后的顶部“当前用户”区域会显示全局 Sub2API 切换器，切换目标后，用户分组编排、密钥管理和 OAuth 预配会把对应 `upstream_id` 发给后端并访问该从站。也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集会遍历所有 upstream：主站继续写入原有 source/metric key，从站写入 `upstream:<id>:` 前缀的 source/metric key，避免不同站点数据混在一起；余额管理、用量分层、自动轮换仍消费主站的兼容 key。
@@ -353,13 +364,15 @@ https://sub2api.example.com/sidecar/
 - 创建 OAuth 账号时携带 `platform=openai`
 - 创建 OAuth 账号时携带 `type=oauth`
 - 创建 OAuth 账号时携带 `wsmode=context_pool`
+- 创建 OAuth 账号时携带 `concurrency=6`
 - 创建 OAuth 账号时打开 `temporary_unschedulable`
+- 创建 OAuth 账号时附带模型白名单：`gpt-5.3-codex`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.5`、`codex-auto-review`、`gpt-images-2`
 - 创建 OAuth 账号时附带三条默认停调规则：
   - `529` -> 暂停 `60` 分钟，关键词 `overloaded, too many`
   - `429` -> 暂停 `10` 分钟，关键词 `rate limit, too many requests`
   - `503` -> 暂停 `30` 分钟，关键词 `unavailable, maintenance`
-- 创建 OAuth 账号时会把专属分组 ID 带入 payload
-- 如果已存在同名或同邮箱 OAuth 账号，`POST /provision/start` 会跳过授权登录，保留已有 OAuth token，只更新账号默认配置并确保绑定到专属分组
+- 创建 OAuth 账号时会把目标分组 ID 带入 payload：优先使用已有 email 专属分组，其次使用 landing pool，最后才创建新的 email 专属分组
+- 如果已存在同名或同邮箱 OAuth 账号，`POST /provision/start` 会跳过授权登录，保留已有 OAuth token，只更新账号默认配置并确保绑定到目标分组
 
 ## 安装依赖
 

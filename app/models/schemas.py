@@ -627,6 +627,7 @@ class ApiKeyAutomationRequest(BaseModel):
     action: str = Field(..., pattern="^(create|list)$")
     upstream_id: str | None = Field(default=None, min_length=1)
     name: str | None = Field(default=None, min_length=1)
+    target: str | None = None
     email: EmailStr | None = None
     options: dict[str, Any] = Field(default_factory=dict)
 
@@ -651,6 +652,7 @@ class ApiKeyAutomationItemResponse(BaseModel):
 class ApiKeyAutomationEnvelope(BaseModel):
     success: bool = True
     action: str
+    status: str = "ok"
     key_name_pattern: str = "service:object:version:email"
     fallback_to_admin: bool | None = None
     fallback_reason: str | None = None

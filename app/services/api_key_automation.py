@@ -22,6 +22,13 @@ class ApiKeyCreateResult:
     fallback_reason: str | None
 
 
+@dataclass(frozen=True)
+class ApiKeyCreateTargetError:
+    status: str
+    target_email: str | None
+    reason: str
+
+
 class ApiKeyAutomationService:
     """Token-facing API key operations backed by Sub2API admin APIs."""
 
@@ -40,9 +47,16 @@ class ApiKeyAutomationService:
         self,
         *,
         name: str,
+        target: str | None = None,
         key_options: dict[str, Any] | None = None,
-    ) -> ApiKeyCreateResult:
-        target_user, target_email, fallback_reason = self._resolve_create_target(name)
+    ) -> ApiKeyCreateResult | ApiKeyCreateTargetError:
+        target_user, target_email, fallback_reason, target_error = self._resolve_create_target(
+            name,
+            target=target,
+        )
+        if target_error is not None:
+            return target_error
+
         target_group_id = self.rotation_service.first_available_group_id_for_user(target_user)
         if target_group_id in (None, ""):
             raise RotationExecutionError("Target user has no available group")
@@ -102,7 +116,41 @@ class ApiKeyAutomationService:
     def _resolve_create_target(
         self,
         name: str,
-    ) -> tuple[dict[str, Any], str | None, str | None]:
+        *,
+        target: str | None = None,
+    ) -> tuple[dict[str, Any], str | None, str | None, ApiKeyCreateTargetError | None]:
+        explicit_target = (self._text_or_none(target) or "").strip()
+        if explicit_target:
+            target_email = explicit_target
+            users_by_email, duplicate_emails = self.rotation_service.users_by_exact_emails(
+                {target_email}
+            )
+            email_key = self.rotation_service.normalize_email_value(target_email)
+            if email_key in duplicate_emails:
+                return (
+                    {},
+                    target_email,
+                    None,
+                    ApiKeyCreateTargetError(
+                        status="USER_EMAIL_NOT_UNIQUE",
+                        target_email=target_email,
+                        reason="Target user email is not unique",
+                    ),
+                )
+            target_user = users_by_email.get(email_key)
+            if target_user is None:
+                return (
+                    {},
+                    target_email,
+                    None,
+                    ApiKeyCreateTargetError(
+                        status="USER_NOT_FOUND",
+                        target_email=target_email,
+                        reason="Target user was not found",
+                    ),
+                )
+            return target_user, target_email, None, None
+
         target_email = self.rotation_service.extract_transfer_email(name)
         if target_email:
             users_by_email, duplicate_emails = self.rotation_service.users_by_exact_emails(
@@ -110,13 +158,13 @@ class ApiKeyAutomationService:
             )
             email_key = self.rotation_service.normalize_email_value(target_email)
             if email_key in duplicate_emails:
-                return self._admin_user(), target_email, "USER_EMAIL_NOT_UNIQUE"
+                return self._admin_user(), target_email, "USER_EMAIL_NOT_UNIQUE", None
             target_user = users_by_email.get(email_key)
             if target_user is not None:
-                return target_user, target_email, None
-            return self._admin_user(), target_email, "USER_NOT_FOUND"
+                return target_user, target_email, None, None
+            return self._admin_user(), target_email, "USER_NOT_FOUND", None
 
-        return self._admin_user(), None, "KEY_NAME_EMAIL_NOT_FOUND"
+        return self._admin_user(), None, "KEY_NAME_EMAIL_NOT_FOUND", None
 
     def _admin_user(self) -> dict[str, Any]:
         admin_user_id = self.rotation_service.resolve_admin_user_id()
