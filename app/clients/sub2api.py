@@ -11,6 +11,10 @@ from app.config import Sub2APIProvisioningDefaults, TemporaryUnschedulableRule
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SCHEDULED_TEST_MODEL_ID = "gpt-5.5"
+DEFAULT_SCHEDULED_TEST_CRON_EXPRESSION = "*/5 * * * *"
+DEFAULT_SCHEDULED_TEST_MAX_RESULTS = 100
+
 
 class Sub2APIError(Exception):
     """Raised when Sub2API admin API interactions fail."""
@@ -48,6 +52,8 @@ class Sub2APIClient:
     CREATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts"
     UPDATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts/{account_id}"
     BIND_ACCOUNT_TO_GROUP_PATH = "/api/v1/admin/groups/{group_id}/accounts"
+    LIST_SCHEDULED_TEST_PLANS_PATH = "/api/v1/admin/accounts/{account_id}/scheduled-test-plans"
+    CREATE_SCHEDULED_TEST_PLAN_PATH = "/api/v1/admin/scheduled-test-plans"
 
     def __init__(
         self,
@@ -566,6 +572,29 @@ class Sub2APIClient:
         data = self._request("POST", path, json=payload)
         return {"account_id": account_id, "group_id": group_id, "raw": data}
 
+    def list_scheduled_test_plans(self, account_id: Any) -> list[dict[str, Any]]:
+        path = self.LIST_SCHEDULED_TEST_PLANS_PATH.format(account_id=account_id)
+        data = self._request("GET", path)
+        return self._parse_scheduled_test_plan_list(data)
+
+    def ensure_default_scheduled_test_plan(self, account_id: Any) -> dict[str, Any]:
+        for plan in self.list_scheduled_test_plans(account_id):
+            if self._is_default_scheduled_test_plan(plan):
+                return {"account_id": account_id, "created": False, "plan": plan}
+
+        payload = {
+            "account_id": self._coerce_numeric_id(account_id),
+            "model_id": DEFAULT_SCHEDULED_TEST_MODEL_ID,
+            "cron_expression": DEFAULT_SCHEDULED_TEST_CRON_EXPRESSION,
+            "enabled": True,
+            "max_results": DEFAULT_SCHEDULED_TEST_MAX_RESULTS,
+            "auto_recover": True,
+        }
+        data = self._request("POST", self.CREATE_SCHEDULED_TEST_PLAN_PATH, json=payload)
+        body = self._unwrap_data(data)
+        plan = body if isinstance(body, dict) else {"raw": body}
+        return {"account_id": account_id, "created": True, "plan": plan, "raw": data}
+
     def _build_group_payload(self, name: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "name": name,
@@ -1008,6 +1037,55 @@ class Sub2APIClient:
                 }
             )
         return accounts
+
+    def _parse_scheduled_test_plan_list(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        body = self._unwrap_data(payload)
+        if isinstance(body, list):
+            raw_plans = body
+        elif isinstance(body, dict) and isinstance(body.get("items"), list):
+            raw_plans = body["items"]
+        elif isinstance(body, dict) and isinstance(body.get("plans"), list):
+            raw_plans = body["plans"]
+        else:
+            raise Sub2APIError("Unable to parse scheduled test plan list from Sub2API response")
+
+        plans: list[dict[str, Any]] = []
+        for item in raw_plans:
+            if not isinstance(item, dict):
+                continue
+            plans.append(
+                {
+                    "id": item.get("id") or item.get("plan_id"),
+                    "account_id": item.get("account_id") or item.get("accountId"),
+                    "model_id": str(item.get("model_id") or item.get("modelId") or ""),
+                    "cron_expression": str(
+                        item.get("cron_expression") or item.get("cronExpression") or ""
+                    ),
+                    "enabled": bool(
+                        self._optional_bool_value(item, "enabled", "is_enabled", "isEnabled")
+                    ),
+                    "max_results": self._optional_int_value(
+                        item,
+                        "max_results",
+                        "maxResults",
+                    ),
+                    "auto_recover": bool(
+                        self._optional_bool_value(item, "auto_recover", "autoRecover")
+                    ),
+                    "raw": item,
+                }
+            )
+        return plans
+
+    def _is_default_scheduled_test_plan(self, plan: dict[str, Any]) -> bool:
+        return (
+            str(plan.get("model_id") or "").strip() == DEFAULT_SCHEDULED_TEST_MODEL_ID
+            and str(plan.get("cron_expression") or "").strip()
+            == DEFAULT_SCHEDULED_TEST_CRON_EXPRESSION
+            and plan.get("enabled") is True
+            and plan.get("max_results") == DEFAULT_SCHEDULED_TEST_MAX_RESULTS
+            and plan.get("auto_recover") is True
+        )
 
     def _extract_account_usage_percentages(self, item: dict[str, Any]) -> dict[str, Any]:
         return {

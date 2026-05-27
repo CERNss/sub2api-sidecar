@@ -429,14 +429,19 @@ class ProvisioningService:
                 oauth_payload=oauth_payload,
                 group_id=group_id,
             )
+            client.ensure_default_scheduled_test_plan(account["id"])
             return account, "created"
 
         account_id = existing["id"]
         if not self._account_has_group(existing, group_id):
             client.bind_account_to_group(account_id, group_id)
-            return self._existing_account_payload(existing, email), "bound_existing"
+            account = self._existing_account_payload(existing, email)
+            client.ensure_default_scheduled_test_plan(account["id"])
+            return account, "bound_existing"
 
-        return self._existing_account_payload(existing, email), "already_bound"
+        account = self._existing_account_payload(existing, email)
+        client.ensure_default_scheduled_test_plan(account["id"])
+        return account, "already_bound"
 
     def _configure_existing_oauth_account(
         self,
@@ -455,7 +460,9 @@ class ProvisioningService:
         account_id = existing_account["id"]
         if not self._account_has_group(existing_account, group_id):
             client.bind_account_to_group(account_id, group_id)
+            client.ensure_default_scheduled_test_plan(account["id"])
             return account, "configured_and_bound"
+        client.ensure_default_scheduled_test_plan(account["id"])
         return account, "configured_existing"
 
     def _find_oauth_account(

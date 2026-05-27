@@ -62,6 +62,13 @@ EXPECTED_MODEL_WHITELIST_MAPPING = {
     "gpt-5.4-mini": "gpt-5.4-mini",
     "gpt-5.5": "gpt-5.5",
 }
+EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN = {
+    "model_id": "gpt-5.5",
+    "cron_expression": "*/5 * * * *",
+    "enabled": True,
+    "max_results": 100,
+    "auto_recover": True,
+}
 
 
 class FakeResponse:
@@ -227,6 +234,8 @@ class FakeRotationSub2API:
         self.exchange_code_calls = 0
         self.update_account_calls: list[dict[str, object]] = []
         self.bind_account_calls: list[dict[str, object]] = []
+        self.scheduled_test_plans: dict[str, list[dict[str, object]]] = {}
+        self.scheduled_test_plan_calls: list[dict[str, object]] = []
         self.group_usage_by_window = {
             "1d": [
                 {
@@ -340,6 +349,21 @@ class FakeRotationSub2API:
             return FakeResponse(404, {"message": "user not found"})
         if method == "GET" and path == "/api/v1/admin/accounts":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.accounts})
+        if (
+            method == "GET"
+            and path.startswith("/api/v1/admin/accounts/")
+            and path.endswith("/scheduled-test-plans")
+        ):
+            account_id = path.split("/")[5]
+            self.scheduled_test_plan_calls.append({"method": "GET", "account_id": account_id})
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": self.scheduled_test_plans.get(account_id, []),
+                },
+            )
         if method == "POST" and path == "/api/v1/admin/groups":
             self.create_group_calls += 1
             return FakeResponse(
@@ -414,6 +438,24 @@ class FakeRotationSub2API:
                     "code": 0,
                     "message": "success",
                     "data": {"account_id": "oa-1", "name": json["name"]},
+                },
+            )
+        if method == "POST" and path == "/api/v1/admin/scheduled-test-plans":
+            self.scheduled_test_plan_calls.append(
+                {"method": "POST", "json": dict(json or {})}
+            )
+            account_id = str(json["account_id"])
+            plan = {
+                "id": len(self.scheduled_test_plan_calls),
+                **dict(json or {}),
+            }
+            self.scheduled_test_plans.setdefault(account_id, []).append(plan)
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": plan,
                 },
             )
         if method == "PUT" and path.startswith("/api/v1/admin/accounts/"):
@@ -846,6 +888,12 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
         return FakeResponse(200, {"items": []})
     if method == "GET" and path == "/api/v1/admin/accounts":
         return FakeResponse(200, {"items": []})
+    if (
+        method == "GET"
+        and path.startswith("/api/v1/admin/accounts/")
+        and path.endswith("/scheduled-test-plans")
+    ):
+        return FakeResponse(200, {"data": []})
     if method == "POST" and path == "/api/v1/admin/groups":
         assert json["platform"] == "openai"
         assert json["is_exclusive"] is True
@@ -914,6 +962,12 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
                 "name": json["name"],
             },
         )
+    if method == "POST" and path == "/api/v1/admin/scheduled-test-plans":
+        assert json == {
+            "account_id": "oa-1",
+            **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN,
+        }
+        return FakeResponse(200, {"id": "stp-1", **json})
     if method == "POST" and path == "/api/v1/admin/groups/g-1/accounts":
         return FakeResponse(200, {"success": True, "account_id": json["account_id"]})
     return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
@@ -1234,6 +1288,80 @@ def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:
                 "session_id": "session-1",
             },
         },
+    ]
+
+
+def test_sub2api_client_creates_default_scheduled_test_plan_when_missing() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        calls.append({"method": method, "path": path, "json": json})
+        if method == "GET":
+            return FakeResponse(200, {"code": 0, "message": "success", "data": []})
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {"id": 501, **dict(json or {})},
+            },
+        )
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.ensure_default_scheduled_test_plan(account_id="123")
+
+    assert result["created"] is True
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/v1/admin/accounts/123/scheduled-test-plans",
+            "json": None,
+        },
+        {
+            "method": "POST",
+            "path": "/api/v1/admin/scheduled-test-plans",
+            "json": {"account_id": 123, **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN},
+        },
+    ]
+
+
+def test_sub2api_client_reuses_matching_default_scheduled_test_plan() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": [{"id": 501, **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN}],
+            },
+        )
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.ensure_default_scheduled_test_plan(account_id=123)
+
+    assert result["created"] is False
+    assert calls == [
+        {
+            "method": "GET",
+            "path": "/api/v1/admin/accounts/123/scheduled-test-plans",
+            "json": None,
+        }
     ]
 
 
@@ -1617,6 +1745,12 @@ sub2api:
         )
         if method == "GET" and path in {"/api/v1/admin/groups/all", "/api/v1/admin/accounts"}:
             return FakeResponse(200, {"code": 0, "message": "success", "data": []})
+        if (
+            method == "GET"
+            and path.startswith("/api/v1/admin/accounts/")
+            and path.endswith("/scheduled-test-plans")
+        ):
+            return FakeResponse(200, {"code": 0, "message": "success", "data": []})
         if method == "POST" and path == "/api/v1/admin/groups":
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": "secondary-group"}})
         if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
@@ -1649,6 +1783,12 @@ sub2api:
                 200,
                 {"code": 0, "message": "success", "data": {"id": "secondary-account", "name": json["name"]}},
             )
+        if method == "POST" and path == "/api/v1/admin/scheduled-test-plans":
+            assert json == {
+                "account_id": "secondary-account",
+                **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN,
+            }
+            return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": "stp-secondary", **json}})
         if method == "POST" and path == "/api/v1/admin/groups/secondary-group/accounts":
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
@@ -3622,6 +3762,10 @@ def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) 
     assert start_response.json()["group_id"] == 999
     assert backend.create_group_calls == 1
     assert complete_response.status_code == 200
+    assert backend.scheduled_test_plan_calls == [
+        {"method": "GET", "account_id": "oa-1"},
+        {"method": "POST", "json": {"account_id": "oa-1", **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN}},
+    ]
     completed_flow = main.get_flow_store().get_by_flow_id(start_response.json()["flow_id"])
     assert completed_flow is not None
     assert completed_flow.user_id is None
