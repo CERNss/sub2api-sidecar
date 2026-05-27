@@ -583,6 +583,13 @@ class OrchestrationApiKeyAssignRequest(BaseModel):
     reason: str | None = None
 
 
+class OrchestrationGroupMigrationRequest(BaseModel):
+    upstream_id: str | None = Field(default=None, min_length=1)
+    source_group_id: Any
+    target_group_id: Any
+    reason: str | None = None
+
+
 class KeyTransferRequest(BaseModel):
     upstream_id: str | None = Field(default=None, min_length=1)
     source_user_id: Any | None = None

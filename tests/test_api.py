@@ -489,6 +489,14 @@ class FakeRotationSub2API:
                     "new_group_id": json["new_group_id"],
                 }
             )
+            for user in self.users:
+                if user["id"] == 101:
+                    user["group_id"] = json["new_group_id"]
+                    user["group_name"] = "rotation-high" if json["new_group_id"] == 22 else "rotation-low"
+                    break
+            for api_key in self.user_api_keys.get(101, []):
+                if str(api_key.get("group_id")) == str(json["old_group_id"]):
+                    api_key["group_id"] = json["new_group_id"]
             return FakeResponse(
                 200,
                 {"code": 0, "message": "success", "data": {"migrated_keys": 2}},
@@ -501,6 +509,14 @@ class FakeRotationSub2API:
                     "new_group_id": json["new_group_id"],
                 }
             )
+            for user in self.users:
+                if user["id"] == 202:
+                    user["group_id"] = json["new_group_id"]
+                    user["group_name"] = "rotation-high" if json["new_group_id"] == 22 else "rotation-low"
+                    break
+            for api_key in self.user_api_keys.get(202, []):
+                if str(api_key.get("group_id")) == str(json["old_group_id"]):
+                    api_key["group_id"] = json["new_group_id"]
             return FakeResponse(
                 200,
                 {"code": 0, "message": "success", "data": {"migrated_keys": 1}},
@@ -578,6 +594,10 @@ class FakeRotationSub2API:
         if method == "PUT" and path.startswith("/api/v1/admin/api-keys/"):
             key_id = path.split("/")[5]
             self.api_key_group_calls.append({"key_id": key_id, "group_id": json["group_id"]})
+            for keys in self.user_api_keys.values():
+                for candidate in keys:
+                    if str(candidate.get("id") or candidate.get("key_id")) == key_id:
+                        candidate["group_id"] = json["group_id"]
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "GET" and path.startswith("/api/v1/admin/users/") and path.endswith("/api-keys"):
             return self._api_keys_response(int(path.split("/")[5]), params=params)
@@ -3001,6 +3021,109 @@ def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> 
     runs = main.get_flow_store().list_orchestration_runs()
     assert runs[0].tag == "manual_api_key"
     assert runs[0].moved[0]["metadata"]["key_id"] == "key-101"
+
+
+def test_group_migration_moves_direct_source_users_and_all_keys(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[1]["group_id"] = 11
+    backend.users[1]["group_name"] = "rotation-low"
+    backend.user_api_keys[101] = [
+        {"id": "key-101-source", "name": "primary", "group_id": 11},
+        {"id": "key-101-extra", "name": "extra-route", "group_id": 33},
+        {"id": "key-101-unassigned", "name": "unassigned", "group_id": None},
+    ]
+    backend.user_api_keys[202] = [
+        {"id": "key-202-source", "name": "primary", "group_id": 11},
+        {"id": "key-202-target", "name": "already-target", "group_id": 22},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/groups/migrate",
+            json={
+                "source_group_id": 11,
+                "target_group_id": 22,
+                "reason": "move full group",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_kind"] == "manual"
+    assert payload["tag"] == "manual_group_migration"
+    assert payload["status"] == "moved"
+    assert len(payload["moved"]) == 2
+    assert payload["moved"][0]["user_id"] == 202
+    assert payload["moved"][1]["user_id"] == 101
+    assert backend.replace_calls == [
+        {"user_id": 202, "old_group_id": 11, "new_group_id": 22},
+        {"user_id": 101, "old_group_id": 11, "new_group_id": 22},
+    ]
+    assert backend.api_key_group_calls == [
+        {"key_id": "key-101-extra", "group_id": 22},
+        {"key_id": "key-101-unassigned", "group_id": 22},
+    ]
+    assert main.get_flow_store().get_user_assignment(101).current_group_id == 22
+    assert main.get_flow_store().get_user_assignment(202).current_group_id == 22
+    runs = main.get_flow_store().list_orchestration_runs()
+    assert runs[0].tag == "manual_group_migration"
+    assert len(runs[0].moved) == 2
+
+
+def test_group_migration_ignores_allowed_groups_without_direct_source_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 404,
+            "email": "allowed-only@example.com",
+            "name": "allowed-only@example.com",
+            "status": "active",
+            "allowed_groups": [11, 22],
+        }
+    ]
+    backend.user_api_keys[404] = [
+        {"id": "key-404", "name": "allowed-key", "group_id": 11},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/groups/migrate",
+            json={
+                "source_group_id": 11,
+                "target_group_id": 22,
+                "reason": "do not infer from allowed groups",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "empty"
+    assert payload["moved"] == []
+    assert backend.replace_calls == []
+    assert backend.api_key_group_calls == []
+
+
+def test_group_migration_rejects_same_source_and_target(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/groups/migrate",
+            json={
+                "source_group_id": 11,
+                "target_group_id": 11,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "different" in response.json()["detail"]
+    assert backend.replace_calls == []
 
 
 def test_key_transfer_moves_matching_admin_keys_and_preserves_key_value(client) -> None:

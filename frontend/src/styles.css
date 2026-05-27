@@ -3046,6 +3046,37 @@ pre {
   color: oklch(0.55 0.02 250);
 }
 
+.manual-group-migration-summary,
+.manual-group-migration-panel {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.manual-group-migration-summary .ant-typography,
+.manual-group-migration-panel .ant-typography {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+.manual-group-migration-summary {
+  padding: 12px;
+  border: 1px solid oklch(0.91 0.022 250);
+  border-radius: 8px;
+  background: oklch(0.98 0.006 250);
+}
+
+.manual-group-migration-panel {
+  max-height: none;
+  overflow: visible;
+}
+
+.manual-group-migration-description {
+  display: block;
+  padding: 0 12px 12px;
+}
+
 .manual-route-flow {
   display: grid;
   gap: 10px;
@@ -3372,6 +3403,10 @@ pre {
   gap: 10px;
   border-bottom: 1px solid #e5e7eb;
   background: #ffffff;
+}
+
+.manual-group-migration-panel .orchestration-keys-panel-title {
+  flex-wrap: wrap;
 }
 
 .panel-help-icon {

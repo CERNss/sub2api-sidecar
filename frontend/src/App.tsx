@@ -56,6 +56,7 @@ import {
   BranchesOutlined,
   ClusterOutlined,
   KeyOutlined,
+  PartitionOutlined,
   NodeIndexOutlined,
   ReloadOutlined,
   SendOutlined,
@@ -225,7 +226,7 @@ type OperationalDataStatus = {
   sourceStatuses: OperationalDataSourceStatus[];
 };
 
-type OrchestrationMode = "replace_group" | "api_key";
+type OrchestrationMode = "replace_group" | "group_migration" | "api_key";
 
 type GroupCapacityFallback = {
   currentConcurrency: number | null;
@@ -1054,6 +1055,9 @@ function runKindLabel(run: AutoRotationRunPayload): string {
   if (run.run_kind === "manual") {
     if (run.tag === "key_transfer" || run.tag === "key_transfer_preview") {
       return run.dry_run ? "密钥转移预览" : "密钥转移";
+    }
+    if (run.tag === "manual_group_migration") {
+      return "整组迁移";
     }
     return run.tag === "manual_api_key" ? "手动 Key" : "手动用户";
   }
@@ -3481,19 +3485,41 @@ function ExistingOrchestrationView({
       monthly_limit_usd: null
     };
   }, [groups, mode, selectedKeys]);
+  const selectedGroupMigrationSourceGroup = useMemo(() => {
+    if (mode !== "group_migration" || !sourceGroupId) {
+      return null;
+    }
+    return groups.find((group) => idValue(group.group_id) === sourceGroupId) ?? null;
+  }, [groups, mode, sourceGroupId]);
   const sourceGroups = useMemo(() => {
-    const primaryGroup = mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup;
+    const primaryGroup =
+      mode === "api_key"
+        ? selectedKeyPrimaryGroup
+        : mode === "group_migration"
+        ? selectedGroupMigrationSourceGroup
+        : selectedUserDirectGroup;
     return primaryGroup ? [primaryGroup] : [];
-  }, [mode, selectedKeyPrimaryGroup, selectedUserDirectGroup]);
+  }, [mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup, selectedUserDirectGroup]);
   const sourceGroupPlaceholder =
-    mode === "api_key" ? "所选 Key 无路由组" : selectedUser ? "无源分组，将直接分配" : "先选择用户";
+    mode === "api_key"
+      ? "所选 Key 无路由组"
+      : mode === "group_migration"
+      ? "选择源分组"
+      : selectedUser
+      ? "无源分组，将直接分配"
+      : "先选择用户";
   const targetGroups = useMemo(() => {
-    const currentGroup = mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup;
+    const currentGroup =
+      mode === "api_key"
+        ? selectedKeyPrimaryGroup
+        : mode === "group_migration"
+        ? selectedGroupMigrationSourceGroup
+        : selectedUserDirectGroup;
     const currentGroupValue = idValue(currentGroup?.group_id);
-    if (!selectedUser) {
+    if (mode !== "group_migration" && !selectedUser) {
       return [];
     }
-    const candidates = mode === "replace_group"
+    const candidates = mode === "replace_group" || mode === "group_migration"
       ? groups.filter((group) => group.rotation_supported)
       : groups;
     const ordered = new Map<string, OrchestrationGroup>();
@@ -3508,15 +3534,31 @@ function ExistingOrchestrationView({
       ordered.set(groupValue, group);
     });
     return Array.from(ordered.values());
-  }, [groups, mode, selectedKeyPrimaryGroup, selectedUser, selectedUserDirectGroup]);
-  const sourceGroupOptions = useMemo(() => sourceGroups.map((group) => buildGroupOption(group)), [sourceGroups]);
+  }, [groups, mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup, selectedUser, selectedUserDirectGroup]);
+  const sourceGroupOptions = useMemo(
+    () =>
+      mode === "group_migration"
+        ? groups.filter((group) => group.rotation_supported).map((group) => buildGroupOption(group))
+        : sourceGroups.map((group) => buildGroupOption(group)),
+    [groups, mode, sourceGroups]
+  );
   const targetGroupOptions = useMemo(
     () => {
-      const currentGroupId = idValue((mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup)?.group_id);
+      const currentGroupId = idValue(
+        (
+          mode === "api_key"
+            ? selectedKeyPrimaryGroup
+            : mode === "group_migration"
+            ? selectedGroupMigrationSourceGroup
+            : selectedUserDirectGroup
+        )?.group_id
+      );
       return targetGroups.map((group) => {
         const groupId = idValue(group.group_id);
         const isCurrentGroup = Boolean(currentGroupId && groupId === currentGroupId);
-        const disabled = isCurrentGroup || (mode === "replace_group" && !group.rotation_supported);
+        const disabled =
+          isCurrentGroup ||
+          ((mode === "replace_group" || mode === "group_migration") && !group.rotation_supported);
         const option = buildGroupOption(group, disabled);
         return {
           ...option,
@@ -3525,7 +3567,7 @@ function ExistingOrchestrationView({
         };
       });
     },
-    [mode, selectedKeyPrimaryGroup, selectedUserDirectGroup, targetGroups]
+    [mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup, selectedUserDirectGroup, targetGroups]
   );
   const graphGroupOptions = useMemo<GroupSelectOption[]>(
     () => [
@@ -3562,6 +3604,14 @@ function ExistingOrchestrationView({
   function updateTargetGroup(groupId: string) {
     setTargetGroupId(groupId);
     includeGraphGroupFilter(groupId);
+  }
+
+  function updateSourceGroup(groupId: string) {
+    setSourceGroupId(groupId);
+    updateGraphGroupFilters(groupId ? [groupId] : []);
+    if (groupId && groupId === targetGroupId) {
+      setTargetGroupId("");
+    }
   }
 
   const toggleKeySelection = (keyId: string) => {
@@ -4075,6 +4125,9 @@ function ExistingOrchestrationView({
   }, [selectedUpstreamId]);
 
   useEffect(() => {
+    if (mode === "group_migration") {
+      return;
+    }
     if (!selectedUser) {
       setSourceGroupId("");
       setApiKeys([]);
@@ -4086,7 +4139,7 @@ function ExistingOrchestrationView({
     setSourceGroupId(directGroupId);
     updateGraphGroupFilters(directGroupId ? [directGroupId] : []);
     void loadApiKeys(idValue(selectedUser.user_id));
-  }, [selectedUserId, selectedUserDirectGroup?.group_id]);
+  }, [mode, selectedUserId, selectedUserDirectGroup?.group_id]);
 
   useEffect(() => {
     if (mode !== "api_key") {
@@ -4094,6 +4147,19 @@ function ExistingOrchestrationView({
     }
     setSourceGroupId(idValue(selectedKeyPrimaryGroup?.group_id));
   }, [mode, selectedKeyPrimaryGroup?.group_id]);
+
+  useEffect(() => {
+    if (mode !== "group_migration") {
+      return;
+    }
+    setSelectedKeyIds([]);
+    setApiKeys([]);
+    if (!sourceGroupId || !sourceGroupOptions.some((option) => option.value === sourceGroupId)) {
+      const nextSourceGroupId = sourceGroupOptions.find((option) => !option.disabled)?.value ?? "";
+      setSourceGroupId(nextSourceGroupId);
+      updateGraphGroupFilters(nextSourceGroupId ? [nextSourceGroupId] : []);
+    }
+  }, [mode, sourceGroupId, sourceGroupOptions]);
 
   useEffect(() => {
     setTargetGroupId((current) =>
@@ -4126,6 +4192,10 @@ function ExistingOrchestrationView({
       return;
     }
     if (selection.kind === "group" && nextGroupId) {
+      if (mode === "group_migration" && sourceGroupId !== nextGroupId) {
+        updateSourceGroup(nextGroupId);
+        return;
+      }
       if (sourceGroupId !== nextGroupId) {
         updateTargetGroup(nextGroupId);
       }
@@ -4146,8 +4216,12 @@ function ExistingOrchestrationView({
       setStatus({ message: "正在加载 Sub2API 上游，请稍后再试。", tone: "error" });
       return;
     }
-    if (!selectedUser) {
+    if (mode !== "group_migration" && !selectedUser) {
       setStatus({ message: "请选择用户。", tone: "error" });
+      return;
+    }
+    if (mode === "group_migration" && !sourceGroupId) {
+      setStatus({ message: "请选择源分组。", tone: "error" });
       return;
     }
     if (!targetGroupId) {
@@ -4158,7 +4232,7 @@ function ExistingOrchestrationView({
       setStatus({ message: "请至少选择一个 API Key。", tone: "error" });
       return;
     }
-    if (mode === "replace_group" && sourceGroupId === targetGroupId) {
+    if ((mode === "replace_group" || mode === "group_migration") && sourceGroupId === targetGroupId) {
       setStatus({ message: "目标分组不能和当前分组一致。", tone: "error" });
       return;
     }
@@ -4179,6 +4253,9 @@ function ExistingOrchestrationView({
     setSubmitting(true);
     setStatus({
       message:
+        mode === "group_migration"
+          ? "正在执行整组迁移"
+          :
         mode === "api_key" && selectedKeys.length > 1
           ? `正在执行编排（${selectedKeys.length} 个 Key）`
           : "正在执行编排",
@@ -4187,6 +4264,10 @@ function ExistingOrchestrationView({
 
     try {
       if (mode === "replace_group") {
+        if (!selectedUser) {
+          setStatus({ message: "请选择用户。", tone: "error" });
+          return;
+        }
         const payload = await requestJson<RotationExecutionPayload>(
           "/orchestration/assignments/replace-group",
           {
@@ -4207,7 +4288,39 @@ function ExistingOrchestrationView({
           message: payload.status === "failed" ? payload.reason || "编排执行失败" : "编排执行完成",
           tone: payload.status === "failed" ? "error" : "success"
         });
+      } else if (mode === "group_migration") {
+        const payload = await requestJson<AutoRotationRunPayload>(
+          "/orchestration/groups/migrate",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              upstream_id: selectedUpstreamId,
+              source_group_id: sourceGroupValue,
+              target_group_id: targetGroupValue,
+              reason: reasonValue
+            })
+          },
+          "整组迁移失败"
+        );
+        setRecordsRefreshSignal((value) => value + 1);
+        const counts = runCounts(payload);
+        if (payload.status === "failed") {
+          setStatus({ message: `整组迁移失败（${counts.failed} 项）`, tone: "error" });
+        } else if (payload.status === "partial_failed") {
+          setStatus({
+            message: `整组迁移部分成功（迁移 ${counts.moved} / 失败 ${counts.failed}）`,
+            tone: "error"
+          });
+        } else if (payload.status === "empty") {
+          setStatus({ message: "源分组下没有可迁移的直接用户。", tone: "info" });
+        } else {
+          setStatus({ message: `整组迁移完成（${counts.moved} 用户）`, tone: "success" });
+        }
       } else {
+        if (!selectedUser) {
+          setStatus({ message: "请选择用户。", tone: "error" });
+          return;
+        }
         const results: RotationExecutionPayload[] = [];
         let failedCount = 0;
         let authExpired = false;
@@ -4259,8 +4372,10 @@ function ExistingOrchestrationView({
           setStatus({ message: `部分执行成功（成功 ${total - failedCount} / 失败 ${failedCount}）`, tone: "error" });
         }
       }
-      await loadResources(idValue(selectedUser.user_id));
-      await loadApiKeys(idValue(selectedUser.user_id));
+      await loadResources(mode === "group_migration" ? selectedUserId : idValue(selectedUser?.user_id));
+      if (mode !== "group_migration" && selectedUser) {
+        await loadApiKeys(idValue(selectedUser.user_id));
+      }
     } catch (error: unknown) {
       if (!onAuthExpired(error, setStatus)) {
         setStatus({ message: getErrorMessage(error, "编排执行失败"), tone: "error" });
@@ -4362,63 +4477,86 @@ function ExistingOrchestrationView({
                   if (nextMode === "replace_group") {
                     setSelectedKeyIds([]);
                     setSourceGroupId(idValue(selectedUserDirectGroup?.group_id));
+                    updateGraphGroupFilters(idValue(selectedUserDirectGroup?.group_id) ? [idValue(selectedUserDirectGroup?.group_id)] : []);
+                  } else if (nextMode === "group_migration") {
+                    setSelectedKeyIds([]);
+                    setApiKeys([]);
+                    const nextSourceGroupId = sourceGroupId || groups.find((group) => group.rotation_supported)?.group_id;
+                    const nextSourceValue = idValue(nextSourceGroupId);
+                    setSourceGroupId(nextSourceValue);
+                    updateGraphGroupFilters(nextSourceValue ? [nextSourceValue] : []);
                   }
                 }}
                 options={[
                   { label: "整体替换", value: "replace_group", icon: <BranchesOutlined /> },
+                  { label: "整组迁移", value: "group_migration", icon: <PartitionOutlined /> },
                   { label: "单 Key", value: "api_key", icon: <KeyOutlined /> }
                 ]}
               />
 
-              <div className="ant-field">
-                <Typography.Text strong>User</Typography.Text>
-                <Select
-                  ref={userSelectRef}
-                  className="manual-user-select"
-                  value={selectedUserId || undefined}
-                  placeholder="按用户名或 email 搜索"
-                  showSearch
-                  filterOption={false}
-                  loading={loading}
-                  allowClear
-                  optionFilterProp="searchText"
-                  optionRender={renderUserOption}
-                  labelRender={(item) => {
-                    const option = userOptions.find((candidate) => candidate.value === item.value);
-                    return option ? <UserIdentity name={option.label} email={option.emailText} /> : item.label;
-                  }}
-                  onSearch={(value) => {
-                    setUserSearch(value);
-                    if (userSearchTimerRef.current) {
-                      window.clearTimeout(userSearchTimerRef.current);
-                    }
-                    userSearchTimerRef.current = window.setTimeout(() => {
-                      void loadResources(selectedUserId, value);
-                    }, 300);
-                  }}
-                  onClear={() => {
-                    if (userSearchTimerRef.current) {
-                      window.clearTimeout(userSearchTimerRef.current);
-                    }
-                    setUserSearch("");
-                    setSelectedUserId("");
-                    updateGraphGroupFilters([]);
-                    void loadResources("", "");
-                  }}
-                  onChange={(value) => setSelectedUserId(value ?? "")}
-                  onSelect={() => {
-                    setUserSearch("");
-                    window.setTimeout(() => {
-                      userSelectRef.current?.blur();
-                    }, 0);
-                  }}
-                  options={userOptions}
-                  notFoundContent={loading ? <Spin size="small" /> : "暂无用户"}
-                />
-              </div>
+              {mode === "group_migration" ? (
+                <div className="manual-group-migration-summary">
+                  <Space>
+                    <ClusterOutlined />
+                    <Typography.Text strong>分组到分组</Typography.Text>
+                  </Space>
+                  <Typography.Text type="secondary">
+                    将源分组下的直接用户及其全部 API Keys 迁移到目标分组。
+                  </Typography.Text>
+                </div>
+              ) : (
+                <div className="ant-field">
+                  <Typography.Text strong>User</Typography.Text>
+                  <Select
+                    ref={userSelectRef}
+                    className="manual-user-select"
+                    value={selectedUserId || undefined}
+                    placeholder="按用户名或 email 搜索"
+                    showSearch
+                    filterOption={false}
+                    loading={loading}
+                    allowClear
+                    optionFilterProp="searchText"
+                    optionRender={renderUserOption}
+                    labelRender={(item) => {
+                      const option = userOptions.find((candidate) => candidate.value === item.value);
+                      return option ? <UserIdentity name={option.label} email={option.emailText} /> : item.label;
+                    }}
+                    onSearch={(value) => {
+                      setUserSearch(value);
+                      if (userSearchTimerRef.current) {
+                        window.clearTimeout(userSearchTimerRef.current);
+                      }
+                      userSearchTimerRef.current = window.setTimeout(() => {
+                        void loadResources(selectedUserId, value);
+                      }, 300);
+                    }}
+                    onClear={() => {
+                      if (userSearchTimerRef.current) {
+                        window.clearTimeout(userSearchTimerRef.current);
+                      }
+                      setUserSearch("");
+                      setSelectedUserId("");
+                      updateGraphGroupFilters([]);
+                      void loadResources("", "");
+                    }}
+                    onChange={(value) => setSelectedUserId(value ?? "")}
+                    onSelect={() => {
+                      setUserSearch("");
+                      window.setTimeout(() => {
+                        userSelectRef.current?.blur();
+                      }, 0);
+                    }}
+                    options={userOptions}
+                    notFoundContent={loading ? <Spin size="small" /> : "暂无用户"}
+                  />
+                </div>
+              )}
 
               <Typography.Text type="secondary" className="manual-zone-hint">
-                {users.length} 用户 · {groups.length} 分组
+                {mode === "group_migration"
+                  ? `${groups.filter((group) => group.rotation_supported).length} 可迁移分组 · ${users.length} 用户`
+                  : `${users.length} 用户 · ${groups.length} 分组`}
               </Typography.Text>
             </section>
 
@@ -4435,7 +4573,10 @@ function ExistingOrchestrationView({
                     className="group-select"
                     value={sourceGroupId || undefined}
                     placeholder={sourceGroupPlaceholder}
-                    disabled
+                    disabled={mode !== "group_migration"}
+                    showSearch={mode === "group_migration"}
+                    allowClear={mode === "group_migration"}
+                    onChange={(value) => updateSourceGroup(value ?? "")}
                     optionFilterProp="searchText"
                     options={sourceGroupOptions}
                     optionRender={renderGroupOption}
@@ -4461,41 +4602,56 @@ function ExistingOrchestrationView({
                 </div>
               </div>
 
-              <section className="orchestration-keys-panel manual-keys-panel" aria-label="用户 API Keys">
-                <div className="orchestration-keys-panel-title">
-                  <Space>
-                    <ApiOutlined />
-                    <Typography.Text strong>
-                      {mode === "api_key" ? "选择 API Key（支持多选）" : "用户 API Keys"}
-                    </Typography.Text>
-                    <Tooltip title="Key ID 是 API Key 的唯一编号；路由组是该 Key 当前绑定的 Sub2API 分组，不等同于用户直接分组或上游账号 ID。">
-                      <QuestionCircleOutlined className="panel-help-icon" aria-label="API Key 字段说明" />
-                    </Tooltip>
-                  </Space>
-                  <Space size={8}>
-                    {mode === "api_key" && apiKeys.length > 0 ? (
-                      <>
-                        <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>
-                          已选 {selectedKeyIds.length} / {apiKeys.length}
-                        </Tag>
-                        <AntButton
-                          size="small"
-                          type="link"
-                          onClick={toggleAllKeys}
-                          disabled={loadingKeys}
-                        >
-                          {allKeysSelected ? "全不选" : "全选"}
-                        </AntButton>
-                      </>
-                    ) : loadingKeys ? (
-                      <Spin size="small" />
-                    ) : (
-                      <Tag>{apiKeys.length} Key</Tag>
-                    )}
-                  </Space>
-                </div>
-                {apiKeyListContent}
-              </section>
+              {mode === "group_migration" ? (
+                <section className="orchestration-keys-panel manual-keys-panel manual-group-migration-panel" aria-label="整组迁移范围">
+                  <div className="orchestration-keys-panel-title">
+                    <Space>
+                      <PartitionOutlined />
+                      <Typography.Text strong>迁移范围</Typography.Text>
+                    </Space>
+                    <Tag color={sourceGroupId && targetGroupId ? "green" : "default"}>Group → Group</Tag>
+                  </div>
+                  <Typography.Text className="manual-group-migration-description" type="secondary">
+                    执行时会扫描源分组下的直接用户，并把这些用户的全部 API Keys 统一迁移到目标分组。
+                  </Typography.Text>
+                </section>
+              ) : (
+                <section className="orchestration-keys-panel manual-keys-panel" aria-label="用户 API Keys">
+                  <div className="orchestration-keys-panel-title">
+                    <Space>
+                      <ApiOutlined />
+                      <Typography.Text strong>
+                        {mode === "api_key" ? "选择 API Key（支持多选）" : "用户 API Keys"}
+                      </Typography.Text>
+                      <Tooltip title="Key ID 是 API Key 的唯一编号；路由组是该 Key 当前绑定的 Sub2API 分组，不等同于用户直接分组或上游账号 ID。">
+                        <QuestionCircleOutlined className="panel-help-icon" aria-label="API Key 字段说明" />
+                      </Tooltip>
+                    </Space>
+                    <Space size={8}>
+                      {mode === "api_key" && apiKeys.length > 0 ? (
+                        <>
+                          <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>
+                            已选 {selectedKeyIds.length} / {apiKeys.length}
+                          </Tag>
+                          <AntButton
+                            size="small"
+                            type="link"
+                            onClick={toggleAllKeys}
+                            disabled={loadingKeys}
+                          >
+                            {allKeysSelected ? "全不选" : "全选"}
+                          </AntButton>
+                        </>
+                      ) : loadingKeys ? (
+                        <Spin size="small" />
+                      ) : (
+                        <Tag>{apiKeys.length} Key</Tag>
+                      )}
+                    </Space>
+                  </div>
+                  {apiKeyListContent}
+                </section>
+              )}
             </section>
 
             <section className="manual-zone manual-zone--submit" aria-labelledby="manual-zone-submit-title">
@@ -4535,6 +4691,8 @@ function ExistingOrchestrationView({
               >
                 {mode === "api_key" && selectedKeyIds.length > 1
                   ? `执行编排（${selectedKeyIds.length} 个 Key）`
+                  : mode === "group_migration"
+                  ? "执行整组迁移"
                   : "执行编排"}
               </AntButton>
 

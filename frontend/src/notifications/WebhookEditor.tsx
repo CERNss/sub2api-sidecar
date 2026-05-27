@@ -81,6 +81,20 @@ const FEISHU_SAMPLE_CARD_TEMPLATE: Record<string, unknown> = {
             tag: "lark_md",
             content: "**范围**\n${signal.scope_label}"
           }
+        },
+        {
+          is_short: true,
+          text: {
+            tag: "lark_md",
+            content: "**账号**\n${snapshot.data.invalid_accounts.0.name}"
+          }
+        },
+        {
+          is_short: true,
+          text: {
+            tag: "lark_md",
+            content: "**分组**\n${snapshot.data.full_groups.0.name}"
+          }
         }
       ]
     },
@@ -111,6 +125,12 @@ const GENERIC_SAMPLE_JSON_TEMPLATE: Record<string, unknown> = {
     value: "${signal.value}",
     scope: "${signal.scope_label}"
   },
+  detail: {
+    account_name: "${snapshot.data.invalid_accounts.0.name}",
+    account_reason: "${snapshot.data.invalid_accounts.0.reason}",
+    group_name: "${snapshot.data.full_groups.0.name}",
+    group_capacity: "${snapshot.data.full_groups.0.current_capacity}/${snapshot.data.full_groups.0.capacity}"
+  },
   snapshot: "${snapshot}"
 };
 
@@ -133,7 +153,9 @@ const previewFields: PreviewField[] = [
   { label: "规则", value: previewValue(genericWebhookPayloadExample.rule.name) },
   { label: "信号", value: previewValue(genericWebhookPayloadExample.signal.key) },
   { label: "当前值", value: previewValue(genericWebhookPayloadExample.signal.value) },
-  { label: "范围", value: previewValue(genericWebhookPayloadExample.signal.scope_label) }
+  { label: "范围", value: previewValue(genericWebhookPayloadExample.signal.scope_label) },
+  { label: "账号", value: previewValue(genericWebhookPayloadExample.snapshot.data.invalid_accounts[0]?.name) },
+  { label: "分组", value: previewValue(genericWebhookPayloadExample.snapshot.data.full_groups[0]?.name) }
 ];
 
 const previewContext = {

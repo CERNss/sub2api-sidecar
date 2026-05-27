@@ -180,7 +180,15 @@ export const notificationPlaceholders: NotificationPlaceholder[] = [
   { value: "${signal.value}", label: "当前值", description: "最近一次采样值" },
   { value: "${signal.scope_label}", label: "范围", description: "用户、账号或分组名称" },
   { value: "${snapshot.value}", label: "快照值", description: "兼容旧模板路径" },
-  { value: "${snapshot.data.low_users.0.name}", label: "明细示例", description: "快照数组路径" }
+  { value: "${snapshot.data.invalid_accounts.0.name}", label: "失效账号名称", description: "account_invalid 明细" },
+  { value: "${snapshot.data.invalid_accounts.0.reason}", label: "失效账号原因", description: "account_invalid 明细" },
+  { value: "${snapshot.data.rate_limited_accounts.0.name}", label: "限流账号名称", description: "account_rate_limited 明细" },
+  { value: "${snapshot.data.reauth_accounts.0.name}", label: "需重授账号名称", description: "account_reauth_needed 明细" },
+  { value: "${snapshot.data.full_accounts.0.name}", label: "满载账号名称", description: "account_capacity_full 明细" },
+  { value: "${snapshot.data.full_groups.0.name}", label: "满载分组名称", description: "group_capacity_full 明细" },
+  { value: "${snapshot.data.full_groups.0.current_capacity}", label: "分组当前容量", description: "group_capacity_full 明细" },
+  { value: "${snapshot.data.full_groups.0.capacity}", label: "分组容量上限", description: "group_capacity_full 明细" },
+  { value: "${snapshot.data.low_users.0.name}", label: "低余额用户名称", description: "user_balance_low 明细" }
 ];
 
 export const genericWebhookPayloadExample = {
@@ -217,7 +225,62 @@ export const genericWebhookPayloadExample = {
     value: 2,
     data: {
       invalid_accounts: [
-        { id: "acct_01", name: "primary-openai", error_message: "token expired" }
+        {
+          id: "acct_01",
+          name: "主站 OpenAI OAuth 1",
+          provider: "openai",
+          status: "expired",
+          reason: "token expired"
+        }
+      ],
+      rate_limited_accounts: [
+        {
+          id: "acct_02",
+          name: "US Proxy 2 OAuth",
+          provider: "openai",
+          status: "rate_limited",
+          reason: "429 too many requests"
+        }
+      ],
+      reauth_accounts: [
+        {
+          id: "acct_03",
+          name: "需要重授账号",
+          provider: "openai",
+          status: "needs_reauth",
+          reason: "session expired"
+        }
+      ],
+      full_accounts: [
+        {
+          id: "acct_04",
+          name: "满载账号",
+          provider: "openai",
+          status: "available",
+          current_capacity: 6,
+          capacity: 6,
+          capacity_percent: 100
+        }
+      ],
+      full_groups: [
+        {
+          id: "grp_01",
+          name: "主站 Landing 池",
+          provider: "openai",
+          status: "available",
+          current_capacity: 12,
+          capacity: 12,
+          capacity_percent: 100,
+          account_count: 2
+        }
+      ],
+      low_users: [
+        {
+          id: "user_01",
+          name: "user@example.com",
+          provider: "OpenAI",
+          status: "active"
+        }
       ]
     }
   }

@@ -320,6 +320,17 @@ function keyTransferMockApi(): Plugin {
                 is_subscription: false,
                 rotation_supported: true,
                 unsupported_reason: null
+              },
+              {
+                group_id: "grp-codex-b",
+                name: "Codex 可用组 B",
+                group_kind: "exclusive",
+                platform: "openai",
+                status: "active",
+                is_exclusive: true,
+                is_subscription: false,
+                rotation_supported: true,
+                unsupported_reason: null
               }
             ]
           });
@@ -376,6 +387,60 @@ function keyTransferMockApi(): Plugin {
               reason: payload.reason || "mock direct assignment",
               migrated_keys: 0,
               metadata: null
+            });
+          });
+          return;
+        }
+        if (method === "POST" && url.pathname === "/orchestration/groups/migrate") {
+          let body = "";
+          devRequest.on("data", (chunk) => {
+            body += String(chunk);
+          });
+          devRequest.on("end", () => {
+            const payload = body
+              ? JSON.parse(body) as {
+                  source_group_id?: unknown | null;
+                  target_group_id?: unknown | null;
+                  reason?: string;
+                }
+              : {};
+            sendJson(response, {
+              success: true,
+              run_id: "mock-manual-group-migration",
+              run_kind: "manual",
+              tag: "manual_group_migration",
+              status: "moved",
+              window: "",
+              dry_run: false,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              synced: {},
+              config: {
+                source_group_id: payload.source_group_id,
+                target_group_id: payload.target_group_id,
+                reason: payload.reason || ""
+              },
+              dead_band_skipped: false,
+              planned: [],
+              moved: [
+                {
+                  success: true,
+                  user_id: "user-feng",
+                  email: "fengxinyang@jihuanshe.com",
+                  source_group_id: payload.source_group_id ?? "grp-codex-a",
+                  target_group_id: payload.target_group_id ?? "grp-codex-b",
+                  trigger_type: "manual",
+                  status: "moved",
+                  reason: payload.reason || "mock group migration",
+                  migrated_keys: 2,
+                  metadata: null
+                }
+              ],
+              skipped: [],
+              failed: [],
+              rollback_results: [],
+              rollback_status: null,
+              rollback_reason: null
             });
           });
           return;

@@ -75,6 +75,41 @@ def _balance_message() -> NotificationMessage:
     )
 
 
+def _account_group_message() -> NotificationMessage:
+    return NotificationMessage(
+        rule_id="rule-account-invalid",
+        rule_name="账号失效",
+        signal_key="account_invalid",
+        severity=NotificationSeverity.critical,
+        summary="账号失效",
+        trigger=NotificationDeliveryTrigger.rule,
+        snapshot={
+            "trigger": "rule",
+            "value": 1,
+            "data": {
+                "invalid_accounts": [
+                    {
+                        "id": "acct_01",
+                        "name": "主站 OpenAI OAuth 1",
+                        "provider": "openai",
+                        "status": "expired",
+                        "reason": "token expired",
+                    }
+                ],
+                "full_groups": [
+                    {
+                        "id": "grp_01",
+                        "name": "主站 Landing 池",
+                        "current_capacity": 12,
+                        "capacity": 12,
+                        "account_count": 2,
+                    }
+                ],
+            },
+        },
+    )
+
+
 def _webhook_body(**overrides: Any) -> dict[str, Any]:
     body = {
         "id": "ops",
@@ -599,6 +634,31 @@ def test_provider_generic_post_renders_json_template() -> None:
     assert body["user"] == "idle@example.com"
     assert body["snapshot"]["data"]["low_user_count"] == 1
     assert "alert" not in body
+
+
+def test_provider_generic_post_renders_account_and_group_snapshot_names() -> None:
+    receiver = NotificationWebhook(
+        id="g",
+        enabled=True,
+        provider=WebhookProvider.generic,
+        url="https://example.com/hook",
+        jsonTemplate={
+            "account_name": "${snapshot.data.invalid_accounts.0.name}",
+            "account_reason": "${snapshot.data.invalid_accounts.0.reason}",
+            "group_name": "${snapshot.data.full_groups.0.name}",
+            "group_capacity": "${snapshot.data.full_groups.0.current_capacity}/${snapshot.data.full_groups.0.capacity}",
+        },
+    )
+
+    prepared = build_request(receiver, _account_group_message())
+    body = json.loads(prepared.body)
+
+    assert body == {
+        "account_name": "主站 OpenAI OAuth 1",
+        "account_reason": "token expired",
+        "group_name": "主站 Landing 池",
+        "group_capacity": "12/12",
+    }
 
 
 def test_provider_generic_get_uses_selected_query_fields() -> None:

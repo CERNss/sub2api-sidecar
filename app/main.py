@@ -103,6 +103,7 @@ from app.models.schemas import (
     OrchestrationApiKeyResponse,
     OrchestrationApiKeysEnvelope,
     OrchestrationAssignRequest,
+    OrchestrationGroupMigrationRequest,
     OrchestrationGroupResponse,
     OrchestrationGroupsEnvelope,
     KeyTransferEnvelope,
@@ -152,7 +153,7 @@ from app.services.operational_data import (
 )
 from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
-from app.services.rotation import KeyTransferRun, RotationExecutionResult, RotationService
+from app.services.rotation import GroupMigrationRun, KeyTransferRun, RotationExecutionResult, RotationService
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.services.usage_segmentation import UsageSegmentationService
 from app.services.usage_segmentation_scheduler import UsageSegmentationScheduler
@@ -963,6 +964,10 @@ def key_transfer_response(run: KeyTransferRun) -> KeyTransferEnvelope:
             for item in run.items
         ],
     )
+
+
+def group_migration_response(run: GroupMigrationRun) -> AutoRotationRunResponse:
+    return auto_rotation_run_response(run.run_record)
 
 
 def api_key_automation_item_response(
@@ -2036,6 +2041,22 @@ def orchestration_replace_group(
     )
     run_record = service.save_manual_run_record(tag="manual_user_group", result=result)
     response = rotation_execution_response(result, run_record=run_record)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.post("/orchestration/groups/migrate")
+def orchestration_migrate_group(
+    payload: OrchestrationGroupMigrationRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    service = get_rotation_service_for_upstream(selected_upstream_id)
+    run = service.migrate_group_assignments(
+        source_group_id=payload.source_group_id,
+        target_group_id=payload.target_group_id,
+        reason=payload.reason,
+    )
+    response = group_migration_response(run)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
 

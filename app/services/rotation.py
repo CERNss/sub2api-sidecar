@@ -124,6 +124,13 @@ class KeyTransferRun:
 
 
 @dataclass
+class GroupMigrationRun:
+    source_group_id: Any
+    target_group_id: Any
+    run_record: OrchestrationRunRecord
+
+
+@dataclass
 class _PreconditionBlock:
     status: RotationResultStatus
     reason: str
@@ -433,6 +440,7 @@ class RotationService:
                     user_id=user_id,
                     email=email,
                     target_group_id=target_group_id,
+                    exclude_source_group_id=source_group_id,
                 )
                 migrated_keys = resource_sync["migrated_keys"]
                 metadata = {"bound_accounts": resource_sync["bound_accounts"]}
@@ -481,6 +489,173 @@ class RotationService:
             metadata=metadata,
         )
 
+    def migrate_group_assignments(
+        self,
+        *,
+        source_group_id: Any,
+        target_group_id: Any,
+        reason: str | None = None,
+    ) -> GroupMigrationRun:
+        if source_group_id in (None, ""):
+            raise RotationTargetValidationError("Source group is required")
+        if target_group_id in (None, ""):
+            raise RotationTargetValidationError("Target group is required")
+        if self._normalize_key(source_group_id) == self._normalize_key(target_group_id):
+            raise RotationTargetValidationError("Source and target groups must be different")
+
+        source_group = self._get_upstream_group(source_group_id)
+        target_group = self._get_upstream_group(target_group_id)
+        rotation_supported, unsupported_reason = self._rotation_support(target_group)
+        if not rotation_supported:
+            if target_group.get("is_subscription", False):
+                raise RotationTargetValidationError(
+                    "Subscription groups cannot be used as orchestration targets; replace-group supports only dedicated standard groups"
+                )
+            raise RotationTargetValidationError(
+                unsupported_reason or "Target group is not supported for orchestration"
+            )
+
+        source_group_key = self._normalize_key(source_group_id)
+        source_users = [
+            user
+            for user in self.sub2api_client.list_users()
+            if self._normalize_key(self._direct_user_group_from_item(user)[0]) == source_group_key
+        ]
+        source_users.sort(
+            key=lambda user: (
+                self._normalize_email(user.get("email")),
+                self._normalize_key(user.get("id")),
+            )
+        )
+
+        moved: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        request_reason = reason or "group to group orchestration"
+        now = datetime.now(timezone.utc)
+        for user in source_users:
+            user_id = user.get("id")
+            email = str(user.get("email") or "")
+            if user_id in (None, "") or not email.strip():
+                result = self._record_result(
+                    assignment=UserGroupAssignment(
+                        user_id=user_id or "",
+                        email=email.strip() or "unknown@example.com",
+                        current_group_id=source_group_id,
+                        current_group_name=source_group.get("name"),
+                        assignment_mode=AssignmentMode.managed_pool,
+                    ),
+                    source_group_id=source_group_id,
+                    target_group_id=target_group_id,
+                    trigger_type=RotationTrigger.manual,
+                    status=RotationResultStatus.skipped,
+                    reason="User id or email is missing",
+                    metadata={
+                        "source_group_name": source_group.get("name") or "",
+                        "target_group_name": target_group.get("name") or "",
+                    },
+                )
+                skipped.append(self._serialize_result(result))
+                continue
+
+            existing = self.store.get_user_assignment(user_id)
+            direct_group_id, direct_group_name = self._direct_user_group_from_item(user)
+            assignment = UserGroupAssignment(
+                user_id=user_id,
+                email=email,
+                current_group_id=direct_group_id or source_group_id,
+                current_group_name=direct_group_name or source_group.get("name"),
+                assignment_mode=existing.assignment_mode if existing else AssignmentMode.managed_pool,
+                last_rotation_at=existing.last_rotation_at if existing else None,
+                last_decision_reason=existing.last_decision_reason if existing else None,
+                has_api_keys=existing.has_api_keys if existing else None,
+                created_at=existing.created_at if existing else now,
+                updated_at=now,
+            )
+
+            try:
+                response = self.sub2api_client.replace_exclusive_user_group(
+                    user_id=user_id,
+                    old_group_id=source_group_id,
+                    new_group_id=target_group_id,
+                )
+                resource_sync = self._sync_user_resources_to_group(
+                    user_id=user_id,
+                    email=email,
+                    target_group_id=target_group_id,
+                )
+            except Sub2APIError as exc:
+                logger.exception("Group assignment migration failed for user_id=%s", user_id)
+                result = self._record_result(
+                    assignment=assignment,
+                    source_group_id=source_group_id,
+                    target_group_id=target_group_id,
+                    trigger_type=RotationTrigger.manual,
+                    status=RotationResultStatus.failed,
+                    reason=f"Upstream group assignment failed: {exc}",
+                    metadata={
+                        "source_group_name": source_group.get("name") or "",
+                        "target_group_name": target_group.get("name") or "",
+                    },
+                )
+                failed.append(self._serialize_result(result))
+                continue
+
+            updated_assignment = UserGroupAssignment(
+                user_id=user_id,
+                email=email,
+                current_group_id=target_group_id,
+                current_group_name=target_group.get("name"),
+                assignment_mode=AssignmentMode.managed_pool,
+                last_rotation_at=now,
+                last_decision_reason=request_reason,
+                has_api_keys=True,
+                created_at=assignment.created_at,
+                updated_at=now,
+            )
+            self.store.upsert_user_assignment(updated_assignment)
+            result = self._record_result(
+                assignment=updated_assignment,
+                source_group_id=source_group_id,
+                target_group_id=target_group_id,
+                trigger_type=RotationTrigger.manual,
+                status=RotationResultStatus.moved,
+                reason=request_reason,
+                migrated_keys=int(response.get("migrated_keys") or 0) + resource_sync["migrated_keys"],
+                metadata={
+                    "source_group_name": source_group.get("name") or "",
+                    "target_group_name": target_group.get("name") or "",
+                    "bound_accounts": resource_sync["bound_accounts"],
+                    "supplemental_migrated_keys": resource_sync["migrated_keys"],
+                },
+            )
+            moved.append(self._serialize_result(result))
+
+        run_record = self._save_orchestration_run(
+            run_kind=OrchestrationRunKind.manual,
+            tag="manual_group_migration",
+            trigger_type=RotationTrigger.manual,
+            dry_run=False,
+            window=None,
+            synced={},
+            config={
+                "source_group_id": str(source_group_id),
+                "source_group_name": str(source_group.get("name") or ""),
+                "target_group_id": str(target_group_id),
+                "target_group_name": str(target_group.get("name") or ""),
+                "reason": reason or "",
+            },
+            planned=[],
+            moved=moved,
+            skipped=skipped,
+            failed=failed,
+        )
+        return GroupMigrationRun(
+            source_group_id=source_group_id,
+            target_group_id=target_group_id,
+            run_record=run_record,
+        )
+
     def _sync_user_resources_to_group(
         self,
         *,
@@ -488,6 +663,7 @@ class RotationService:
         email: str,
         target_group_id: Any,
         only_unassigned_keys: bool = False,
+        exclude_source_group_id: Any | None = None,
     ) -> dict[str, int]:
         api_keys = self.sub2api_client.get_user_api_keys(user_id)["items"]
         if only_unassigned_keys:
@@ -496,6 +672,14 @@ class RotationService:
                 for api_key in api_keys
                 if isinstance(api_key, dict)
                 and self._api_key_group_id(api_key) in (None, "")
+            ]
+        elif exclude_source_group_id not in (None, ""):
+            source_group_key = self._normalize_key(exclude_source_group_id)
+            api_keys = [
+                api_key
+                for api_key in api_keys
+                if isinstance(api_key, dict)
+                and self._normalize_key(self._api_key_group_id(api_key)) != source_group_key
             ]
         bound_accounts = self._bind_user_api_key_accounts_to_group(
             api_keys=api_keys,
@@ -781,6 +965,33 @@ class RotationService:
             if self._normalize_key(user.get("id")) == self._normalize_key(user_id):
                 return user.get("current_group_id"), user.get("current_group_name")
         return None, None
+
+    def _direct_user_group_from_item(self, user: dict[str, Any]) -> tuple[Any | None, str | None]:
+        raw = user.get("raw")
+        if isinstance(raw, dict):
+            for field_name in ("group_id", "current_group_id", "default_group_id"):
+                value = raw.get(field_name)
+                if value not in (None, ""):
+                    return value, self._direct_user_group_name(raw)
+            for field_name in ("group", "current_group", "default_group"):
+                group = raw.get(field_name)
+                if isinstance(group, dict):
+                    group_id = group.get("id") or group.get("group_id")
+                    if group_id not in (None, ""):
+                        return group_id, group.get("name") or group.get("group_name")
+            return None, self._direct_user_group_name(raw)
+
+        current_group_id = user.get("current_group_id")
+        if current_group_id not in (None, ""):
+            return current_group_id, user.get("current_group_name")
+        return None, user.get("current_group_name")
+
+    def _direct_user_group_name(self, payload: dict[str, Any]) -> str | None:
+        for field_name in ("group_name", "current_group_name", "default_group_name"):
+            value = payload.get(field_name)
+            if value not in (None, ""):
+                return str(value)
+        return None
 
     def orchestrate_existing_api_key(
         self,
