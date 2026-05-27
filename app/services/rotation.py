@@ -26,6 +26,7 @@ from app.models.rotation import (
 )
 from app.models.usage_segmentation import UserUsageSegmentRecord
 from app.services.operational_data import (
+    SOURCE_ACCOUNTS,
     SOURCE_GROUPS,
     SOURCE_USER_API_KEYS,
     SOURCE_USER_USAGE,
@@ -73,6 +74,12 @@ class GroupLoadState:
     loads: dict[str, float]
     sources: dict[str, str]
     records: dict[str, GroupUsageSegmentRecord]
+
+
+@dataclass
+class TargetGroupAvailability:
+    groups_by_key: dict[str, dict[str, Any]]
+    accounts_by_group_key: dict[str, list[dict[str, Any]]]
 
 
 @dataclass
@@ -670,11 +677,67 @@ class RotationService:
         return names
 
     def _account_has_group(self, account: dict[str, Any], group_id: Any) -> bool:
-        group_ids = account.get("group_ids")
-        if not isinstance(group_ids, list):
-            return False
         group_key = self._normalize_key(group_id)
-        return any(self._normalize_key(value) == group_key for value in group_ids)
+        return any(self._normalize_key(value) == group_key for value in self._account_group_ids(account))
+
+    def _account_group_ids(self, account: dict[str, Any]) -> list[Any]:
+        group_ids: list[Any] = []
+
+        def add(value: Any) -> None:
+            if value in (None, ""):
+                return
+            if not any(self._normalize_key(existing) == self._normalize_key(value) for existing in group_ids):
+                group_ids.append(value)
+
+        for field_name in (
+            "group_id",
+            "groupId",
+            "current_group_id",
+            "currentGroupId",
+            "default_group_id",
+            "defaultGroupId",
+            "bound_group_id",
+            "boundGroupId",
+        ):
+            add(account.get(field_name))
+
+        for field_name in ("group", "current_group", "currentGroup", "default_group", "defaultGroup"):
+            raw_group = account.get(field_name)
+            if isinstance(raw_group, dict):
+                add(raw_group.get("id") or raw_group.get("group_id") or raw_group.get("groupId"))
+
+        for field_name in ("binding", "bindings", "account_group", "accountGroup"):
+            raw_binding = account.get(field_name)
+            raw_bindings = raw_binding if isinstance(raw_binding, list) else [raw_binding]
+            for binding in raw_bindings:
+                if isinstance(binding, dict):
+                    add(binding.get("group_id") or binding.get("groupId"))
+
+        for field_name in (
+            "groups",
+            "group_ids",
+            "groupIds",
+            "allowed_groups",
+            "allowedGroups",
+            "bound_groups",
+            "boundGroups",
+            "bind_groups",
+            "bindGroups",
+        ):
+            raw_groups = account.get(field_name)
+            if not isinstance(raw_groups, list):
+                continue
+            for raw_group in raw_groups:
+                if isinstance(raw_group, dict):
+                    add(raw_group.get("id") or raw_group.get("group_id") or raw_group.get("groupId"))
+                else:
+                    add(raw_group)
+
+        raw_payload = account.get("raw")
+        if isinstance(raw_payload, dict) and raw_payload is not account:
+            for group_id in self._account_group_ids(raw_payload):
+                add(group_id)
+        return group_ids
 
     def _account_matches_email(self, account: dict[str, Any], email: str) -> bool:
         normalized_email = self._normalize_email(email)
@@ -1002,6 +1065,7 @@ class RotationService:
         sorted_pool = sorted(pool_groups, key=lambda group: (group.priority, group.created_at))
         group_load_state = self._initial_pool_group_loads(sorted_pool, ordered_candidates)
         target_loads = group_load_state.loads
+        target_availability = self._target_group_availability()
 
         if runtime_config.auto_assign_new_users:
             for assignment in sync_result.new_user_candidates:
@@ -1027,6 +1091,7 @@ class RotationService:
                     result = self._preview_rotation(
                         assignment=assignment,
                         target_group_id=target_group.group_id,
+                        availability=target_availability,
                         trigger_type=trigger_type,
                         reason=reason,
                         usage_window=usage_snapshot["usage_window"],
@@ -1038,6 +1103,7 @@ class RotationService:
                     result = self._execute_rotation(
                         assignment=assignment,
                         target_group_id=target_group.group_id,
+                        availability=target_availability,
                         trigger_type=trigger_type,
                         reason=reason,
                         usage_window=usage_snapshot["usage_window"],
@@ -1109,6 +1175,7 @@ class RotationService:
                 result = self._preview_rotation(
                     assignment=assignment,
                     target_group_id=target_group.group_id,
+                    availability=target_availability,
                     trigger_type=trigger_type,
                     reason=reason,
                     usage_window=candidate.usage_snapshot["usage_window"],
@@ -1120,6 +1187,7 @@ class RotationService:
                 result = self._execute_rotation(
                     assignment=assignment,
                     target_group_id=target_group.group_id,
+                    availability=target_availability,
                     trigger_type=trigger_type,
                     reason=reason,
                     usage_window=candidate.usage_snapshot["usage_window"],
@@ -1411,6 +1479,7 @@ class RotationService:
         *,
         assignment: UserGroupAssignment,
         target_group_id: Any,
+        availability: TargetGroupAvailability | None = None,
     ) -> tuple[RotationPoolGroup | None, _PreconditionBlock | None]:
         target_group = self.store.get_rotation_pool_group(target_group_id)
         if target_group is None or not target_group.is_exclusive:
@@ -1441,6 +1510,12 @@ class RotationService:
                     RotationResultStatus.skipped,
                     "Rotation is still within the configured cooldown window",
                 )
+        availability_check = self._target_group_availability_block(
+            target_group_id,
+            availability=availability,
+        )
+        if availability_check is not None:
+            return target_group, availability_check
         return target_group, None
 
     def _execute_rotation(
@@ -1448,6 +1523,7 @@ class RotationService:
         *,
         assignment: UserGroupAssignment,
         target_group_id: Any,
+        availability: TargetGroupAvailability | None = None,
         trigger_type: RotationTrigger,
         reason: str,
         usage_window: AutoRotationUsageWindow | None = None,
@@ -1458,6 +1534,7 @@ class RotationService:
         target_group, block = self._evaluate_rotation_preconditions(
             assignment=assignment,
             target_group_id=target_group_id,
+            availability=availability,
         )
         if block is not None:
             return self._record_result(
@@ -1528,6 +1605,7 @@ class RotationService:
         *,
         assignment: UserGroupAssignment,
         target_group_id: Any,
+        availability: TargetGroupAvailability | None = None,
         trigger_type: RotationTrigger,
         reason: str,
         usage_window: AutoRotationUsageWindow | None = None,
@@ -1538,6 +1616,7 @@ class RotationService:
         target_group, block = self._evaluate_rotation_preconditions(
             assignment=assignment,
             target_group_id=target_group_id,
+            availability=availability,
         )
         result_metadata = metadata.copy() if metadata else None
         if result_metadata is not None and target_group is not None:
@@ -1702,7 +1781,7 @@ class RotationService:
 
     def _available_groups_by_key(self) -> dict[str, dict[str, Any]]:
         groups = self.sub2api_client.list_groups(
-            platform=self.settings.default_sub2api_upstream.provisioning_defaults.group_platform
+            platform=self.sub2api_client.provisioning_defaults.group_platform
         )
         available: dict[str, dict[str, Any]] = {}
         for group in groups:
@@ -1714,6 +1793,158 @@ class RotationService:
                 continue
             available[self._normalize_key(group_id)] = group
         return available
+
+    def _target_group_availability(self) -> TargetGroupAvailability:
+        groups = self._latest_groups_snapshot()
+        if not groups:
+            groups = self.sub2api_client.list_groups(
+                platform=self.sub2api_client.provisioning_defaults.group_platform
+            )
+        accounts = self._latest_accounts_snapshot()
+        if not accounts:
+            accounts = self.sub2api_client.list_openai_accounts()
+
+        groups_by_key = {
+            self._normalize_key(group.get("id")): group
+            for group in groups
+            if isinstance(group, dict) and group.get("id") not in (None, "")
+        }
+        accounts_by_group_key: dict[str, list[dict[str, Any]]] = {}
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            for group_id in self._account_group_ids(account):
+                group_key = self._normalize_key(group_id)
+                if group_key:
+                    accounts_by_group_key.setdefault(group_key, []).append(account)
+        return TargetGroupAvailability(
+            groups_by_key=groups_by_key,
+            accounts_by_group_key=accounts_by_group_key,
+        )
+
+    def _target_group_availability_block(
+        self,
+        target_group_id: Any,
+        *,
+        availability: TargetGroupAvailability | None = None,
+    ) -> _PreconditionBlock | None:
+        availability = availability or self._target_group_availability()
+        target_key = self._normalize_key(target_group_id)
+        if target_key not in availability.groups_by_key:
+            return _PreconditionBlock(
+                RotationResultStatus.failed,
+                "Target group does not exist in upstream Sub2API",
+            )
+
+        accounts = availability.accounts_by_group_key.get(target_key, [])
+        if not accounts:
+            return _PreconditionBlock(
+                RotationResultStatus.failed,
+                "Target group has no upstream accounts",
+            )
+
+        schedulable_accounts = [
+            account
+            for account in accounts
+            if self._account_is_schedulable_for_rotation(account)
+        ]
+        if not schedulable_accounts:
+            return _PreconditionBlock(
+                RotationResultStatus.failed,
+                "Target group has no schedulable upstream accounts",
+            )
+        return None
+
+    def _account_is_schedulable_for_rotation(self, account: dict[str, Any]) -> bool:
+        if self._account_bool_value(
+            account,
+            "temporary_unschedulable",
+            "temporarily_unschedulable",
+            "is_temporary_unschedulable",
+            "unschedulable",
+        ) is True:
+            return False
+        if self._account_bool_value(account, "rate_limited", "is_rate_limited", "limited") is True:
+            return False
+        if self._account_bool_value(account, "disabled", "is_disabled") is True:
+            return False
+
+        explicit_available = self._account_bool_value(
+            account,
+            "is_available",
+            "available",
+            "availability.is_available",
+            "availability.available",
+        )
+        schedulable = self._account_bool_value(
+            account,
+            "schedulable",
+            "is_schedulable",
+            "availability.schedulable",
+        )
+        enabled = self._account_bool_value(account, "enabled", "is_enabled")
+        if explicit_available is False:
+            return False
+        if schedulable is False:
+            return False
+        if enabled is False:
+            return False
+
+        status_key = self._normalize_key(
+            account.get("availability_status")
+            or self._account_nested_value(account, "availability.status", "availability.state")
+            or account.get("status")
+        ).lower()
+        if status_key in {
+            "temporary_unschedulable",
+            "temporarily_unschedulable",
+            "rate_limited",
+            "ratelimited",
+            "overloaded",
+            "overload",
+            "unavailable",
+            "disabled",
+            "banned",
+            "needs_reauth",
+            "requires_reauth",
+            "needs_verify",
+            "requires_verify",
+        }:
+            return False
+        if explicit_available is True or schedulable is True:
+            return True
+        return status_key in {"available", "active", "ok", "healthy", "enabled", "ready", "normal"}
+
+    def _account_bool_value(self, account: dict[str, Any], *field_names: str) -> bool | None:
+        for field_name in field_names:
+            value = self._account_nested_value(account, field_name)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in {"1", "true", "yes", "y", "on", "available", "active", "enabled"}:
+                    return True
+                if text in {"0", "false", "no", "n", "off", "unavailable", "inactive", "disabled"}:
+                    return False
+            if isinstance(value, (int, float)):
+                return value != 0
+
+        raw_payload = account.get("raw")
+        if isinstance(raw_payload, dict) and raw_payload is not account:
+            return self._account_bool_value(raw_payload, *field_names)
+        return None
+
+    def _account_nested_value(self, account: dict[str, Any], *field_names: str) -> Any:
+        for field_name in field_names:
+            current: Any = account
+            for part in field_name.split("."):
+                if not isinstance(current, dict):
+                    current = None
+                    break
+                current = current.get(part)
+            if current not in (None, ""):
+                return current
+        return None
 
     def first_available_group_id_for_user(self, user: dict[str, Any]) -> Any | None:
         return self._first_available_user_group_id(user, self._available_groups_by_key())
@@ -2417,6 +2648,12 @@ class RotationService:
 
     def _latest_groups_snapshot(self) -> list[dict[str, Any]]:
         payload = self._latest_operational_payload(SOURCE_GROUPS, default=[])
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def _latest_accounts_snapshot(self) -> list[dict[str, Any]]:
+        payload = self._latest_operational_payload(SOURCE_ACCOUNTS, default=[])
         if not isinstance(payload, list):
             return []
         return [item for item in payload if isinstance(item, dict)]

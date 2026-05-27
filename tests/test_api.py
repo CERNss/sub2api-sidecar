@@ -715,6 +715,28 @@ def save_auto_rotation_config(
     )
 
 
+def add_available_account_for_group(
+    backend: FakeRotationSub2API,
+    group_id: object = 22,
+    *,
+    account_id: object | None = None,
+) -> None:
+    account_key = account_id or f"acct-{group_id}-available"
+    backend.accounts.append(
+        {
+            "id": account_key,
+            "name": f"openai-account-{group_id}-available",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "available": True,
+            "schedulable": True,
+            "group_ids": [group_id],
+        }
+    )
+
+
 def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
     store = main.get_flow_store()
     now = datetime.now(timezone.utc)
@@ -781,6 +803,7 @@ def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
         for user in users
     }
     for source_key, payload in {
+        "accounts": backend.accounts,
         "groups": groups,
         "users": users,
         "user_usage": user_usage,
@@ -4404,6 +4427,7 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     backend.users[0]["group_name"] = "rotation-low"
     backend.users[1]["group_id"] = 11
     backend.users[1]["group_name"] = "rotation-low"
+    add_available_account_for_group(backend, 22)
     clear_caches()
 
     with TestClient(main.app) as auto_client:
@@ -4500,6 +4524,266 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     assert backend.replace_calls == [
         {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
     ]
+
+
+def test_auto_rotation_fails_when_target_group_missing_upstream(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 11
+    backend.users[0]["group_name"] = "rotation-low"
+    backend.users[1]["group_id"] = 11
+    backend.users[1]["group_name"] = "rotation-low"
+    add_available_account_for_group(backend, 99)
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        store.save_operational_data_snapshot(
+            OperationalDataSnapshot(
+                source_key="group_usage",
+                observed_at=datetime.now(timezone.utc),
+                collected_at=datetime.now(timezone.utc),
+                payload={
+                    "11": {
+                        "5h": {
+                            "group_id": 11,
+                            "window": "5h",
+                            "total_actual_cost": 3.0,
+                            "source": "usage_logs",
+                        }
+                    },
+                    "99": {
+                        "5h": {
+                            "group_id": 99,
+                            "window": "5h",
+                            "total_actual_cost": 0.1,
+                            "source": "usage_logs",
+                        }
+                    },
+                },
+            )
+        )
+        GroupUsageService(store).refresh()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=99,
+                group_name="stale-target",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["moved"] == []
+    assert payload["failed"][0]["target_group_id"] == "99"
+    assert payload["failed"][0]["reason"] == "Target group does not exist in upstream Sub2API"
+    assert backend.replace_calls == []
+
+
+def test_auto_rotation_fails_when_target_group_has_no_upstream_accounts(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 11
+    backend.users[0]["group_name"] = "rotation-low"
+    backend.users[1]["group_id"] = 11
+    backend.users[1]["group_name"] = "rotation-low"
+    backend.groups.append(
+        {
+            "id": 55,
+            "name": "empty-target",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        store.save_operational_data_snapshot(
+            OperationalDataSnapshot(
+                source_key="group_usage",
+                observed_at=datetime.now(timezone.utc),
+                collected_at=datetime.now(timezone.utc),
+                payload={
+                    "11": {
+                        "5h": {
+                            "group_id": 11,
+                            "window": "5h",
+                            "total_actual_cost": 3.0,
+                            "source": "usage_logs",
+                        }
+                    },
+                    "55": {
+                        "5h": {
+                            "group_id": 55,
+                            "window": "5h",
+                            "total_actual_cost": 0.1,
+                            "source": "usage_logs",
+                        }
+                    },
+                },
+            )
+        )
+        GroupUsageService(store).refresh()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=55,
+                group_name="empty-target",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["moved"] == []
+    assert payload["failed"][0]["target_group_id"] == "55"
+    assert payload["failed"][0]["reason"] == "Target group has no upstream accounts"
+    assert backend.replace_calls == []
+
+
+def test_auto_rotation_fails_when_target_group_accounts_are_unschedulable(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 11
+    backend.users[0]["group_name"] = "rotation-low"
+    backend.users[1]["group_id"] = 11
+    backend.users[1]["group_name"] = "rotation-low"
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        store.save_operational_data_snapshot(
+            OperationalDataSnapshot(
+                source_key="group_usage",
+                observed_at=datetime.now(timezone.utc),
+                collected_at=datetime.now(timezone.utc),
+                payload={
+                    "11": {
+                        "5h": {
+                            "group_id": 11,
+                            "window": "5h",
+                            "total_actual_cost": 3.0,
+                            "source": "usage_logs",
+                        }
+                    },
+                    "22": {
+                        "5h": {
+                            "group_id": 22,
+                            "window": "5h",
+                            "total_actual_cost": 0.1,
+                            "source": "usage_logs",
+                        }
+                    },
+                },
+            )
+        )
+        GroupUsageService(store).refresh()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=11,
+                current_group_name="rotation-low",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["moved"] == []
+    assert payload["failed"][0]["target_group_id"] == "22"
+    assert payload["failed"][0]["reason"] == "Target group has no schedulable upstream accounts"
+    assert backend.replace_calls == []
 
 
 def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -> None:
@@ -4762,6 +5046,7 @@ def test_auto_rotation_dry_run_syncs_current_upstream_assignments_without_mutati
     backend = FakeRotationSub2API()
     backend.users[1]["group_id"] = 11
     backend.users[1]["group_name"] = "rotation-low"
+    add_available_account_for_group(backend, 22)
     clear_caches()
 
     with TestClient(main.app) as auto_client:
