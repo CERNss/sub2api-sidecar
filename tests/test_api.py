@@ -230,6 +230,7 @@ class FakeRotationSub2API:
         self.balance_calls: list[dict[str, object]] = []
         self.create_group_calls = 0
         self.create_account_calls = 0
+        self.create_account_payloads: list[dict[str, object]] = []
         self.generate_auth_url_calls = 0
         self.exchange_code_calls = 0
         self.update_account_calls: list[dict[str, object]] = []
@@ -418,6 +419,7 @@ class FakeRotationSub2API:
             )
         if method == "POST" and path == "/api/v1/admin/accounts":
             self.create_account_calls += 1
+            self.create_account_payloads.append(dict(json or {}))
             assert json["provider"] == "openai"
             assert json["platform"] == "openai"
             assert json["type"] == "oauth"
@@ -3782,18 +3784,120 @@ def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) 
             )
 
     assert start_response.status_code == 200
-    assert start_response.json()["group_id"] == 999
-    assert backend.create_group_calls == 1
+    start_payload = start_response.json()
+    assert start_payload["group_id"] == "11"
+    assert start_payload["assignment_mode"] == "managed_pool"
+    assert start_payload["assignment_reason"] == "landing pool assignment"
+    assert backend.create_group_calls == 0
     assert complete_response.status_code == 200
     assert backend.scheduled_test_plan_calls == [
         {"method": "GET", "account_id": "oa-1"},
         {"method": "POST", "json": {"account_id": "oa-1", **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN}},
     ]
-    completed_flow = main.get_flow_store().get_by_flow_id(start_response.json()["flow_id"])
+    assert backend.create_account_payloads[0]["group_ids"] == ["11"]
+    assert backend.bind_account_calls == []
+    completed_flow = main.get_flow_store().get_by_flow_id(start_payload["flow_id"])
     assert completed_flow is not None
     assert completed_flow.user_id is None
-    assert completed_flow.group_id == 999
-    assert completed_flow.assignment_mode == AssignmentMode.dedicated
+    assert completed_flow.group_id == "11"
+    assert completed_flow.assignment_mode == AssignmentMode.managed_pool
+
+
+def test_provision_start_uses_first_landing_pool_group_for_new_user(client) -> None:
+    backend = FakeRotationSub2API()
+
+    with TestClient(main.app) as managed_client:
+        login(managed_client)
+        store = main.get_flow_store()
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                pool_kind=RotationPoolKind.landing,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=2,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                pool_kind=RotationPoolKind.landing,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+
+        with patch.object(requests.Session, "request", new=backend.request):
+            start_response = managed_client.post(
+                "/provision/start", json={"email": "landing-new@example.com"}
+            )
+            state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
+            complete_response = managed_client.post(
+                "/provision/oauth/complete",
+                json={
+                    "callback_url": (
+                        f"http://localhost:1455/callback?code=landing-code&state={state}"
+                    )
+                },
+            )
+
+    assert start_response.status_code == 200
+    payload = start_response.json()
+    assert payload["group_id"] == "11"
+    assert payload["assignment_mode"] == "managed_pool"
+    assert payload["assignment_reason"] == "landing pool assignment"
+    assert backend.create_group_calls == 0
+    assert complete_response.status_code == 200
+    assert backend.create_account_calls == 1
+    assert backend.create_account_payloads[0]["group_ids"] == ["11"]
+    assert backend.bind_account_calls == []
+    completed_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
+    assert completed_flow is not None
+    assert completed_flow.group_id == "11"
+    assert completed_flow.assignment_mode == AssignmentMode.managed_pool
+    assert completed_flow.assignment_reason == "landing pool assignment"
+
+
+def test_provision_start_prefers_existing_email_group_over_landing_pool(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 77,
+            "name": "repeat@example.com",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+
+    with TestClient(main.app) as managed_client:
+        login(managed_client)
+        main.get_flow_store().upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                pool_kind=RotationPoolKind.landing,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = managed_client.post("/provision/start", json={"email": "repeat@example.com"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["group_id"] == 77
+    assert payload["assignment_mode"] == "dedicated"
+    assert payload["assignment_reason"] == "existing dedicated provisioning group"
+    assert backend.create_group_calls == 0
 
 
 def test_provision_start_reuses_existing_email_named_group(client) -> None:

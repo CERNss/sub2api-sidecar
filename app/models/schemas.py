@@ -74,6 +74,8 @@ class ProvisionStartResponse(BaseModel):
     email: EmailStr
     user_id: Any | None = None
     group_id: Any
+    assignment_mode: str
+    assignment_reason: str | None = None
     account_name: str
     status: str
     oauth_required: bool

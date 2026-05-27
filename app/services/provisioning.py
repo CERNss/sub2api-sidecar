@@ -20,6 +20,7 @@ from app.models.flow import (
     ProvisionEventType,
     ProvisionFlow,
 )
+from app.models.rotation import RotationPoolGroup, RotationPoolKind
 from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
 from app.stores.postgres import PostgresFlowStore
 
@@ -138,6 +139,8 @@ class ProvisioningService:
                     flow_id=flow.flow_id,
                     email=flow.email,
                     group_id=flow.group_id,
+                    assignment_mode=flow.assignment_mode.value,
+                    assignment_reason=flow.assignment_reason,
                     account_name=flow.account_name,
                     status=flow.status.value,
                     oauth_required=False,
@@ -203,6 +206,8 @@ class ProvisioningService:
             flow_id=flow.flow_id,
             email=flow.email,
             group_id=flow.group_id,
+            assignment_mode=flow.assignment_mode.value,
+            assignment_reason=flow.assignment_reason,
             account_name=flow.account_name,
             status=flow.status.value,
             oauth_required=True,
@@ -395,8 +400,32 @@ class ProvisioningService:
                 AssignmentMode.dedicated,
                 "existing dedicated provisioning group",
             )
+        landing_group = self._select_landing_pool_group()
+        if landing_group is not None:
+            return (
+                landing_group.group_id,
+                AssignmentMode.managed_pool,
+                "landing pool assignment",
+            )
         group = client.create_group(group_name)
         return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
+
+    def _select_landing_pool_group(self) -> RotationPoolGroup | None:
+        groups = [
+            group
+            for group in self.flow_store.list_rotation_pool_groups(RotationPoolKind.landing)
+            if not group.is_subscription
+        ]
+        if not groups:
+            return None
+        return min(
+            groups,
+            key=lambda group: (
+                group.priority,
+                group.created_at,
+                str(group.group_id),
+            ),
+        )
 
     def _find_group_by_name(
         self,
