@@ -144,18 +144,6 @@ class Settings:
     def default_sub2api_upstream(self) -> Sub2APIUpstream:
         return self.get_sub2api_upstream(self.default_sub2api_upstream_id)
 
-    @property
-    def sub2api_base_url(self) -> str:
-        return self.default_sub2api_upstream.base_url
-
-    @property
-    def sub2api_admin_api_key(self) -> str:
-        return self.default_sub2api_upstream.admin_api_key
-
-    @property
-    def sub2api_provisioning_defaults(self) -> Sub2APIProvisioningDefaults:
-        return self.default_sub2api_upstream.provisioning_defaults
-
     def get_sub2api_upstream(self, upstream_id: str | None = None) -> Sub2APIUpstream:
         selected_id = (upstream_id or self.default_sub2api_upstream_id).strip()
         for upstream in self.sub2api_upstreams:
@@ -313,34 +301,9 @@ def _sub2api_upstreams_setting(
         raise ConfigurationError("SUB2API_ACCOUNT_CONCURRENCY must be greater than zero")
 
     if upstreams_payload is None:
-        base_url = _string_setting(
-            config,
-            "SUB2API_BASE_URL",
-            ("sub2api", "base_url"),
-        )
-        admin_api_key = _env_string("SUB2API_ADMIN_API_KEY")
-        if base_url is None:
-            missing.append("sub2api.base_url or SUB2API_BASE_URL")
-        if admin_api_key is None:
-            missing.append("SUB2API_ADMIN_API_KEY")
-        if base_url is None or admin_api_key is None:
-            return None
-        return (
-            Sub2APIUpstream(
-                upstream_id="default",
-                name="Default Sub2API",
-                base_url=base_url,
-                admin_api_key=admin_api_key,
-                admin_api_key_env="SUB2API_ADMIN_API_KEY",
-                request_timeout_seconds=default_timeout_seconds,
-                provisioning_defaults=defaults,
-            ),
-        )
+        missing.append("sub2api.upstreams")
+        return None
 
-    if _env_string("SUB2API_BASE_URL") is not None:
-        raise ConfigurationError(
-            "SUB2API_BASE_URL cannot be used when sub2api.upstreams is configured"
-        )
     if not isinstance(upstreams_payload, list) or not upstreams_payload:
         raise ConfigurationError("sub2api.upstreams must be a non-empty array")
 

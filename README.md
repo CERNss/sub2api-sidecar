@@ -270,11 +270,11 @@ database:
 
 说明：
 
-- `SUB2API_ADMIN_API_KEY` 是调用默认 Sub2API admin API 的密钥。配置多个上游时，每个 `sub2api.upstreams[*].admin_api_key_env` 对应一个 `.env` 密钥。
+- `SUB2API_ADMIN_API_KEY` 是调用默认 Sub2API admin API 的密钥。每个 `sub2api.upstreams[*].admin_api_key_env` 对应一个 `.env` 密钥。
 - `POSTGRES_PASSWORD` 是 PostgreSQL 密码。数据库 url、port、username、name 写在 `config.yaml` 的 `database` 段；其中 `database.url` 是主机名或 IP，不是整条 DSN。应用会自己拼接连接串，部署时不要提供 `DATABASE_URL`、`POSTGRES_DB` 或 `POSTGRES_USER`。
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
 - `CONFIG_PATH` 可选，默认读取项目根目录的 `config.yaml`。
-- URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、单上游的 `sub2api.base_url` 或多上游的 `sub2api.upstreams[*].base_url`、以及 `database.url`；不要写进 `.env`。
+- URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、`sub2api.upstreams[*].base_url`、以及 `database.url`；不要写进 `.env`。
 - 当前运行时只支持 PostgreSQL，不再支持 SQLite，也不做 SQLite 数据迁移。
 - `app.base_path` 默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
 - 预配页面不再提供 assignment mode 切换；`POST /provision/start` 始终按入口 email 解析或创建专属分组，并把 flow 记录为 `dedicated`。
@@ -285,16 +285,9 @@ database:
 
 环境变量可以覆盖 `config.yaml` 中的同名配置项；已移除的运行时环境变量不再兼容，出现时会直接启动失败。新部署建议优先改 `config.yaml`。
 
-### 多上游 Sub2API
+### Sub2API 上游配置
 
-默认仍兼容单上游写法：
-
-```yaml
-sub2api:
-  base_url: http://sub2api-main:8080
-```
-
-如果一个 sidecar 要管理多个上游账号，把 `sub2api.base_url` 改成 `sub2api.upstreams`：
+上游必须写在 `sub2api.upstreams`。即使只管理一个上游，也要配置为只有一个元素的数组：
 
 ```yaml
 sub2api:
@@ -322,7 +315,11 @@ app:
   base_path: /sidecar
 
 sub2api:
-  base_url: http://sub2api:8080
+  upstreams:
+    - id: main
+      name: 主站 Sub2API
+      base_url: http://sub2api:8080
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
 ```
 
 在 Nginx Proxy Manager 的主站 Proxy Host 里新增 Custom Location：
@@ -428,7 +425,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-然后按需修改 `config.yaml` 和 `.env`，至少要在 `config.yaml` 设置 `app.base_url`、`openai.oauth_redirect_uri`、`database` 段，以及单上游的 `sub2api.base_url` 或多上游的 `sub2api.upstreams`；在 `.env` 设置对应的 Sub2API admin key、`POSTGRES_PASSWORD` 和 `APP_AUTH_PASSWORD`。新部署直接使用 PostgreSQL 空库启动，不需要也不会执行 SQLite 数据迁移。
+然后按需修改 `config.yaml` 和 `.env`，至少要在 `config.yaml` 设置 `app.base_url`、`openai.oauth_redirect_uri`、`database` 段、`sub2api.upstreams`；在 `.env` 设置对应的 Sub2API admin key、`POSTGRES_PASSWORD` 和 `APP_AUTH_PASSWORD`。新部署直接使用 PostgreSQL 空库启动，不需要也不会执行 SQLite 数据迁移。
 
 拉取镜像并启动：
 
@@ -465,10 +462,10 @@ docker compose logs -f
 
 - `docker-compose.yaml` 默认直接使用 `cernss/sub2api-sidecar:latest`，不会依赖本地 Dockerfile 构建
 - 发布流程默认推送 `linux/amd64,linux/arm64` 多架构镜像，Docker 会按宿主机架构自动选择
-- `docker-compose.yaml` 会读取项目根目录下的 `.env`，并把 `config.yaml` 挂载到容器内
+- `docker-compose.yaml` 会读取项目根目录下的 `.env`，把所有密钥环境变量传给 sidecar 容器，并把 `config.yaml` 挂载到容器内
 - `docker-compose.yaml` 会启动服务名和容器名均为 `sidecar-postgres` 的 `postgres:17-alpine`，默认创建 `sub2api_sidecar` 用户和同名数据库，用 `POSTGRES_PASSWORD` 设置密码，并用 `postgres-data` volume 持久化 PostgreSQL 数据
 - `docker-compose.yaml` 使用外部 `npm-network`，启动前请确保该网络已存在
-- 如果你的 `sub2api.base_url` 或 `sub2api.upstreams[*].base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
+- 如果你的 `sub2api.upstreams[*].base_url` 指向宿主机本地服务，容器里通常不能直接用 `http://127.0.0.1:<port>`，需要改成宿主机可访问地址
 
 ## 镜像构建
 

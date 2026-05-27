@@ -23,6 +23,8 @@ services:
     image: cernss/sub2api-sidecar:latest
     pull_policy: always
     container_name: sub2api-sidecar
+    env_file:
+      - .env
     environment:
       CONFIG_PATH: /app/config.yaml
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}

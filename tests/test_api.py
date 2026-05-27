@@ -1458,7 +1458,6 @@ sub2api:
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
-    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
     monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-secret")
     clear_caches()
     login(client)
@@ -1513,7 +1512,6 @@ sub2api:
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
-    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
     monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-key")
     clear_caches()
     login(client)
@@ -1596,7 +1594,6 @@ sub2api:
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
-    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
     monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-key")
     clear_caches()
     login(client)
@@ -1741,7 +1738,6 @@ sub2api:
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
-    monkeypatch.delenv("SUB2API_BASE_URL", raising=False)
     monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-secret")
     clear_caches()
     calls: list[str] = []

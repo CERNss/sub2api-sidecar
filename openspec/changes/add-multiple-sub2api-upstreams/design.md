@@ -7,8 +7,8 @@ The first implementation adds an upstream registry and threads `upstream_id` thr
 `Settings` will expose:
 
 - `sub2api_upstreams`: ordered tuple of upstream definitions.
-- `default_sub2api_upstream_id`: first configured upstream, or `default` for legacy config.
-- Backward-compatible `sub2api_base_url`, `sub2api_admin_api_key`, and `sub2api_provisioning_defaults` aliases for default-upstream consumers.
+- `default_sub2api_upstream_id`: first configured upstream.
+- `default_sub2api_upstream`: selected upstream object for internal default-upstream consumers.
 
 YAML shape:
 
@@ -39,7 +39,7 @@ Unknown upstream ids should return 422/400-level client errors and must not fall
 
 ## Persistence
 
-Add `upstream_id` to `ProvisionFlow`. Existing flow payloads load as `default` through model defaulting. The indexed table does not need a dedicated column in V1 because flow lookup remains by flow id/state and the JSON payload carries the upstream id.
+Add `upstream_id` to `ProvisionFlow`. Flow payloads that omit an upstream id are treated as using the configured default upstream when routed. The indexed table does not need a dedicated column in V1 because flow lookup remains by flow id/state and the JSON payload carries the upstream id.
 
 ## Frontend
 

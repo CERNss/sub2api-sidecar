@@ -9,7 +9,6 @@ from app.config import Settings
 
 CONFIG_ENV_NAMES = (
     "CONFIG_PATH",
-    "SUB2API_BASE_URL",
     "SUB2API_ADMIN_API_KEY",
     "SUB2API_SECONDARY_ADMIN_API_KEY",
     "APP_BASE_URL",
@@ -67,9 +66,20 @@ database:
 
 def _write_minimal_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(_database_config_yaml(), encoding="utf-8")
+    config_path.write_text(
+        _database_config_yaml()
+        + """
+sub2api:
+  upstreams:
+    - id: main
+      base_url: http://mock-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+""",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
 
 
 def test_settings_loads_non_secret_config_from_yaml(
@@ -88,8 +98,12 @@ app:
 openai:
   oauth_redirect_uri: http://localhost:1555/callback
 sub2api:
-  base_url: http://yaml-sub2api.local
   request_timeout_seconds: 12
+  upstreams:
+    - id: main
+      name: YAML Sub2API
+      base_url: http://yaml-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
   provisioning_defaults:
     group_platform: yaml-group
     account_provider: yaml-provider
@@ -117,7 +131,7 @@ sub2api:
 
     settings = Settings.from_env()
 
-    assert settings.sub2api_base_url == "http://yaml-sub2api.local"
+    assert settings.default_sub2api_upstream.base_url == "http://yaml-sub2api.local"
     assert settings.app_base_url == "http://yaml-sidecar.local"
     assert settings.app_base_path == "/sidecar"
     assert settings.openai_oauth_redirect_uri == "http://localhost:1555/callback"
@@ -126,7 +140,7 @@ sub2api:
     assert settings.database_url == "postgresql://sidecar:secret@postgres:5432/sidecar"
     assert settings.request_timeout_seconds == 12
 
-    defaults = settings.sub2api_provisioning_defaults
+    defaults = settings.default_sub2api_upstream.provisioning_defaults
     assert defaults.group_platform == "yaml-group"
     assert defaults.account_provider == "yaml-provider"
     assert defaults.account_platform == "yaml-platform"
@@ -151,19 +165,21 @@ app:
 openai:
   oauth_redirect_uri: http://localhost:1555/callback
 sub2api:
-  base_url: http://yaml-sub2api.local
+  upstreams:
+    - id: main
+      base_url: http://yaml-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
 """,
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://env-sub2api.local")
     monkeypatch.setenv("APP_ACCESS_KEY_TTL_HOURS", "18")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
 
     settings = Settings.from_env()
 
-    assert settings.sub2api_base_url == "http://env-sub2api.local"
+    assert settings.default_sub2api_upstream.base_url == "http://yaml-sub2api.local"
     assert settings.app_access_key_ttl_hours == 18
 
 
@@ -203,8 +219,8 @@ sub2api:
 
     assert settings.default_sub2api_upstream_id == "main"
     assert len(settings.sub2api_upstreams) == 2
-    assert settings.sub2api_base_url == "http://main-sub2api.local"
-    assert settings.sub2api_admin_api_key == "main-key"
+    assert settings.default_sub2api_upstream.base_url == "http://main-sub2api.local"
+    assert settings.default_sub2api_upstream.admin_api_key == "main-key"
     assert settings.get_sub2api_upstream("secondary").base_url == "http://secondary-sub2api.local"
     assert settings.get_sub2api_upstream("secondary").admin_api_key == "secondary-key"
     assert settings.get_sub2api_upstream("secondary").request_timeout_seconds == 18
@@ -266,7 +282,10 @@ app:
 openai:
   oauth_redirect_uri: http://localhost:1455/callback
 sub2api:
-  base_url: http://mock-sub2api.local
+  upstreams:
+    - id: main
+      base_url: http://mock-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
 """.lstrip(),
         encoding="utf-8",
     )
@@ -285,7 +304,6 @@ sub2api:
 
 def test_settings_rejects_removed_operational_data_interval(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
@@ -309,7 +327,10 @@ app:
 openai:
   oauth_redirect_uri: http://localhost:1455/callback
 sub2api:
-  base_url: http://mock-sub2api.local
+  upstreams:
+    - id: main
+      base_url: http://mock-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
 auto_rotation:
   enabled: true
   interval_seconds: 60
@@ -326,7 +347,6 @@ provisioning:
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
 
     with pytest.raises(Exception) as exc_info:
@@ -349,7 +369,6 @@ provisioning:
 
 def test_settings_rejects_removed_runtime_env(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
@@ -373,8 +392,6 @@ def test_settings_normalizes_env_base_path(
 ) -> None:
     _clear_config_env(monkeypatch)
     _write_minimal_config(tmp_path, monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
-    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("APP_BASE_PATH", "sidecar/")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
@@ -389,8 +406,6 @@ def test_settings_parse_sub2api_provisioning_overrides(
 ) -> None:
     _clear_config_env(monkeypatch)
     _write_minimal_config(tmp_path, monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
-    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
     monkeypatch.setenv("SUB2API_GROUP_PLATFORM", "openai")
@@ -414,19 +429,20 @@ def test_settings_parse_sub2api_provisioning_overrides(
 
     settings = Settings.from_env()
 
-    assert settings.sub2api_provisioning_defaults.group_platform == "openai"
-    assert settings.sub2api_provisioning_defaults.account_provider == "openai"
-    assert settings.sub2api_provisioning_defaults.account_platform == "openai"
-    assert settings.sub2api_provisioning_defaults.account_type == "oauth"
-    assert settings.sub2api_provisioning_defaults.account_ws_mode == "context_pool"
-    assert settings.sub2api_provisioning_defaults.account_concurrency == 8
-    assert settings.sub2api_provisioning_defaults.account_model_whitelist == (
+    defaults = settings.default_sub2api_upstream.provisioning_defaults
+    assert defaults.group_platform == "openai"
+    assert defaults.account_provider == "openai"
+    assert defaults.account_platform == "openai"
+    assert defaults.account_type == "oauth"
+    assert defaults.account_ws_mode == "context_pool"
+    assert defaults.account_concurrency == 8
+    assert defaults.account_model_whitelist == (
         "gpt-test-a",
         "gpt-test-b",
     )
-    assert settings.sub2api_provisioning_defaults.account_temporary_unschedulable is False
+    assert defaults.account_temporary_unschedulable is False
 
-    rules = settings.sub2api_provisioning_defaults.account_temporary_unschedulable_rules
+    rules = defaults.account_temporary_unschedulable_rules
     assert len(rules) == 1
     assert rules[0].error_code == "418"
     assert rules[0].duration_minutes == 5
@@ -436,7 +452,6 @@ def test_settings_parse_sub2api_provisioning_overrides(
 
 def test_settings_rejects_removed_provisioning_assignment_mode_env(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
@@ -450,7 +465,6 @@ def test_settings_rejects_removed_provisioning_assignment_mode_env(monkeypatch) 
 
 def test_settings_rejects_removed_auto_rotation_env(monkeypatch) -> None:
     _clear_config_env(monkeypatch)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")

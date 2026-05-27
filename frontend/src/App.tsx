@@ -2576,10 +2576,11 @@ function OperatorWorkspace() {
     creditControlTabFromPath(currentLogicalPathname())
   );
   const [upstreams, setUpstreams] = useState<UpstreamInfo[]>([]);
-  const [selectedUpstreamId, setSelectedUpstreamId] = useState("default");
+  const [selectedUpstreamId, setSelectedUpstreamId] = useState("");
   const [logoutBusy, setLogoutBusy] = useState(false);
   const selectedUpstream =
     upstreams.find((upstream) => upstream.upstream_id === selectedUpstreamId) ?? upstreams[0] ?? null;
+  const effectiveUpstreamId = selectedUpstream?.upstream_id ?? "";
 
   useEffect(() => {
     async function loadUpstreams() {
@@ -2590,7 +2591,7 @@ function OperatorWorkspace() {
           "加载上游列表失败"
         );
         setUpstreams(payload.items);
-        setSelectedUpstreamId(payload.default_upstream_id || payload.items[0]?.upstream_id || "default");
+        setSelectedUpstreamId(payload.default_upstream_id || payload.items[0]?.upstream_id || "");
       } catch (error: unknown) {
         if (!handleAuthExpired(error)) {
           setUpstreams([]);
@@ -2764,12 +2765,12 @@ function OperatorWorkspace() {
         />
       ) : activeView === "keyTransfer" ? (
         <KeyTransferView
-          selectedUpstreamId={selectedUpstreamId}
+          selectedUpstreamId={effectiveUpstreamId}
           onAuthExpired={handleAuthExpired}
         />
       ) : activeView === "provision" ? (
         <ProvisionForm
-          selectedUpstreamId={selectedUpstreamId}
+          selectedUpstreamId={effectiveUpstreamId}
           onAuthExpired={handleAuthExpired}
           onFlowChanged={() => undefined}
         />
@@ -2777,7 +2778,7 @@ function OperatorWorkspace() {
         <ExistingOrchestrationView
           activeTab={activeOrchestrationTab}
           onTabChange={navigateOrchestrationTab}
-          selectedUpstreamId={selectedUpstreamId}
+          selectedUpstreamId={effectiveUpstreamId}
           onAuthExpired={handleAuthExpired}
         />
       )}
@@ -2832,6 +2833,9 @@ function KeyTransferView({
   const isAllUsersScope = transferScope === "all_users";
 
   async function loadSourceUsers(searchOverride = sourceSearch) {
+    if (!selectedUpstreamId) {
+      return;
+    }
     const searchTerm = searchOverride.trim() || DEFAULT_KEY_TRANSFER_SOURCE_SEARCH;
     setLoadingUsers(true);
     try {
@@ -2869,6 +2873,9 @@ function KeyTransferView({
     userId = sourceUserId,
     options: { clearResult?: boolean } = {}
   ) {
+    if (!selectedUpstreamId) {
+      return;
+    }
     const shouldClearResult = options.clearResult ?? true;
     if (isAllUsersScope) {
       setLoadingKeys(true);
@@ -2967,6 +2974,10 @@ function KeyTransferView({
   }
 
   async function runKeyTransfer(dryRun: boolean) {
+    if (!selectedUpstreamId) {
+      setStatus({ message: "正在加载 Sub2API 上游，请稍后再试。", tone: "error" });
+      return;
+    }
     if (!isAllUsersScope && !selectedUser) {
       setStatus({ message: "请先定位 admin 源用户。", tone: "error" });
       return;
@@ -3936,6 +3947,9 @@ function ExistingOrchestrationView({
     users
   ]);
   async function loadResources(nextSelectedUserId?: string, searchOverride?: string) {
+    if (!selectedUpstreamId) {
+      return;
+    }
     setLoading(true);
     const searchTerm = (searchOverride !== undefined ? searchOverride : userSearch).trim();
     const params = new URLSearchParams();
@@ -3997,6 +4011,9 @@ function ExistingOrchestrationView({
   }
 
   async function loadApiKeys(userId: string) {
+    if (!selectedUpstreamId) {
+      return;
+    }
     if (!userId) {
       setApiKeys([]);
       setSelectedKeyIds([]);
@@ -4026,6 +4043,9 @@ function ExistingOrchestrationView({
   }
 
   async function loadAllApiKeys(nextUsers: OrchestrationUser[]) {
+    if (!selectedUpstreamId) {
+      return;
+    }
     const entries = await Promise.all(
       nextUsers.map(async (user) => {
         const userId = idValue(user.user_id);
@@ -4122,6 +4142,10 @@ function ExistingOrchestrationView({
   async function runExistingOrchestration(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
 
+    if (!selectedUpstreamId) {
+      setStatus({ message: "正在加载 Sub2API 上游，请稍后再试。", tone: "error" });
+      return;
+    }
     if (!selectedUser) {
       setStatus({ message: "请选择用户。", tone: "error" });
       return;
@@ -6346,6 +6370,10 @@ function ProvisionForm({
 
     if (!email.trim()) {
       setStatus({ message: "请先输入 email。", tone: "error" });
+      return;
+    }
+    if (!selectedUpstreamId) {
+      setStatus({ message: "正在加载 Sub2API 上游，请稍后再试。", tone: "error" });
       return;
     }
 

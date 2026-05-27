@@ -58,6 +58,11 @@ database:
   port: {port}
   username: {username}
   name: {database_name}
+sub2api:
+  upstreams:
+    - id: main
+      base_url: http://mock-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
 """.lstrip(),
         encoding="utf-8",
     )
@@ -95,7 +100,6 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     app_database_url = _database_url_from_config(config_path, password)
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("POSTGRES_PASSWORD", password)
-    monkeypatch.setenv("SUB2API_BASE_URL", "http://mock-sub2api.local")
     monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.delenv("APP_BASE_PATH", raising=False)

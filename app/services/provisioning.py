@@ -32,7 +32,7 @@ class ProvisioningService:
         flow_store: PostgresFlowStore,
         sub2api_client: Sub2APIClient,
         openai_oauth_redirect_uri: str,
-        default_upstream_id: str = "default",
+        default_upstream_id: str,
     ) -> None:
         self.flow_store = flow_store
         self.sub2api_client = sub2api_client

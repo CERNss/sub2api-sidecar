@@ -47,7 +47,7 @@ def redact_sensitive(value: Any) -> Any:
 def flow_summary_response(flow: ProvisionFlow) -> ProvisionFlowSummaryResponse:
     return ProvisionFlowSummaryResponse(
         flow_id=flow.flow_id,
-        upstream_id=flow.upstream_id,
+        upstream_id=flow.upstream_id or "",
         email=flow.email,
         user_id=flow.user_id,
         group_id=flow.group_id,

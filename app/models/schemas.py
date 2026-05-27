@@ -69,7 +69,7 @@ class ProvisioningRuntimeSettingsEnvelope(BaseModel):
 
 class ProvisionStartResponse(BaseModel):
     success: bool = True
-    upstream_id: str = "default"
+    upstream_id: str
     flow_id: str
     email: EmailStr
     user_id: Any | None = None
@@ -88,7 +88,7 @@ class ProvisionCompleteRequest(BaseModel):
 
 class ProvisionCompleteResponse(BaseModel):
     success: bool = True
-    upstream_id: str = "default"
+    upstream_id: str
     flow_id: str
     email: EmailStr
     group_id: Any
@@ -98,7 +98,7 @@ class ProvisionCompleteResponse(BaseModel):
 
 class ProvisionFlowSummaryResponse(BaseModel):
     flow_id: str
-    upstream_id: str = "default"
+    upstream_id: str
     email: EmailStr
     user_id: Any | None = None
     group_id: Any
@@ -140,7 +140,7 @@ class ProvisionFlowsEnvelope(BaseModel):
 
 
 class OrchestrationUserResponse(BaseModel):
-    upstream_id: str = "default"
+    upstream_id: str
     user_id: Any
     email: str
     name: str | None = None
@@ -156,13 +156,13 @@ class OrchestrationUserResponse(BaseModel):
 
 class OrchestrationUsersEnvelope(BaseModel):
     success: bool = True
-    upstream_id: str = "default"
+    upstream_id: str
     items: list[OrchestrationUserResponse]
     total: int
 
 
 class OrchestrationGroupResponse(BaseModel):
-    upstream_id: str = "default"
+    upstream_id: str
     group_id: Any
     name: str
     group_kind: str | None = None
@@ -183,13 +183,13 @@ class OrchestrationGroupResponse(BaseModel):
 
 class OrchestrationGroupsEnvelope(BaseModel):
     success: bool = True
-    upstream_id: str = "default"
+    upstream_id: str
     items: list[OrchestrationGroupResponse]
     total: int
 
 
 class OrchestrationAccountResponse(BaseModel):
-    upstream_id: str = "default"
+    upstream_id: str
     account_id: Any
     name: str
     email: str | None = None
@@ -216,13 +216,13 @@ class OrchestrationAccountResponse(BaseModel):
 
 class OrchestrationAccountsEnvelope(BaseModel):
     success: bool = True
-    upstream_id: str = "default"
+    upstream_id: str
     items: list[OrchestrationAccountResponse]
     total: int
 
 
 class OrchestrationApiKeyResponse(BaseModel):
-    upstream_id: str = "default"
+    upstream_id: str
     key_id: Any
     name: str | None = None
     user_id: Any | None = None
@@ -237,7 +237,7 @@ class OrchestrationApiKeyResponse(BaseModel):
 
 class OrchestrationApiKeysEnvelope(BaseModel):
     success: bool = True
-    upstream_id: str = "default"
+    upstream_id: str
     items: list[OrchestrationApiKeyResponse]
     total: int
 

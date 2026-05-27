@@ -3,12 +3,12 @@
 ### Requirement: Provide local compose runtime assets
 The project SHALL support configuring one or more upstream Sub2API instances while keeping upstream admin API keys in environment secrets.
 
-#### Scenario: Single upstream config remains valid
-- **GIVEN** deployment config provides `sub2api.base_url`
-- **AND** `.env` provides `SUB2API_ADMIN_API_KEY`
+#### Scenario: Single upstream is configured through upstreams
+- **GIVEN** deployment config provides `sub2api.upstreams` with one upstream item
+- **AND** `.env` provides that upstream item's admin API key environment variable
 - **WHEN** the sidecar starts
-- **THEN** the system exposes exactly one upstream with id `default`
-- **THEN** existing APIs that omit `upstream_id` use that default upstream
+- **THEN** the system exposes exactly one upstream using the configured upstream id
+- **THEN** existing APIs that omit `upstream_id` use that configured upstream as the default
 
 #### Scenario: Multiple upstreams are configured
 - **GIVEN** deployment config provides `sub2api.upstreams`

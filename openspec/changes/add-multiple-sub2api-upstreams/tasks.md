@@ -1,9 +1,9 @@
 ## 1. Backend Configuration And Registry
 
-- [x] 1.1 Add upstream config dataclass, parsing, validation, and default-upstream compatibility.
+- [x] 1.1 Add upstream config dataclass, parsing, validation, and default-upstream aliases.
 - [x] 1.2 Add Sub2API client registry lookup by `upstream_id` while preserving default client callers.
 - [x] 1.3 Add sanitized upstream list schema and authenticated `GET /api/upstreams`.
-- [x] 1.4 Add tests for legacy single-upstream config and multi-upstream config validation.
+- [x] 1.4 Add tests for required upstream config and multi-upstream config validation.
 
 ## 2. API And Flow Plumbing
 

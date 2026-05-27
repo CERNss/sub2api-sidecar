@@ -1702,7 +1702,7 @@ class RotationService:
 
     def _available_groups_by_key(self) -> dict[str, dict[str, Any]]:
         groups = self.sub2api_client.list_groups(
-            platform=self.settings.sub2api_provisioning_defaults.group_platform
+            platform=self.settings.default_sub2api_upstream.provisioning_defaults.group_platform
         )
         available: dict[str, dict[str, Any]] = {}
         for group in groups:

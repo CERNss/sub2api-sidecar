@@ -21,6 +21,7 @@ def build_flow() -> ProvisionFlow:
     now = datetime.now(timezone.utc)
     return ProvisionFlow(
         flow_id="flow-1",
+        upstream_id="main",
         email="user@example.com",
         user_id=123,
         group_id=456,

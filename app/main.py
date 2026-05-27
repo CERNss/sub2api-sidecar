@@ -1004,6 +1004,7 @@ def group_response(candidate: dict[str, object]) -> OrchestrationGroupResponse:
         elif candidate.get("is_exclusive") is False:
             unsupported_reason = "group is not exclusive"
     return OrchestrationGroupResponse(
+        upstream_id="",
         group_id=candidate["id"],
         name=str(candidate.get("name") or ""),
         group_kind=candidate.get("group_kind"),

@@ -15,22 +15,20 @@ openai:
   oauth_redirect_uri: http://localhost:1455/auth/callback
 
 sub2api:
-  base_url: http://localhost:8080
   request_timeout_seconds: 30
-  # For multiple Sub2API sites, replace base_url with upstreams.
   # The first upstream is the primary site used by token handoff login.
   # Later upstreams are managed secondary sites: the UI can switch to them for
   # configuration, orchestration, provisioning, and data collection targets.
-  # upstreams:
-  #   - id: main
-  #     name: 主站 Sub2API
-  #     base_url: http://sub2api-main:8080
-  #     admin_api_key_env: SUB2API_ADMIN_API_KEY
-  #   - id: secondary
-  #     name: 从站 Sub2API
-  #     base_url: http://sub2api-secondary:8080
-  #     admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
-  #     request_timeout_seconds: 30
+  upstreams:
+    - id: main
+      name: 主站 Sub2API
+      base_url: http://localhost:8080
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    # - id: secondary
+    #   name: 从站 Sub2API
+    #   base_url: http://sub2api-secondary:8080
+    #   admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+    #   request_timeout_seconds: 30
   provisioning_defaults:
     group_platform: openai
     account_provider: openai
