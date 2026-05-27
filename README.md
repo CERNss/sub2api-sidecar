@@ -110,6 +110,8 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
 
 显式 `target` 不存在或不唯一时不会 fallback 到 admin，会返回 `{"success":false,"status":"USER_NOT_FOUND"}` 或 `{"success":false,"status":"USER_EMAIL_NOT_UNIQUE"}`。
 
+当目标用户有多个可用分组时，默认沿用旧逻辑选择第一个可用分组；可以在 `config.yaml` 设置 `sub2api.api_key_group_selection: random`，让 API key 创建时从该用户的可用分组中随机选择一个。这个配置只影响自动化 API Key 创建，不影响自动轮换或迁移。
+
 ```bash
 curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
   -H "Authorization: Bearer $SIDECAR_API_TOKEN" \
@@ -303,6 +305,7 @@ database:
 ```yaml
 sub2api:
   request_timeout_seconds: 30
+  api_key_group_selection: random
   upstreams:
     - id: main
       name: 主站 Sub2API

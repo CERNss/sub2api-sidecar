@@ -1949,6 +1949,9 @@ class RotationService:
     def first_available_group_id_for_user(self, user: dict[str, Any]) -> Any | None:
         return self._first_available_user_group_id(user, self._available_groups_by_key())
 
+    def available_groups_by_key(self) -> dict[str, dict[str, Any]]:
+        return self._available_groups_by_key()
+
     def _resolve_admin_user_id(self) -> Any:
         candidates: list[dict[str, Any]] = []
         seen_user_ids: set[str] = set()
@@ -2316,6 +2319,9 @@ class RotationService:
                         group_id = raw_group
                     add(group_id)
         return candidate_group_ids
+
+    def candidate_group_ids_for_user(self, user: dict[str, Any]) -> list[Any]:
+        return self._candidate_user_group_ids(user)
 
     def _save_orchestration_run(
         self,

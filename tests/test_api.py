@@ -3746,6 +3746,67 @@ def test_token_apikey_api_target_overrides_name_email(client) -> None:
     ]
 
 
+def test_token_apikey_api_can_randomly_select_available_user_group(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUB2API_API_KEY_GROUP_SELECTION", "random")
+    get_settings.cache_clear()
+    main.get_sub2api_client.cache_clear()
+    main.get_rotation_service_for_upstream.cache_clear()
+    main.get_api_key_automation_service.cache_clear()
+
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "username": "admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users.append(
+        {
+            "id": 505,
+            "email": "multi@example.com",
+            "name": "Multi Group",
+            "status": "active",
+            "allowed_groups": [22, 11],
+        }
+    )
+    access_key = login(client)["access_key"]
+
+    with (
+        patch.object(requests.Session, "request", new=backend.request),
+        patch("app.services.api_key_automation.random.choice", side_effect=lambda values: values[-1]),
+    ):
+        response = client.post(
+            "/api/v1/apikey",
+            headers={"Authorization": f"Bearer {access_key}"},
+            json={
+                "action": "create",
+                "name": "svc:obj:v1:multi@example.com",
+                "quota": 0,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["item"]["user_id"] == 505
+    assert payload["item"]["group_id"] == 11
+    assert backend.api_key_create_calls == [
+        {
+            "user_id": 505,
+            "path": "/api/v1/admin/users/505/api-keys",
+            "json": {"quota": 0, "name": "svc:obj:v1:multi@example.com", "group_id": 11},
+        }
+    ]
+
+
 def test_token_apikey_api_forced_missing_target_returns_status_without_admin_fallback(client) -> None:
     backend = FakeRotationSub2API()
     backend.users.insert(

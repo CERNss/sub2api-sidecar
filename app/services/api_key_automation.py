@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 from typing import Any
 
 from app.clients.sub2api import Sub2APIClient
+from app.config import API_KEY_GROUP_SELECTION_FIRST, API_KEY_GROUP_SELECTION_RANDOM
 from app.errors import RotationExecutionError
 from app.services.rotation import RotationService
 
@@ -39,9 +41,11 @@ class ApiKeyAutomationService:
         *,
         sub2api_client: Sub2APIClient,
         rotation_service: RotationService,
+        group_selection: str = API_KEY_GROUP_SELECTION_FIRST,
     ) -> None:
         self.sub2api_client = sub2api_client
         self.rotation_service = rotation_service
+        self.group_selection = group_selection
 
     def create_named_key(
         self,
@@ -57,7 +61,7 @@ class ApiKeyAutomationService:
         if target_error is not None:
             return target_error
 
-        target_group_id = self.rotation_service.first_available_group_id_for_user(target_user)
+        target_group_id = self._select_group_id_for_user(target_user)
         if target_group_id in (None, ""):
             raise RotationExecutionError("Target user has no available group")
 
@@ -112,6 +116,20 @@ class ApiKeyAutomationService:
                 }
             )
         return items
+
+    def _select_group_id_for_user(self, user: dict[str, Any]) -> Any | None:
+        available_groups_by_key = self.rotation_service.available_groups_by_key()
+        candidate_group_ids = self.rotation_service.candidate_group_ids_for_user(user)
+        selectable_group_ids = [
+            group_id
+            for group_id in candidate_group_ids
+            if self.rotation_service.normalize_key_value(group_id) in available_groups_by_key
+        ]
+        if not selectable_group_ids:
+            return None
+        if self.group_selection == API_KEY_GROUP_SELECTION_RANDOM:
+            return random.choice(selectable_group_ids)
+        return selectable_group_ids[0]
 
     def _resolve_create_target(
         self,

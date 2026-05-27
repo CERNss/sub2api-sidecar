@@ -19,6 +19,12 @@ load_dotenv()
 CONFIG_PATH_ENV = "CONFIG_PATH"
 DEFAULT_CONFIG_PATH = "config.yaml"
 OPERATIONAL_RUNTIME_INTERVAL_SECONDS = 60
+API_KEY_GROUP_SELECTION_FIRST = "first"
+API_KEY_GROUP_SELECTION_RANDOM = "random"
+API_KEY_GROUP_SELECTION_MODES = (
+    API_KEY_GROUP_SELECTION_FIRST,
+    API_KEY_GROUP_SELECTION_RANDOM,
+)
 
 REMOVED_CONFIG_PATHS: tuple[tuple[str, ...], ...] = (
     ("storage",),
@@ -139,6 +145,7 @@ class Settings:
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
     request_timeout_seconds: int = 30
+    api_key_group_selection: str = API_KEY_GROUP_SELECTION_FIRST
 
     @property
     def default_sub2api_upstream(self) -> Sub2APIUpstream:
@@ -190,6 +197,7 @@ class Settings:
             ("sub2api", "request_timeout_seconds"),
             default=30,
         )
+        values["api_key_group_selection"] = _api_key_group_selection_setting(config)
         values["app_access_key_ttl_hours"] = _int_setting(
             config,
             "APP_ACCESS_KEY_TTL_HOURS",
@@ -584,6 +592,22 @@ def _base_path_setting(config: Mapping[str, Any]) -> str:
         default="",
     )
     return _normalize_base_path(raw_value or "")
+
+
+def _api_key_group_selection_setting(config: Mapping[str, Any]) -> str:
+    value = _string_setting(
+        config,
+        "SUB2API_API_KEY_GROUP_SELECTION",
+        ("sub2api", "api_key_group_selection"),
+        default=API_KEY_GROUP_SELECTION_FIRST,
+    )
+    normalized = (value or API_KEY_GROUP_SELECTION_FIRST).strip().lower()
+    if normalized not in API_KEY_GROUP_SELECTION_MODES:
+        raise ConfigurationError(
+            "SUB2API_API_KEY_GROUP_SELECTION must be one of: "
+            + ", ".join(API_KEY_GROUP_SELECTION_MODES)
+        )
+    return normalized
 
 
 def _normalize_base_path(raw_value: str) -> str:

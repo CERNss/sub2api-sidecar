@@ -305,10 +305,12 @@ def get_rotation_service_for_upstream(upstream_id: str | None = None) -> Rotatio
 
 @lru_cache(maxsize=None)
 def get_api_key_automation_service(upstream_id: str | None = None) -> ApiKeyAutomationService:
+    settings = get_settings()
     selected_upstream_id = normalize_upstream_id(upstream_id)
     return ApiKeyAutomationService(
         sub2api_client=get_sub2api_client(selected_upstream_id),
         rotation_service=get_rotation_service_for_upstream(selected_upstream_id),
+        group_selection=settings.api_key_group_selection,
     )
 
 

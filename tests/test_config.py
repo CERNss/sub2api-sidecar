@@ -45,6 +45,7 @@ CONFIG_ENV_NAMES = (
     "SUB2API_ACCOUNT_MODEL_WHITELIST_JSON",
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON",
+    "SUB2API_API_KEY_GROUP_SELECTION",
 )
 
 
@@ -99,6 +100,7 @@ openai:
   oauth_redirect_uri: http://localhost:1555/callback
 sub2api:
   request_timeout_seconds: 12
+  api_key_group_selection: random
   upstreams:
     - id: main
       name: YAML Sub2API
@@ -139,6 +141,7 @@ sub2api:
     assert settings.app_access_key_ttl_hours == 6
     assert settings.database_url == "postgresql://sidecar:secret@postgres:5432/sidecar"
     assert settings.request_timeout_seconds == 12
+    assert settings.api_key_group_selection == "random"
 
     defaults = settings.default_sub2api_upstream.provisioning_defaults
     assert defaults.group_platform == "yaml-group"
@@ -224,6 +227,37 @@ sub2api:
     assert settings.get_sub2api_upstream("secondary").base_url == "http://secondary-sub2api.local"
     assert settings.get_sub2api_upstream("secondary").admin_api_key == "secondary-key"
     assert settings.get_sub2api_upstream("secondary").request_timeout_seconds == 18
+
+
+def test_settings_rejects_invalid_api_key_group_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        _database_config_yaml()
+        + """
+app:
+  base_url: http://yaml-sidecar.local
+openai:
+  oauth_redirect_uri: http://localhost:1555/callback
+sub2api:
+  api_key_group_selection: round_robin
+  upstreams:
+    - id: main
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "main-key")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "SUB2API_API_KEY_GROUP_SELECTION" in str(exc_info.value)
 
 
 def test_settings_rejects_duplicate_sub2api_upstream_ids(

@@ -15,6 +15,7 @@ openai:
 
 sub2api:
   request_timeout_seconds: 30
+  api_key_group_selection: random
   upstreams:
     - id: main
       name: 主站 Sub2API
