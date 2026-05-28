@@ -1085,16 +1085,23 @@ class RotationService:
     def _direct_user_group_from_item(self, user: dict[str, Any]) -> tuple[Any | None, str | None]:
         raw = user.get("raw")
         if isinstance(raw, dict):
-            for field_name in ("group_id", "current_group_id", "default_group_id"):
+            for field_name in (
+                "group_id",
+                "groupId",
+                "current_group_id",
+                "currentGroupId",
+                "default_group_id",
+                "defaultGroupId",
+            ):
                 value = raw.get(field_name)
                 if value not in (None, ""):
                     return value, self._direct_user_group_name(raw)
-            for field_name in ("group", "current_group", "default_group"):
+            for field_name in ("group", "current_group", "currentGroup", "default_group", "defaultGroup"):
                 group = raw.get(field_name)
                 if isinstance(group, dict):
-                    group_id = group.get("id") or group.get("group_id")
+                    group_id = group.get("id") or group.get("group_id") or group.get("groupId")
                     if group_id not in (None, ""):
-                        return group_id, group.get("name") or group.get("group_name")
+                        return group_id, group.get("name") or group.get("group_name") or group.get("groupName")
             return None, self._direct_user_group_name(raw)
 
         current_group_id = user.get("current_group_id")
@@ -1103,7 +1110,14 @@ class RotationService:
         return None, user.get("current_group_name")
 
     def _direct_user_group_name(self, payload: dict[str, Any]) -> str | None:
-        for field_name in ("group_name", "current_group_name", "default_group_name"):
+        for field_name in (
+            "group_name",
+            "groupName",
+            "current_group_name",
+            "currentGroupName",
+            "default_group_name",
+            "defaultGroupName",
+        ):
             value = payload.get(field_name)
             if value not in (None, ""):
                 return str(value)

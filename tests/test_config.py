@@ -192,6 +192,22 @@ def test_settings_env_overrides_account_invalid_whitelist(
     )
 
 
+def test_settings_env_overrides_group_whitelist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("NOTIFICATION_GROUP_WHITELIST_IDS", "g-env, g-two")
+    monkeypatch.setenv("NOTIFICATION_GROUP_WHITELIST_NAMES", "Landing Pool")
+
+    settings = Settings.from_env()
+
+    assert settings.group_alert_whitelist.ids == ("g-env", "g-two")
+    assert settings.group_alert_whitelist.names == ("Landing Pool",)
+
+
 def test_settings_env_overrides_config_yaml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

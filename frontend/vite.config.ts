@@ -140,6 +140,13 @@ const mockSourceKeys = [
   }
 ];
 
+const mockApiKeysByUserId: Record<string, typeof mockSourceKeys> = {
+  "admin-001": mockSourceKeys,
+  "user-feng": [],
+  "user-ungrouped": [],
+  "user-qiao": []
+};
+
 type DevResponse = {
   statusCode: number;
   setHeader(name: string, value: string): unknown;
@@ -371,7 +378,9 @@ function keyTransferMockApi(): Plugin {
           return;
         }
         if (method === "GET" && url.pathname.startsWith("/orchestration/users/") && url.pathname.endsWith("/api-keys")) {
-          sendJson(response, { success: true, items: mockSourceKeys, total: mockSourceKeys.length });
+          const userId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+          const items = mockApiKeysByUserId[userId] ?? [];
+          sendJson(response, { success: true, items, total: items.length });
           return;
         }
         if (method === "POST" && url.pathname === "/orchestration/assignments/replace-group") {

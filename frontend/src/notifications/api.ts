@@ -1,6 +1,8 @@
 import { makeDefaultSettings } from "./defaults";
 import { apiUrl } from "../runtime";
 import {
+  AccountAlertWhitelist,
+  GroupAlertWhitelist,
   NotificationDeliveryHistory,
   NotificationDeliveryRecord,
   NotificationDeliveryOutcome,
@@ -12,6 +14,8 @@ import {
   WebhookMethod,
   WebhookProvider,
   defaultWebhookPayloadFields,
+  makeEmptyAccountAlertWhitelist,
+  makeEmptyGroupAlertWhitelist,
   webhookMethodOptions,
   webhookPayloadFieldOptions,
   webhookProviderOptions
@@ -60,7 +64,12 @@ const KNOWN_WEBHOOK_KEYS = new Set<keyof NotificationWebhook>([
   "secret"
 ]);
 
-const KNOWN_SETTINGS_KEYS = new Set<keyof NotificationSettings>(["webhooks", "rules"]);
+const KNOWN_SETTINGS_KEYS = new Set<keyof NotificationSettings>([
+  "webhooks",
+  "rules",
+  "account_alert_whitelist",
+  "group_alert_whitelist"
+]);
 const notificationSeverityValues = new Set(["info", "warning", "critical"]);
 const notificationOperatorValues = new Set(["gt", "gte", "lt", "lte", "eq", "neq"]);
 const webhookProviderValues = new Set(webhookProviderOptions.map((option) => option.value));
@@ -323,6 +332,34 @@ function hydrateRule(raw: unknown, index: number): NotificationRule {
   };
 }
 
+function hydrateStringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is string => typeof item === "string");
+}
+
+function hydrateAccountAlertWhitelist(raw: unknown): AccountAlertWhitelist {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return makeEmptyAccountAlertWhitelist();
+  }
+  const source = raw as ApiPayload;
+  return {
+    ids: hydrateStringList(source.ids),
+    names: hydrateStringList(source.names),
+    emails: hydrateStringList(source.emails)
+  };
+}
+
+function hydrateGroupAlertWhitelist(raw: unknown): GroupAlertWhitelist {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return makeEmptyGroupAlertWhitelist();
+  }
+  const source = raw as ApiPayload;
+  return {
+    ids: hydrateStringList(source.ids),
+    names: hydrateStringList(source.names)
+  };
+}
+
 function hydrateSettings(raw: unknown): NotificationSettings {
   if (!raw || typeof raw !== "object") return makeDefaultSettings();
   const source = raw as ApiPayload;
@@ -336,8 +373,21 @@ function hydrateSettings(raw: unknown): NotificationSettings {
   }
   const webhooks = source.webhooks.map(hydrateWebhook);
   const rules = source.rules.map(hydrateRule);
-  if (webhooks.length === 0) return makeDefaultSettings();
-  return { webhooks, rules };
+  const accountAlertWhitelist = hydrateAccountAlertWhitelist(source.account_alert_whitelist);
+  const groupAlertWhitelist = hydrateGroupAlertWhitelist(source.group_alert_whitelist);
+  if (webhooks.length === 0) {
+    return {
+      ...makeDefaultSettings(),
+      account_alert_whitelist: accountAlertWhitelist,
+      group_alert_whitelist: groupAlertWhitelist
+    };
+  }
+  return {
+    webhooks,
+    rules,
+    account_alert_whitelist: accountAlertWhitelist,
+    group_alert_whitelist: groupAlertWhitelist
+  };
 }
 
 function hydrateDeliveryOutcome(raw: unknown): NotificationDeliveryOutcome | null {
@@ -451,6 +501,44 @@ export async function sendNotificationTest(ruleId: string): Promise<Notification
     "发送测试消息失败"
   );
   return hydrateTestResult(payload);
+}
+
+export type WhitelistOption = { value: string; label: string };
+
+export async function loadAccountWhitelistOptions(): Promise<WhitelistOption[]> {
+  const payload = await requestNotificationJson<ApiPayload>(
+    "/orchestration/accounts",
+    { method: "GET" },
+    "加载账号列表失败"
+  );
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  return items
+    .map((raw) => {
+      const item = (raw ?? {}) as ApiPayload;
+      const value = item.account_id === undefined || item.account_id === null ? "" : String(item.account_id);
+      const name = typeof item.name === "string" ? item.name : "";
+      const email = typeof item.email === "string" ? item.email : "";
+      const label = [name, email].filter(Boolean).join(" · ") || value;
+      return { value, label };
+    })
+    .filter((option) => option.value);
+}
+
+export async function loadGroupWhitelistOptions(): Promise<WhitelistOption[]> {
+  const payload = await requestNotificationJson<ApiPayload>(
+    "/orchestration/groups",
+    { method: "GET" },
+    "加载分组列表失败"
+  );
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  return items
+    .map((raw) => {
+      const item = (raw ?? {}) as ApiPayload;
+      const value = item.group_id === undefined || item.group_id === null ? "" : String(item.group_id);
+      const name = typeof item.name === "string" ? item.name : "";
+      return { value, label: name || value };
+    })
+    .filter((option) => option.value);
 }
 
 export async function saveNotificationSettings(

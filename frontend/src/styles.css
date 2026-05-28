@@ -677,6 +677,10 @@ pre {
   font-size: 15px;
 }
 
+.provision-mode {
+  justify-self: start;
+}
+
 .provision-callback-form {
   padding-top: 22px;
   border-top: 1px solid #e5e7eb;
@@ -1300,21 +1304,47 @@ pre {
 .notif-webhook-area {
   grid-area: webhooks;
   display: grid;
+  grid-template-rows: 1fr;
   min-width: 0;
   align-self: stretch;
+}
+
+.notif-webhook-area > .panel {
+  height: 100%;
+}
+
+.notif-section-head.notif-whitelist-head {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.notif-section-head.notif-whitelist-head > div:first-child {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.notif-whitelist-head .notif-section-actions .button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+.notif-whitelist-head .notif-section-actions .button svg {
+  width: 14px;
+  height: 14px;
 }
 
 .notif-summary-area {
   grid-area: summary;
   min-width: 0;
-  display: flex;
+  display: grid;
+  gap: 18px;
+  align-content: start;
   align-self: stretch;
-  align-items: stretch;
 }
 
 .notif-summary-area > .notif-summary {
   width: 100%;
-  min-height: 100%;
 }
 
 .notif-rules-area {
@@ -1322,6 +1352,11 @@ pre {
   display: grid;
   gap: 10px;
   min-width: 0;
+}
+
+.notif-whitelist-fields {
+  display: grid;
+  gap: 14px;
 }
 
 .notif-rule-island {
@@ -1406,14 +1441,12 @@ pre {
 }
 
 .webhook-island {
-  height: 560px;
   min-height: 560px;
-  max-height: 560px;
   display: flex;
   flex-direction: column;
   gap: 14px;
   overflow: hidden;
-  align-self: start;
+  align-self: stretch;
 }
 
 .webhook-island-head {

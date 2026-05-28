@@ -8,6 +8,8 @@ from app.models.notification import CollectorSample, NotificationRule
 
 CollectorFn = Callable[[NotificationRule], CollectorSample | None]
 AccountInvalidWhitelist = dict[str, frozenset[str]]
+AccountAlertWhitelist = dict[str, frozenset[str]]
+GroupAlertWhitelist = dict[str, frozenset[str]]
 
 
 KNOWN_SIGNAL_KEYS: tuple[str, ...] = (
@@ -490,6 +492,54 @@ def _account_matches_invalid_whitelist(
         raw_email = _normalized_optional_text(raw.get(field_name))
         if raw_email and raw_email in whitelist["emails"]:
             return True
+    return False
+
+
+def normalize_account_alert_whitelist(
+    whitelist: AccountAlertWhitelist | object | None,
+) -> AccountAlertWhitelist:
+    return normalize_account_invalid_whitelist(whitelist)
+
+
+def account_matches_alert_whitelist(
+    account: dict,
+    whitelist: AccountAlertWhitelist,
+) -> bool:
+    """Whether an account is excluded from every account-class alert signal."""
+
+    return _account_matches_invalid_whitelist(account, whitelist)
+
+
+def normalize_group_alert_whitelist(
+    whitelist: GroupAlertWhitelist | object | None,
+) -> GroupAlertWhitelist:
+    if whitelist is None:
+        return {"ids": frozenset(), "names": frozenset()}
+    if isinstance(whitelist, dict):
+        return {
+            "ids": frozenset(_normalized_text_items(whitelist.get("ids"))),
+            "names": frozenset(_normalized_text_items(whitelist.get("names"))),
+        }
+    return {
+        "ids": frozenset(_normalized_text_items(getattr(whitelist, "ids", ()))),
+        "names": frozenset(_normalized_text_items(getattr(whitelist, "names", ()))),
+    }
+
+
+def group_matches_alert_whitelist(
+    group: dict,
+    whitelist: GroupAlertWhitelist,
+) -> bool:
+    """Whether a group is excluded from every group-class alert signal."""
+
+    if not any(whitelist.values()):
+        return False
+    group_id = _normalized_optional_text(group.get("id"))
+    if group_id and group_id in whitelist["ids"]:
+        return True
+    group_name = _normalized_optional_text(group.get("name"))
+    if group_name and group_name in whitelist["names"]:
+        return True
     return False
 
 

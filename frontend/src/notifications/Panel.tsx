@@ -1,8 +1,10 @@
 import { FormEvent, useEffect, useState } from "react";
 import { LoaderCircle, Save } from "lucide-react";
+import { notifyError } from "../notify";
 import { WebhookEditor } from "./WebhookEditor";
 import { RuleEditor } from "./RuleEditor";
 import { Summary } from "./Summary";
+import { WhitelistPanel } from "./WhitelistPanel";
 import { makeDefaultWebhook, makeRuleForSignal } from "./defaults";
 import {
   getNotificationApiErrorMessage,
@@ -12,11 +14,15 @@ import {
   sendNotificationTest
 } from "./api";
 import {
+  AccountAlertWhitelist,
+  GroupAlertWhitelist,
   NotificationDeliveryHistory,
   NotificationRule,
   NotificationSettings,
   NotificationTestResult,
   NotificationWebhook,
+  makeEmptyAccountAlertWhitelist,
+  makeEmptyGroupAlertWhitelist,
   notificationSignals
 } from "./types";
 
@@ -32,7 +38,9 @@ const emptyDeliveryHistory: NotificationDeliveryHistory = { items: [], total: 0 
 export function NotificationPanel({ onAuthExpired }: Props) {
   const [settings, setSettings] = useState<NotificationSettings>(() => ({
     webhooks: [makeDefaultWebhook()],
-    rules: []
+    rules: [],
+    account_alert_whitelist: makeEmptyAccountAlertWhitelist(),
+    group_alert_whitelist: makeEmptyGroupAlertWhitelist()
   }));
   const [selectedWebhookId, setSelectedWebhookId] = useState("");
   const [selectedRuleId, setSelectedRuleId] = useState("");
@@ -98,6 +106,14 @@ export function NotificationPanel({ onAuthExpired }: Props) {
       cancelled = true;
     };
   }, []);
+
+  // Surface error statuses as a global top-right toast instead of cramped inline text.
+  useEffect(() => {
+    if (status.tone === "error" && status.message) {
+      notifyError(status.message);
+      setStatus(emptyStatus);
+    }
+  }, [status]);
 
   async function refreshDeliveryHistory() {
     setIsLoadingHistory(true);
@@ -187,6 +203,20 @@ export function NotificationPanel({ onAuthExpired }: Props) {
     setSettings((current) => ({
       ...current,
       rules: current.rules.map((rule) => (rule.id === id ? { ...rule, ...partial } : rule))
+    }));
+  }
+
+  function updateAccountWhitelist(partial: Partial<AccountAlertWhitelist>) {
+    setSettings((current) => ({
+      ...current,
+      account_alert_whitelist: { ...current.account_alert_whitelist, ...partial }
+    }));
+  }
+
+  function updateGroupWhitelist(partial: Partial<GroupAlertWhitelist>) {
+    setSettings((current) => ({
+      ...current,
+      group_alert_whitelist: { ...current.group_alert_whitelist, ...partial }
     }));
   }
 
@@ -338,6 +368,12 @@ export function NotificationPanel({ onAuthExpired }: Props) {
           settings={settings}
           deliveryHistory={deliveryHistory}
           isLoadingHistory={isLoadingHistory}
+        />
+        <WhitelistPanel
+          settings={settings}
+          onChangeAccountWhitelist={updateAccountWhitelist}
+          onChangeGroupWhitelist={updateGroupWhitelist}
+          renderSaveAction={renderSaveAction}
         />
       </div>
 

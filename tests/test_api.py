@@ -2073,6 +2073,128 @@ def test_provision_start_uses_email_as_dedicated_group_name(client) -> None:
     assert create_group_payloads[0]["name"] == email
 
 
+def test_sub2api_client_builds_apikey_account_payload() -> None:
+    captured: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        captured.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"account_id": "oa-9", "name": json["name"]})
+
+    sub2api = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = sub2api.create_openai_account_from_apikey(
+            name="key-acct",
+            base_url="https://api.openai.com/v1",
+            api_key="sk-abc",
+            group_id="g-7",
+        )
+
+    assert result["id"] == "oa-9"
+    assert captured[0]["path"] == "/api/v1/admin/accounts"
+    payload = captured[0]["json"]
+    assert payload["provider"] == "openai"
+    assert payload["platform"] == "openai"
+    assert payload["type"] == "api_key"
+    assert payload["credentials"]["api_key"] == "sk-abc"
+    assert payload["credentials"]["base_url"] == "https://api.openai.com/v1"
+    assert payload["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
+    assert payload["credentials"]["temp_unschedulable_enabled"] is True
+    assert payload["group_ids"] == ["g-7"]
+    assert payload["concurrency"] == 5
+    assert payload["extra"] == {}
+    # API key accounts must not carry OAuth token fields.
+    assert "access_token" not in payload["credentials"]
+    assert "refresh_token" not in payload["credentials"]
+
+
+def test_sub2api_client_apikey_account_payload_sends_numeric_group_ids_as_numbers() -> None:
+    captured: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        captured.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"account_id": "oa-9", "name": json["name"]})
+
+    sub2api = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        sub2api.create_openai_account_from_apikey(
+            name="key-acct",
+            base_url="https://api.openai.com/v1",
+            api_key="sk-abc",
+            group_id="11",
+        )
+
+    assert captured[0]["json"]["group_ids"] == [11]
+
+
+def test_provision_apikey_start_creates_account_without_oauth(client) -> None:
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if method == "POST" and path == "/api/v1/admin/accounts":
+            assert json["provider"] == "openai"
+            assert json["platform"] == "openai"
+            assert json["type"] == "api_key"
+            assert json["credentials"]["api_key"] == "sk-test-123"
+            assert json["credentials"]["base_url"] == "https://api.openai.com/v1"
+            assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
+            assert json["credentials"]["temp_unschedulable_enabled"] is True
+            assert json["group_ids"] == ["g-1"]
+            assert json["concurrency"] == 5
+            assert "access_token" not in json["credentials"]
+            return FakeResponse(200, {"account_id": "oa-key-1", "name": json["name"]})
+        if method == "POST" and path == "/api/v1/admin/scheduled-test-plans":
+            return FakeResponse(200, {"id": "stp-1", **json})
+        return fake_sub2api_request(self, method, url, json=json, params=params, timeout=timeout)
+
+    login(client)
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.post(
+            "/provision/apikey/start",
+            json={
+                "name": "manual-key-1",
+                "api_base_url": "https://api.openai.com/v1",
+                "api_key": "sk-test-123",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["status"] == "completed"
+    assert payload["name"] == "manual-key-1"
+    assert payload["account_name"] == "manual-key-1"
+    assert payload["account_id"] == "oa-key-1"
+    assert payload["group_id"] == "g-1"
+
+    stored_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
+    assert stored_flow is not None
+    assert stored_flow.status.value == "completed"
+    assert stored_flow.account_name == "manual-key-1"
+    assert stored_flow.oauth_account_id == "oa-key-1"
+
+
+def test_provision_apikey_start_requires_auth(client) -> None:
+    response = client.post(
+        "/provision/apikey/start",
+        json={
+            "name": "manual-key-1",
+            "api_base_url": "https://api.openai.com/v1",
+            "api_key": "sk-test-123",
+        },
+    )
+    assert response.status_code == 401
+
+
 @pytest.mark.parametrize(
     "auth_headers",
     [
@@ -2476,6 +2598,30 @@ def test_existing_orchestration_lists_users_groups_and_keys(client) -> None:
     assert accounts["acct-camel"]["group_names"] == ["subscription-dedicated", ""]
     assert keys_response.status_code == 200
     assert keys_response.json()["items"][0]["key_id"] == "key-101"
+
+
+def test_existing_orchestration_parses_camel_case_user_group_fields(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 909,
+            "email": "camel-user@example.com",
+            "name": "Camel User",
+            "status": "active",
+            "currentGroup": {"groupId": 22, "groupName": "rotation-high"},
+            "allowedGroups": [{"groupId": 22, "groupName": "rotation-high"}],
+        }
+    ]
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.get("/orchestration/users?email=camel-user")
+
+    assert response.status_code == 200
+    payload = response.json()["items"][0]
+    assert payload["current_group_id"] == 22
+    assert payload["current_group_name"] == "rotation-high"
+    assert payload["group_ids"] == [22]
 
 
 def test_credit_control_lists_filters_and_details_users(client) -> None:
@@ -3154,6 +3300,44 @@ def test_group_migration_moves_users_with_source_group_keys_without_direct_group
     assert backend.api_key_group_calls == [
         {"key_id": "key-404", "group_id": 22},
         {"key_id": "key-404-extra", "group_id": 22},
+    ]
+
+
+def test_group_migration_does_not_treat_ambiguous_allowed_groups_as_direct_source(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 404,
+            "email": "allowed-only@example.com",
+            "name": "allowed-only@example.com",
+            "status": "active",
+            "allowedGroups": [{"groupId": 11}, {"groupId": 22}],
+        }
+    ]
+    backend.user_api_keys[404] = [
+        {"id": "key-404", "name": "allowed-key", "group_id": 11},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/groups/migrate",
+            json={
+                "source_group_id": 11,
+                "target_group_id": 22,
+                "reason": "move by source key route",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "moved"
+    assert payload["moved"][0]["user_id"] == 404
+    assert payload["moved"][0]["metadata"]["source_match"] == "api_key_route"
+    assert backend.replace_calls == []
+    assert backend.set_user_group_calls == [
+        {"user_id": 404, "group_id": 22, "allowed_groups": [22]}
     ]
 
 
@@ -4200,7 +4384,7 @@ def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) 
         {"method": "GET", "account_id": "oa-1"},
         {"method": "POST", "json": {"account_id": "oa-1", **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN}},
     ]
-    assert backend.create_account_payloads[0]["group_ids"] == ["11"]
+    assert backend.create_account_payloads[0]["group_ids"] == [11]
     assert backend.bind_account_calls == []
     completed_flow = main.get_flow_store().get_by_flow_id(start_payload["flow_id"])
     assert completed_flow is not None
@@ -4260,7 +4444,7 @@ def test_provision_start_uses_first_landing_pool_group_for_new_user(client) -> N
     assert backend.create_group_calls == 0
     assert complete_response.status_code == 200
     assert backend.create_account_calls == 1
-    assert backend.create_account_payloads[0]["group_ids"] == ["11"]
+    assert backend.create_account_payloads[0]["group_ids"] == [11]
     assert backend.bind_account_calls == []
     completed_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
     assert completed_flow is not None

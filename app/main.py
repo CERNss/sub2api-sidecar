@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -111,6 +111,7 @@ from app.models.schemas import (
     KeyTransferRequest,
     OrchestrationUserResponse,
     OrchestrationUsersEnvelope,
+    ProvisionApiKeyStartRequest,
     ProvisionCompleteRequest,
     ProvisionCompleteResponse,
     ProvisionFlowDetailResponse,
@@ -326,6 +327,40 @@ def get_provisioning_service() -> ProvisioningService:
     )
 
 
+def _alert_whitelist_provider(
+    store: "PostgresFlowStore", settings: Settings
+) -> Callable[[], dict[str, dict[str, list[str]]]]:
+    """Resolve the account/group alert whitelists used by the collector.
+
+    The static env/config account whitelist is merged with the operator-managed
+    whitelists persisted in notification settings. The collector is built once at
+    startup, so this is read lazily on every collection rather than captured here.
+    """
+
+    base = settings.account_invalid_alert_whitelist
+    group_base = settings.group_alert_whitelist
+
+    def _resolve() -> dict[str, dict[str, list[str]]]:
+        account_ids = list(base.ids)
+        account_names = list(base.names)
+        account_emails = list(base.emails)
+        group_ids: list[str] = list(group_base.ids)
+        group_names: list[str] = list(group_base.names)
+        stored = store.get_notification_settings()
+        if stored is not None:
+            account_ids += list(stored.account_alert_whitelist.ids)
+            account_names += list(stored.account_alert_whitelist.names)
+            account_emails += list(stored.account_alert_whitelist.emails)
+            group_ids += list(stored.group_alert_whitelist.ids)
+            group_names += list(stored.group_alert_whitelist.names)
+        return {
+            "account": {"ids": account_ids, "names": account_names, "emails": account_emails},
+            "group": {"ids": group_ids, "names": group_names},
+        }
+
+    return _resolve
+
+
 @lru_cache(maxsize=1)
 def get_notification_service() -> NotificationService:
     store = get_flow_store()
@@ -341,7 +376,7 @@ def get_notification_service() -> NotificationService:
                     collector=OperationalDataCollector(
                         client=get_sub2api_client(upstream.upstream_id),
                         store=store,
-                        account_invalid_whitelist=settings.account_invalid_alert_whitelist,
+                        alert_whitelist=_alert_whitelist_provider(store, settings),
                         source_key_prefix=(
                             ""
                             if upstream.upstream_id == settings.default_sub2api_upstream_id
@@ -2211,6 +2246,23 @@ def provision_start(
     selected_upstream_id = normalize_upstream_id(payload.upstream_id)
     result = service.start_flow_for_upstream(
         email=str(payload.email),
+        upstream_id=selected_upstream_id,
+        sub2api_client=get_sub2api_client(selected_upstream_id),
+    )
+    return JSONResponse(status_code=200, content=result.model_dump())
+
+
+@app.post("/provision/apikey/start")
+def provision_apikey_start(
+    payload: ProvisionApiKeyStartRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    service = get_provisioning_service()
+    selected_upstream_id = normalize_upstream_id(payload.upstream_id)
+    result = service.start_apikey_flow_for_upstream(
+        name=payload.name.strip(),
+        api_base_url=payload.api_base_url.strip(),
+        api_key=payload.api_key,
         upstream_id=selected_upstream_id,
         sub2api_client=get_sub2api_client(selected_upstream_id),
     )

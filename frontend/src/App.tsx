@@ -27,6 +27,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { NotificationPanel } from "./notifications/Panel";
 import { apiUrl, appBasePath } from "./runtime";
+import { notifyError } from "./notify";
 import {
   Alert,
   Button as AntButton,
@@ -764,20 +765,34 @@ async function requestJson<T extends ApiPayload>(
   options: RequestInit,
   fallbackMessage: string
 ): Promise<T> {
-  const response = await fetch(apiUrl(url), {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers
-    }
-  });
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(url), {
+      credentials: "same-origin",
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...options.headers
+      }
+    });
+  } catch (error) {
+    const detail = `${fallbackMessage}：无法连接后端服务，请确认 API 服务正在运行。`;
+    notifyError(detail);
+    throw new ApiError(detail, 0, {
+      detail: error instanceof Error ? error.message : fallbackMessage
+    });
+  }
   const payload = (await response.json().catch(() => ({
     detail: fallbackMessage
   }))) as ApiPayload;
 
   if (!response.ok) {
     const detail = typeof payload.detail === "string" ? payload.detail : fallbackMessage;
+    // Surface every API error as a global toast. 401 is the auth-expiry signal and is
+    // handled by the login redirect flow, so skip it here to avoid noise.
+    if (response.status !== 401) {
+      notifyError(detail);
+    }
     throw new ApiError(detail, response.status, payload);
   }
 
@@ -891,6 +906,20 @@ async function loadOperationalDataStatus(): Promise<OperationalDataStatus> {
 }
 
 function getErrorMessage(error: unknown, fallbackMessage: string): string {
+  // API errors are surfaced via the global top-right toast (see requestJson), so they
+  // are not also rendered inline. Non-API (client/JS) errors still return their message.
+  if (error instanceof ApiError) {
+    return "";
+  }
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return fallbackMessage;
+}
+
+// Raw error detail, for the few places that surface API errors explicitly via a toast
+// (e.g. login, whose 401 is skipped by the central handler).
+function errorDetail(error: unknown, fallbackMessage: string): string {
   if (error instanceof Error && error.message) {
     return error.message;
   }
@@ -1384,12 +1413,11 @@ function apiKeyRouteLabel(key: OrchestrationApiKey): string {
   return groupName ? `路由组 ${groupName} (${groupId})` : `路由组 ${groupId}`;
 }
 
-function userGroupIds(user: OrchestrationUser): string[] {
+function userDirectGroupIds(user: OrchestrationUser): string[] {
   return Array.from(
     new Set(
       [
-        idValue(user.current_group_id),
-        ...(Array.isArray(user.group_ids) ? user.group_ids.map(idValue) : [])
+        idValue(user.current_group_id)
       ].filter(Boolean)
     )
   );
@@ -2002,7 +2030,7 @@ function App() {
       .catch((error: unknown) => {
         removeTokenFromCurrentUrl();
         if (cancelled) return;
-        setSsoStatus({ message: getErrorMessage(error, "Sub2API 登录校验失败"), tone: "error" });
+        notifyError(errorDetail(error, "Sub2API 登录校验失败"), "登录失败");
         window.setTimeout(() => {
           window.location.href = frontendRoutePath("/login");
         }, 900);
@@ -2522,7 +2550,7 @@ function LoginView() {
       setStatus({ message: "登录成功", tone: "success" });
       window.location.href = loginRedirectPath();
     } catch (error: unknown) {
-      setStatus({ message: getErrorMessage(error, "登录失败"), tone: "error" });
+      notifyError(errorDetail(error, "登录失败"), "登录失败");
     } finally {
       setIsSubmitting(false);
     }
@@ -2737,7 +2765,7 @@ function OperatorWorkspace() {
               onClick={() => navigateView("provision")}
             >
               <Plus size={17} aria-hidden="true" />
-              OAuth 预配
+              账号预配
             </button>
             <button
               className={activeView === "keyTransfer" ? "active" : ""}
@@ -3695,6 +3723,19 @@ function ExistingOrchestrationView({
       const keys = apiKeysByUserId[userId] ?? (userId === selectedUserId ? apiKeys : []);
       return keys.map((key) => ({ user, userId, key }));
     });
+    const keyGroupIdsByUserId = new Map<string, string[]>();
+    userKeyRows.forEach(({ userId, key }) => {
+      const keyGroupId = idValue(key.group_id);
+      if (!keyGroupId) {
+        return;
+      }
+      const existing = keyGroupIdsByUserId.get(userId) ?? [];
+      if (!existing.includes(keyGroupId)) {
+        keyGroupIdsByUserId.set(userId, [...existing, keyGroupId]);
+      }
+    });
+    const relatedGroupIdsForUser = (user: OrchestrationUser, userId: string): string[] =>
+      Array.from(new Set([...userDirectGroupIds(user), ...(keyGroupIdsByUserId.get(userId) ?? [])]));
     const upsertGraphGroup = (group: OrchestrationGroup) => {
       const groupValue = idValue(group.group_id);
       if (!groupValue) {
@@ -3706,18 +3747,12 @@ function ExistingOrchestrationView({
     };
     groups.forEach(upsertGraphGroup);
     users.forEach((user) => {
-      userGroupIds(user).forEach((groupValue) => {
-        const isDirectGroup = groupValue === idValue(user.current_group_id);
-        if (isDirectGroup) {
-          groupUserCounts.set(groupValue, (groupUserCounts.get(groupValue) ?? 0) + 1);
-        }
+      userDirectGroupIds(user).forEach((groupValue) => {
+        groupUserCounts.set(groupValue, (groupUserCounts.get(groupValue) ?? 0) + 1);
         if (!graphGroups.has(groupValue)) {
           graphGroups.set(groupValue, {
-            group_id: isDirectGroup ? user.current_group_id : groupValue,
-            name:
-              isDirectGroup
-                ? user.current_group_name ?? user.local_group_name ?? groupValue
-                : groupValue,
+            group_id: user.current_group_id,
+            name: user.current_group_name ?? user.local_group_name ?? groupValue,
             group_kind: null,
             platform: null,
             status: null,
@@ -3806,7 +3841,7 @@ function ExistingOrchestrationView({
       .map((group, fallbackIndex) => {
         const groupValue = idValue(group.group_id);
         const userIndexes = users
-          .map((user, index) => ({ index, groupValues: userGroupIds(user) }))
+          .map((user, index) => ({ index, groupValues: userDirectGroupIds(user) }))
           .filter((item) => item.groupValues.includes(groupValue))
           .map((item) => item.index);
         const keyIndexes = userKeyRows
@@ -3827,7 +3862,7 @@ function ExistingOrchestrationView({
     const userRows = users
       .map((user, fallbackIndex) => {
         const userId = idValue(user.user_id);
-        const userGroupValues = userGroupIds(user);
+        const userGroupValues = userDirectGroupIds(user);
         const keyGroupIndexes = userKeyRows
           .filter((row) => row.userId === userId)
           .map((row) => groupOrder.findIndex((item) => item.groupValue === idValue(row.key.group_id)))
@@ -3913,7 +3948,7 @@ function ExistingOrchestrationView({
         data: {
           userId,
           directGroupId: idValue(user.current_group_id),
-          relatedGroupIds: userGroupIds(user)
+          relatedGroupIds: relatedGroupIdsForUser(user, userId)
         },
         selected: userId === selectedUserId,
         label: (
@@ -3995,8 +4030,7 @@ function ExistingOrchestrationView({
       ...users
         .flatMap((user) => {
           const userId = idValue(user.user_id);
-          return userGroupIds(user).map((groupId) => {
-            const isDirectGroup = groupId === idValue(user.current_group_id);
+          return userDirectGroupIds(user).map((groupId) => {
             const isActive = userId === selectedUserId;
             return createGraphEdge({
               id: `group-user-${groupId}-${userId}`,
@@ -4006,7 +4040,7 @@ function ExistingOrchestrationView({
               targetKind: "group",
               relation: "user-group",
               active: isActive,
-              label: isActive ? (isDirectGroup ? "直接用户组" : "允许分组") : undefined
+              label: isActive ? "直接用户组" : undefined
             });
           });
         }),
@@ -6602,11 +6636,20 @@ function ProvisionForm({
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onFlowChanged: () => void;
 }) {
+  const [mode, setMode] = useState<"oauth" | "apikey">("oauth");
   const [email, setEmail] = useState("");
   const [callbackUrl, setCallbackUrl] = useState("");
+  const [apikeyName, setApikeyName] = useState("");
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [startPayload, setStartPayload] = useState<ProvisionStartPayload | null>(null);
   const [status, setStatus] = useState<StatusState>(emptyStatus);
-  const [busyAction, setBusyAction] = useState<"start" | "complete" | null>(null);
+  const [busyAction, setBusyAction] = useState<"start" | "complete" | "apikey" | null>(null);
+
+  function switchMode(next: "oauth" | "apikey") {
+    setMode(next);
+    setStatus(emptyStatus);
+  }
 
   const oauthUrl = typeof startPayload?.oauth_url === "string" ? startPayload.oauth_url : "";
   const oauthRequired = startPayload
@@ -6659,6 +6702,54 @@ function ProvisionForm({
     }
   }
 
+  async function startApikeyProvision(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!apikeyName.trim()) {
+      setStatus({ message: "请先输入名称。", tone: "error" });
+      return;
+    }
+    if (!apiBaseUrl.trim()) {
+      setStatus({ message: "请先输入 API 地址。", tone: "error" });
+      return;
+    }
+    if (!apiKey.trim()) {
+      setStatus({ message: "请先输入 API Key。", tone: "error" });
+      return;
+    }
+    if (!selectedUpstreamId) {
+      setStatus({ message: "正在加载 Sub2API 上游，请稍后再试。", tone: "error" });
+      return;
+    }
+
+    setBusyAction("apikey");
+    setStatus({ message: "正在创建 API Key 账号", tone: "info" });
+
+    try {
+      await requestJson<ProvisionStartPayload>(
+        "/provision/apikey/start",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: apikeyName.trim(),
+            api_base_url: apiBaseUrl.trim(),
+            api_key: apiKey.trim(),
+            upstream_id: selectedUpstreamId
+          })
+        },
+        "创建失败"
+      );
+      setStatus({ message: "API Key 账号创建完成。", tone: "success" });
+      onFlowChanged();
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setStatus({ message: getErrorMessage(error, "创建失败"), tone: "error" });
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function completeProvision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -6693,6 +6784,24 @@ function ProvisionForm({
   return (
     <div className="workspace provision-workspace">
       <section className="panel form-panel provision-form-panel">
+        <div className="segmented provision-mode" role="tablist" aria-label="预配方式">
+          <button
+            className={mode === "oauth" ? "active" : ""}
+            type="button"
+            onClick={() => switchMode("oauth")}
+          >
+            OAuth 登录
+          </button>
+          <button
+            className={mode === "apikey" ? "active" : ""}
+            type="button"
+            onClick={() => switchMode("apikey")}
+          >
+            API Key
+          </button>
+        </div>
+        {mode === "oauth" ? (
+        <>
         <form className="form-stack" onSubmit={startProvision}>
           <label className="field">
             <span>Email</span>
@@ -6752,6 +6861,48 @@ function ProvisionForm({
           </div>
           <StatusLine status={status} />
         </form>
+        </>
+        ) : (
+        <form className="form-stack" onSubmit={startApikeyProvision}>
+          <label className="field">
+            <span>名称</span>
+            <input
+              value={apikeyName}
+              placeholder="manual-key-1"
+              onChange={(event) => setApikeyName(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>API 地址</span>
+            <input
+              value={apiBaseUrl}
+              placeholder="https://api.openai.com/v1"
+              onChange={(event) => setApiBaseUrl(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>API Key</span>
+            <input
+              type="password"
+              value={apiKey}
+              placeholder="sk-..."
+              autoComplete="off"
+              onChange={(event) => setApiKey(event.target.value)}
+            />
+          </label>
+          <div className="action-row">
+            <button className="button primary" type="submit" disabled={busyAction === "apikey"}>
+              {busyAction === "apikey" ? (
+                <LoaderCircle className="spin" size={18} aria-hidden="true" />
+              ) : (
+                <Play size={18} aria-hidden="true" />
+              )}
+              创建 API Key 账号
+            </button>
+          </div>
+          <StatusLine status={status} />
+        </form>
+        )}
       </section>
     </div>
   );
@@ -7026,6 +7177,9 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
 }
 
 function StatusLine({ status }: { status: StatusState }) {
+  if (!status.message) {
+    return null;
+  }
   return (
     <div className={`status-line ${status.tone}`} role={status.tone === "error" ? "alert" : "status"}>
       {status.message}

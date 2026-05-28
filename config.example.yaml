@@ -39,6 +39,7 @@ sub2api:
     account_provider: openai
     account_platform: openai
     account_type: oauth
+    account_apikey_type: api_key
     account_ws_mode: context_pool
     account_model_whitelist:
       - gpt-5.3-codex

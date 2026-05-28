@@ -84,6 +84,26 @@ class ProvisionStartResponse(BaseModel):
     oauth_redirect_uri: str
 
 
+class ProvisionApiKeyStartRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    api_base_url: str = Field(..., min_length=1)
+    api_key: str = Field(..., min_length=1)
+    upstream_id: str | None = Field(default=None, min_length=1)
+
+
+class ProvisionApiKeyStartResponse(BaseModel):
+    success: bool = True
+    upstream_id: str
+    flow_id: str
+    name: str
+    group_id: Any
+    assignment_mode: str
+    assignment_reason: str | None = None
+    account_name: str
+    status: str
+    account_id: Any | None = None
+
+
 class ProvisionCompleteRequest(BaseModel):
     callback_url: str = Field(..., min_length=1)
 

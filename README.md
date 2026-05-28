@@ -20,6 +20,11 @@
   - 使用入口 email 作为 OpenAI OAuth 账号名称创建账号
   - 将 OAuth 账号绑定到目标分组
   - 更新 flow 状态并返回 JSON 结果
+- `POST /provision/apikey/start`
+  - 不走 OAuth：直接用输入的 `name`、`api_base_url`、`api_key` 创建 OpenAI **API Key** 账号（`type=api_key`，credentials 写入 `api_key`/`base_url`）
+  - 分组解析与账号默认配置（并发、`model_mapping`、临时不可调度规则等）与 OAuth 流程完全一致
+  - 同步完成（无回调步骤），创建并绑定分组后直接返回 `status=completed`
+  - 账号 type 可通过 `SUB2API_ACCOUNT_APIKEY_TYPE` 或 `sub2api.provisioning_defaults.account_apikey_type` 配置（默认 `api_key`）
 - `GET /`
   - 提供受保护的 React 前端页面，默认进入已有用户/已有分组编排
 - `GET /login` + `POST /auth/login`
@@ -142,6 +147,16 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
    - 账号默认打开“临时不可调度”并附带 529/429/503 三条规则
    - `wsmode` 默认设置为 `context_pool`
    - 如果已有账号已经绑定目标分组，不会重复绑组；缺少绑定时才补绑到目标分组
+
+### API Key 预配流程
+
+前端「账号预配」页提供 OAuth / API Key 两种模式切换。API Key 模式不走 OAuth：
+
+1. 用户输入 `名称`、`API 地址`、`API Key` 三项，调用 `POST /provision/apikey/start`
+2. 服务按 `名称` 解析专属分组（与 OAuth 同样的逻辑：复用同名分组 / landing pool / 新建专属分组）
+3. 直接创建 `type=api_key` 账号，credentials 写入 `api_key` 和 `base_url`；并发、`model_mapping`、临时不可调度规则等默认配置与 OAuth 流程一致
+4. 绑定到目标分组、补齐默认定时测试计划后，同步返回 `status=completed`（无回调步骤）
+5. 如已存在同名且类型为 API Key 的账号，则更新其凭证并补齐绑定，避免重复创建；同名但为 OAuth 的账号不会被改写
 
 在进入这个流程之前，需要先登录：
 
@@ -294,7 +309,10 @@ database:
 - 自动轮换执行开关和业务策略通过动态编排页面或 `/rotation/auto/config` 运行时配置；已登录管理员可请求 `GET /rotation/auto/scheduler` 查看后台调度线程和当前运行时开关。
 - 自动充值后台执行开关通过额度控制页面或 `/api/credit-control/settings` 运行时配置；已登录管理员可请求 `GET /api/credit-control/scheduler` 查看状态。
 - 运行态数据采集开关、`collect_interval_seconds`、`expiration`、`retention_seconds` 和 `max_storage_mb` 通过全局设置或 `/api/operational-data/settings` 运行时配置，不写进 `config.yaml`。采集线程默认 60 秒一轮，按当前 PostgreSQL 设置调整间隔，按顺序拉取 Sub2API accounts、groups、users、用户 usage、用户 API keys、当天 usage、昨天 usage，先落 PostgreSQL raw snapshots 和派生 metrics，再由告警、自动编排、额度控制读取本地数据。`expiration` 不设置表示本地数据永不过期，设置为正整数秒时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。`retention_seconds` 按时间删除旧 snapshots/metrics，`max_storage_mb` 按大小从最老记录开始清理并保留每个 source/metric 的最新记录。已登录管理员可请求 `GET /api/operational-data/status` 查看采样状态、当前占用、每个数据源状态、最近一次 tick 时间和错误。
-- 账号失效告警支持静态白名单，用于过滤已知手动关闭、不需要触发 `account_invalid` 的账号。可在 `config.yaml` 配置 `notifications.account_invalid_whitelist.ids/names/emails`，或用环境变量 `NOTIFICATION_ACCOUNT_INVALID_WHITELIST_IDS`、`NOTIFICATION_ACCOUNT_INVALID_WHITELIST_NAMES`、`NOTIFICATION_ACCOUNT_INVALID_WHITELIST_EMAILS` 传逗号分隔列表。白名单只影响 `account_invalid`，不影响限流、需重授、容量等其他告警。
+- 告警白名单用于过滤"已知/刻意状态"导致的误报，只作用于两类告警：
+  - **账号白名单**（`ids` / `names` / `emails`）只作用于 `account_invalid`（账号失效）告警——命中的账号即使失效也不告警；不影响限流、需重授、容量、额度、Key 健康等其他账号信号，也不影响运维聚合（`admin_ops_alert`/`admin_dashboard`）。
+  - **分组白名单**（`ids` / `names`）只作用于 `group_capacity_full`（分组容量满载）告警——命中即整组排除。分组容量本身仍按真实账号容量统计，白名单只影响是否告警，不改变计算。
+  - 配置入口：通知页「账号 / 分组告警白名单」常驻区块（写入数据库，改完即时生效，无需重启）。也可配置一份静态基础白名单（与 UI 取并集）：账号用 `config.yaml` 的 `notifications.account_invalid_whitelist.ids/names/emails` 或环境变量 `NOTIFICATION_ACCOUNT_INVALID_WHITELIST_IDS/NAMES/EMAILS`；分组用 `notifications.group_whitelist.ids/names` 或环境变量 `NOTIFICATION_GROUP_WHITELIST_IDS/NAMES`（逗号分隔）。匹配不区分大小写。
 - 提交给 `POST /provision/start` 的 email 仅作为外部 OAuth 账号标识，不会创建 Sub2API 用户，也不会绑定任何 Sub2API 用户到分组；编排只解析目标 group，并完成 OAuth 账号挂接。
 
 环境变量可以覆盖 `config.yaml` 中的同名配置项；已移除的运行时环境变量不再兼容，出现时会直接启动失败。新部署建议优先改 `config.yaml`。
