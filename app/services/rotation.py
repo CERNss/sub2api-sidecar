@@ -36,6 +36,7 @@ from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
 _DEFAULT_SOURCE_GROUP = object()
+KEY_NAME_PATTERN = "service:environment:object:version:email"
 
 
 @dataclass
@@ -95,6 +96,37 @@ class KeyTransferItem:
     status: RotationResultStatus
     reason: str
     quota: float | None = None
+
+
+@dataclass(frozen=True)
+class ParsedKeyName:
+    service: str
+    environment: str
+    object: str
+    version: str
+    email: str
+
+
+def parse_key_name(key_name: str | None) -> ParsedKeyName | None:
+    if not key_name:
+        return None
+    parts = [part.strip() for part in key_name.split(":")]
+    if len(parts) != 5 or any(not part for part in parts[:4]):
+        return None
+    suffix = parts[4]
+    if not suffix or any(separator in suffix for separator in (",", ";", " ")):
+        return None
+    try:
+        normalized = validate_email(suffix, check_deliverability=False).normalized
+    except EmailNotValidError:
+        return None
+    return ParsedKeyName(
+        service=parts[0],
+        environment=parts[1],
+        object=parts[2],
+        version=parts[3],
+        email=normalized.lower(),
+    )
 
 
 @dataclass
@@ -1097,11 +1129,11 @@ class RotationService:
         if scope_key == "all_users" and selected_key_ids is not None:
             source_keys = self._hydrate_selected_keys_from_owners(source_keys)
         target_emails = {
-            target_email
+            parsed.email
             for key_item in source_keys
             if isinstance(key_item, dict)
-            for target_email in [self._extract_transfer_email(self._text_or_none(key_item.get("name")))]
-            if target_email
+            for parsed in [self._parse_transfer_key_name(self._text_or_none(key_item.get("name")))]
+            if parsed is not None
         }
         users_by_email, duplicate_emails = self._users_by_exact_emails(target_emails)
         available_groups_by_key = self._available_groups_by_key()
@@ -1127,7 +1159,7 @@ class RotationService:
         )
         return KeyTransferRun(
             source_user_id=source_user_id,
-            key_name_pattern="service:object:version:email",
+            key_name_pattern=KEY_NAME_PATTERN,
             dry_run=dry_run,
             scope=scope_key,
             run_record=run_record,
@@ -2248,8 +2280,8 @@ class RotationService:
                 reason="API key value is missing; cannot verify preservation",
             )
 
-        target_email = self._extract_transfer_email(key_name)
-        if not target_email:
+        parsed_key_name = self._parse_transfer_key_name(key_name)
+        if parsed_key_name is None:
             return KeyTransferItem(
                 key_id=key_id,
                 key_name=key_name,
@@ -2260,8 +2292,9 @@ class RotationService:
                 target_email=None,
                 target_group_id=None,
                 status=RotationResultStatus.skipped,
-                reason="API key name does not match the service:object:version:email pattern",
+                reason=f"API key name does not match the {KEY_NAME_PATTERN} pattern",
             )
+        target_email = parsed_key_name.email
 
         target_email_key = self._normalize_email(target_email)
         if target_email_key in duplicate_emails:
@@ -2441,7 +2474,7 @@ class RotationService:
             window=None,
             synced={},
             config={
-                "key_name_pattern": "service:object:version:email",
+                "key_name_pattern": KEY_NAME_PATTERN,
                 "reason": reason or "",
                 "scope": scope,
             },
@@ -2474,23 +2507,15 @@ class RotationService:
             },
         }
 
-    def _extract_transfer_email(self, key_name: str | None) -> str | None:
-        if not key_name:
-            return None
-        parts = [part.strip() for part in key_name.split(":")]
-        if len(parts) != 4 or any(not part for part in parts[:3]):
-            return None
-        suffix = parts[3]
-        if not suffix or any(separator in suffix for separator in (",", ";", " ")):
-            return None
-        try:
-            normalized = validate_email(suffix, check_deliverability=False).normalized
-        except EmailNotValidError:
-            return None
-        return normalized.lower()
+    def _parse_transfer_key_name(self, key_name: str | None) -> ParsedKeyName | None:
+        return parse_key_name(key_name)
+
+    def parse_transfer_key_name(self, key_name: str | None) -> ParsedKeyName | None:
+        return self._parse_transfer_key_name(key_name)
 
     def extract_transfer_email(self, key_name: str | None) -> str | None:
-        return self._extract_transfer_email(key_name)
+        parsed = self._parse_transfer_key_name(key_name)
+        return parsed.email if parsed else None
 
     def _first_available_user_group_id(
         self,

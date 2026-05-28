@@ -415,6 +415,10 @@ type RotationExecutionPayload = ApiPayload & {
 type KeyTransferItem = {
   key_id: unknown;
   key_name: string | null;
+  key_service: string | null;
+  key_environment: string | null;
+  key_object: string | null;
+  key_version: string | null;
   source_user_id: unknown | null;
   source_group_id: unknown | null;
   target_user_id: unknown | null;
@@ -703,7 +707,7 @@ const emptyStatus: StatusState = { message: "", tone: "idle" };
 const APP_TITLE = "Sub2API OpenAI OAuth 编排服务";
 const DEFAULT_AUTH_USERNAME = "admin";
 const DEFAULT_KEY_TRANSFER_SOURCE_SEARCH = "admin";
-const KEY_TRANSFER_NAME_PATTERN = "服务:对象:版本号:邮箱";
+const KEY_TRANSFER_NAME_PATTERN = "服务:环境:对象:版本号:邮箱";
 const FIXED_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback";
 const graphCompactNodeSize = { width: 272, height: 82 };
 const graphTallNodeSize = { width: 272, height: 184 };
@@ -1324,8 +1328,8 @@ function renderUserOption(option: { label?: ReactNode; data: UserSelectOption })
 function transferEmailFromKeyName(keyName: string | null): string | null {
   if (!keyName) return null;
   const parts = keyName.split(":").map((part) => part.trim());
-  if (parts.length !== 4 || parts.slice(0, 3).some((part) => !part)) return null;
-  const email = parts[3];
+  if (parts.length !== 5 || parts.slice(0, 4).some((part) => !part)) return null;
+  const email = parts[4];
   if (!/^[^\s@:;]+@[^\s@:;]+\.[^\s@:;]+$/.test(email)) return null;
   return email.toLowerCase();
 }
@@ -2813,7 +2817,7 @@ function KeyTransferView({
   const [tokenBusy, setTokenBusy] = useState(false);
   const apiTokenValue = apiToken?.access_key || "$SIDECAR_API_TOKEN";
   const apiKeyEndpointUrl = `${window.location.origin}${apiUrl("/api/v1/apikey")}`;
-  const createApiKeyPayload = '{"action":"create","name":"service:object:v1:user@example.com","target":"user@example.com","quota":0}';
+  const createApiKeyPayload = '{"action":"create","name":"service:prod:object:v1:user@example.com","target":"user@example.com","quota":0}';
   const listApiKeyPayload = '{"action":"list","email":"user@example.com"}';
   const createApiKeyExample = `curl -sS -X POST ${apiKeyEndpointUrl}
 -H "Authorization: Bearer ${apiTokenValue}"

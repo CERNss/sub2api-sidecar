@@ -100,7 +100,7 @@ const mockUsers = [
 const mockSourceKeys = [
   {
     key_id: "key-transfer-feng",
-    name: "rotom:codex:v1:fengxinyang@jihuanshe.com",
+    name: "rotom:prod:codex:v1:fengxinyang@jihuanshe.com",
     group_id: "grp-admin",
     group_name: "Admin Holding",
     status: "active",
@@ -110,7 +110,7 @@ const mockSourceKeys = [
   },
   {
     key_id: "key-transfer-qiao",
-    name: "service:object:v2:qiao@example.com",
+    name: "service:prod:object:v2:qiao@example.com",
     group_id: "grp-admin",
     group_name: "Admin Holding",
     status: "active",
@@ -120,7 +120,7 @@ const mockSourceKeys = [
   },
   {
     key_id: "key-transfer-missing",
-    name: "rotom:codex:v1:missing@example.com",
+    name: "rotom:prod:codex:v1:missing@example.com",
     group_id: "grp-admin",
     group_name: "Admin Holding",
     status: "active",
@@ -168,7 +168,7 @@ function mockKeyTransfer(dryRun: boolean) {
     tag: dryRun ? "key_transfer_preview" : "key_transfer",
     dry_run: dryRun,
     source_user_id: "admin-001",
-    key_name_pattern: "service:object:version:email",
+    key_name_pattern: "service:environment:object:version:email",
     planned_count: dryRun ? 2 : 0,
     moved_count: dryRun ? 0 : 2,
     skipped_count: 2,
@@ -176,7 +176,11 @@ function mockKeyTransfer(dryRun: boolean) {
     items: [
       {
         key_id: "key-transfer-feng",
-        key_name: "rotom:codex:v1:fengxinyang@jihuanshe.com",
+        key_name: "rotom:prod:codex:v1:fengxinyang@jihuanshe.com",
+        key_service: "rotom",
+        key_environment: "prod",
+        key_object: "codex",
+        key_version: "v1",
         source_user_id: "admin-001",
         source_group_id: "grp-admin",
         target_user_id: "user-feng",
@@ -188,7 +192,11 @@ function mockKeyTransfer(dryRun: boolean) {
       },
       {
         key_id: "key-transfer-qiao",
-        key_name: "service:object:v2:qiao@example.com",
+        key_name: "service:prod:object:v2:qiao@example.com",
+        key_service: "service",
+        key_environment: "prod",
+        key_object: "object",
+        key_version: "v2",
         source_user_id: "admin-001",
         source_group_id: "grp-admin",
         target_user_id: "user-qiao",
@@ -200,7 +208,11 @@ function mockKeyTransfer(dryRun: boolean) {
       },
       {
         key_id: "key-transfer-missing",
-        key_name: "rotom:codex:v1:missing@example.com",
+        key_name: "rotom:prod:codex:v1:missing@example.com",
+        key_service: "rotom",
+        key_environment: "prod",
+        key_object: "codex",
+        key_version: "v1",
         source_user_id: "admin-001",
         source_group_id: "grp-admin",
         target_user_id: null,
@@ -213,13 +225,17 @@ function mockKeyTransfer(dryRun: boolean) {
       {
         key_id: "key-normal",
         key_name: "manual-key-not-transfer",
+        key_service: null,
+        key_environment: null,
+        key_object: null,
+        key_version: null,
         source_user_id: "admin-001",
         source_group_id: "grp-admin",
         target_user_id: null,
         target_email: null,
         target_group_id: null,
         status: "skipped",
-        reason: "API key name does not match the service:object:version:email pattern",
+        reason: "API key name does not match the service:environment:object:version:email pattern",
         quota: null
       }
     ]

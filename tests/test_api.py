@@ -1157,7 +1157,7 @@ def test_sub2api_client_creates_user_api_key_without_forwarding_group_override()
     with patch.object(requests.Session, "request", new=fake_request):
         result = client.create_user_api_key(
             user_id=2,
-            name="svc:obj:v1:user@example.com",
+            name="svc:prod:obj:v1:user@example.com",
             group_id=22,
             options={"quota": 300, "group_id": 11, "user_id": 1},
         )
@@ -1169,7 +1169,7 @@ def test_sub2api_client_creates_user_api_key_without_forwarding_group_override()
             "path": "/api/v1/admin/users/2/api-keys",
             "json": {
                 "quota": 300,
-                "name": "svc:obj:v1:user@example.com",
+                "name": "svc:prod:obj:v1:user@example.com",
                 "group_id": 22,
             },
         }
@@ -3145,7 +3145,7 @@ def test_key_transfer_moves_matching_admin_keys_and_preserves_key_value(client) 
             "id": "9001",
             "user_id": 1,
             "key": "sk-keep-this-value",
-            "name": "rotom:codex:v1:idle@example.com",
+            "name": "rotom:prod:codex:v1:idle@example.com",
             "group_id": 11,
             "quota": 50.0,
         }
@@ -3233,7 +3233,7 @@ def test_key_transfer_limits_processing_to_selected_key_ids(client) -> None:
             "id": "xuzhilin",
             "user_id": 1,
             "key": "sk-xuzhilin",
-            "name": "rotom:codex:v1:xuzhilin@jihuanshe.com",
+            "name": "rotom:prod:codex:v1:xuzhilin@jihuanshe.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3241,7 +3241,7 @@ def test_key_transfer_limits_processing_to_selected_key_ids(client) -> None:
             "id": "luozhaobin",
             "user_id": 1,
             "key": "sk-luozhaobin",
-            "name": "rotom:codex:v1:luozhaobin@jihuanshe.com",
+            "name": "rotom:prod:codex:v1:luozhaobin@jihuanshe.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3249,7 +3249,7 @@ def test_key_transfer_limits_processing_to_selected_key_ids(client) -> None:
             "id": "unselected",
             "user_id": 1,
             "key": "sk-unselected",
-            "name": "rotom:codex:v1:unselected@jihuanshe.com",
+            "name": "rotom:prod:codex:v1:unselected@jihuanshe.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3309,7 +3309,7 @@ def test_key_transfer_accepts_explicit_non_admin_source_user(client) -> None:
             "id": 36,
             "user_id": 1,
             "key": "sk-dev-ai",
-            "name": "rotom:shelley:v1:yuchenning@jihuanshe.com",
+            "name": "rotom:prod:shelley:v1:yuchenning@jihuanshe.com",
             "group_id": 6,
             "quota": 200.0,
         },
@@ -3366,7 +3366,7 @@ def test_key_transfer_selected_keys_without_source_falls_back_to_all_users(clien
             "id": 36,
             "user_id": 1,
             "key": "sk-dev-ai",
-            "name": "rotom:shelley:v1:yuchenning@jihuanshe.com",
+            "name": "rotom:prod:shelley:v1:yuchenning@jihuanshe.com",
             "group_id": 6,
             "quota": 200.0,
         },
@@ -3432,10 +3432,18 @@ def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(cl
             "quota": 10.0,
         },
         {
+            "id": "old-format",
+            "user_id": 1,
+            "key": "sk-old-format",
+            "name": "rotom:codex:v1:idle@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+        {
             "id": "missing-user",
             "user_id": 1,
             "key": "sk-missing-user",
-            "name": "rotom:codex:v1:missing@example.com",
+            "name": "rotom:prod:codex:v1:missing@example.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3443,7 +3451,7 @@ def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(cl
             "id": "no-group",
             "user_id": 1,
             "key": "sk-no-group",
-            "name": "rotom:codex:v1:nogroup@example.com",
+            "name": "rotom:prod:codex:v1:nogroup@example.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3451,7 +3459,7 @@ def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(cl
             "id": "duplicate-email",
             "user_id": 1,
             "key": "sk-duplicate-email",
-            "name": "rotom:codex:v1:duplicate@example.com",
+            "name": "rotom:prod:codex:v1:duplicate@example.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3468,16 +3476,17 @@ def test_key_transfer_skips_missing_users_groups_duplicates_and_invalid_names(cl
     assert response.status_code == 200
     payload = response.json()
     assert payload["moved_count"] == 0
-    assert payload["skipped_count"] == 4
+    assert payload["skipped_count"] == 5
     reasons = {item["key_id"]: item["reason"] for item in payload["items"]}
-    assert reasons["bad-name"] == "API key name does not match the service:object:version:email pattern"
+    assert reasons["bad-name"] == "API key name does not match the service:environment:object:version:email pattern"
+    assert reasons["old-format"] == "API key name does not match the service:environment:object:version:email pattern"
     assert reasons["missing-user"] == "USER_NOT_FOUND"
     assert reasons["no-group"] == "TARGET_USER_GROUP_NOT_FOUND"
     assert reasons["duplicate-email"] == "USER_EMAIL_NOT_UNIQUE"
     assert backend.api_key_owner_calls == []
 
 
-def test_key_transfer_accepts_any_service_object_version_email_prefix(client) -> None:
+def test_key_transfer_accepts_any_service_environment_object_version_email_prefix(client) -> None:
     backend = FakeRotationSub2API()
     backend.users.insert(
         0,
@@ -3513,7 +3522,7 @@ def test_key_transfer_accepts_any_service_object_version_email_prefix(client) ->
             "id": "xuzhilin",
             "user_id": 1,
             "key": "sk-xuzhilin",
-            "name": "rotom:codex:v1:xuzhilin@jihuanshe.com",
+            "name": "rotom:prod:codex:v1:xuzhilin@jihuanshe.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3521,7 +3530,7 @@ def test_key_transfer_accepts_any_service_object_version_email_prefix(client) ->
             "id": "luozhaobin",
             "user_id": 1,
             "key": "sk-luozhaobin",
-            "name": "svc:object:v2:luozhaobin@jihuanshe.com",
+            "name": "svc:prod:object:v2:luozhaobin@jihuanshe.com",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3529,7 +3538,7 @@ def test_key_transfer_accepts_any_service_object_version_email_prefix(client) ->
             "id": "invalid-email",
             "user_id": 1,
             "key": "sk-invalid-email",
-            "name": "rotom:codex:v1:not-email",
+            "name": "rotom:prod:codex:v1:not-email",
             "group_id": 11,
             "quota": 10.0,
         },
@@ -3545,13 +3554,18 @@ def test_key_transfer_accepts_any_service_object_version_email_prefix(client) ->
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["key_name_pattern"] == "service:object:version:email"
+    assert payload["key_name_pattern"] == "service:environment:object:version:email"
     assert payload["planned_count"] == 2
     assert payload["skipped_count"] == 1
     statuses = {item["key_id"]: item["status"] for item in payload["items"]}
     assert statuses["xuzhilin"] == "planned"
     assert statuses["luozhaobin"] == "planned"
     assert statuses["invalid-email"] == "skipped"
+    xuzhilin_item = next(item for item in payload["items"] if item["key_id"] == "xuzhilin")
+    assert xuzhilin_item["key_service"] == "rotom"
+    assert xuzhilin_item["key_environment"] == "prod"
+    assert xuzhilin_item["key_object"] == "codex"
+    assert xuzhilin_item["key_version"] == "v1"
 
 
 def test_all_user_api_keys_endpoint_aggregates_paginated_users_and_keys(client) -> None:
@@ -3625,7 +3639,7 @@ def test_key_transfer_all_users_moves_matching_keys_from_non_admin_sources(clien
             "id": "admin-key",
             "user_id": 1,
             "key": "sk-admin",
-            "name": "rotom:codex:v1:missing@example.com",
+            "name": "rotom:prod:codex:v1:missing@example.com",
             "group_id": 11,
             "quota": 10.0,
         }
@@ -3635,7 +3649,7 @@ def test_key_transfer_all_users_moves_matching_keys_from_non_admin_sources(clien
             "id": "source-key",
             "user_id": 2,
             "key": "sk-source",
-            "name": "rotom:codex:v1:idle@example.com",
+            "name": "rotom:prod:codex:v1:idle@example.com",
             "group_id": 11,
             "quota": 10.0,
         }
@@ -3745,7 +3759,7 @@ def test_token_apikey_api_creates_key_for_matching_email_user(client) -> None:
             headers={"Authorization": f"Bearer {access_key}"},
             json={
                 "action": "create",
-                "name": "svc:obj:v1:target@example.com",
+                "name": "svc:prod:obj:v1:target@example.com",
                 "quota": 250,
                 "group_id": 11,
             },
@@ -3754,16 +3768,21 @@ def test_token_apikey_api_creates_key_for_matching_email_user(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["action"] == "create"
+    assert payload["key_name_pattern"] == "service:environment:object:version:email"
     assert payload["fallback_to_admin"] is False
     assert payload["item"]["key_value"] == "sk-created-1"
     assert payload["item"]["user_id"] == 303
+    assert payload["item"]["key_service"] == "svc"
+    assert payload["item"]["key_environment"] == "prod"
+    assert payload["item"]["key_object"] == "obj"
+    assert payload["item"]["key_version"] == "v1"
     assert payload["item"]["target_email"] == "target@example.com"
     assert payload["item"]["group_id"] == 22
     assert backend.api_key_create_calls == [
         {
             "user_id": 303,
             "path": "/api/v1/admin/users/303/api-keys",
-            "json": {"quota": 250, "name": "svc:obj:v1:target@example.com", "group_id": 22},
+            "json": {"quota": 250, "name": "svc:prod:obj:v1:target@example.com", "group_id": 22},
         }
     ]
 
@@ -3790,7 +3809,7 @@ def test_token_apikey_api_falls_back_to_admin_when_email_account_missing(client)
             headers={"x-access-key": access_key},
             json={
                 "action": "create",
-                "name": "svc:obj:v1:missing@example.com",
+                "name": "svc:prod:obj:v1:missing@example.com",
                 "options": {"quota": 100},
             },
         )
@@ -3807,7 +3826,7 @@ def test_token_apikey_api_falls_back_to_admin_when_email_account_missing(client)
             "path": "/api/v1/admin/users/1/api-keys",
             "json": {
                 "quota": 100,
-                "name": "svc:obj:v1:missing@example.com",
+                "name": "svc:prod:obj:v1:missing@example.com",
                 "group_id": 11,
             },
         }
@@ -3845,7 +3864,7 @@ def test_token_apikey_api_target_overrides_name_email(client) -> None:
             headers={"Authorization": f"Bearer {access_key}"},
             json={
                 "action": "create",
-                "name": "svc:obj:v1:name@example.com",
+                "name": "svc:prod:obj:v1:name@example.com",
                 "target": "forced@example.com",
                 "quota": 0,
                 "group_id": 11,
@@ -3864,9 +3883,56 @@ def test_token_apikey_api_target_overrides_name_email(client) -> None:
         {
             "user_id": 404,
             "path": "/api/v1/admin/users/404/api-keys",
-            "json": {"quota": 0, "name": "svc:obj:v1:name@example.com", "group_id": 22},
+            "json": {"quota": 0, "name": "svc:prod:obj:v1:name@example.com", "group_id": 22},
         }
     ]
+
+
+def test_token_apikey_api_rejects_old_key_name_format_even_with_target(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "username": "admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users.append(
+        {
+            "id": 404,
+            "email": "forced@example.com",
+            "name": "Forced Target",
+            "status": "active",
+            "allowed_groups": [22, 11],
+        }
+    )
+    access_key = login(client)["access_key"]
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/api/v1/apikey",
+            headers={"Authorization": f"Bearer {access_key}"},
+            json={
+                "action": "create",
+                "name": "svc:obj:v1:name@example.com",
+                "target": "forced@example.com",
+                "quota": 0,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["status"] == "INVALID_KEY_NAME_FORMAT"
+    assert payload["key_name_pattern"] == "service:environment:object:version:email"
+    assert payload["fallback_to_admin"] is False
+    assert payload["item"]["status"] == "INVALID_KEY_NAME_FORMAT"
+    assert backend.api_key_create_calls == []
 
 
 def test_token_apikey_api_can_randomly_select_available_user_group(
@@ -3912,7 +3978,7 @@ def test_token_apikey_api_can_randomly_select_available_user_group(
             headers={"Authorization": f"Bearer {access_key}"},
             json={
                 "action": "create",
-                "name": "svc:obj:v1:multi@example.com",
+                "name": "svc:prod:obj:v1:multi@example.com",
                 "quota": 0,
             },
         )
@@ -3925,7 +3991,7 @@ def test_token_apikey_api_can_randomly_select_available_user_group(
         {
             "user_id": 505,
             "path": "/api/v1/admin/users/505/api-keys",
-            "json": {"quota": 0, "name": "svc:obj:v1:multi@example.com", "group_id": 11},
+            "json": {"quota": 0, "name": "svc:prod:obj:v1:multi@example.com", "group_id": 11},
         }
     ]
 
@@ -3952,7 +4018,7 @@ def test_token_apikey_api_forced_missing_target_returns_status_without_admin_fal
             headers={"Authorization": f"Bearer {access_key}"},
             json={
                 "action": "create",
-                "name": "svc:obj:v1:name@example.com",
+                "name": "svc:prod:obj:v1:name@example.com",
                 "target": "missing@example.com",
                 "quota": 0,
             },
@@ -3979,10 +4045,17 @@ def test_token_apikey_api_lists_encoded_keys_and_filters_by_email(client) -> Non
         {
             "id": "admin-a",
             "user_id": 1,
-            "name": "svc:obj:v1:target@example.com",
+            "name": "svc:prod:obj:v1:target@example.com",
             "key": "sk-secret",
             "group_id": 11,
             "quota": 10,
+        },
+        {
+            "id": "old-format",
+            "user_id": 1,
+            "name": "svc:obj:v1:target@example.com",
+            "key": "sk-old-secret",
+            "group_id": 11,
         },
         {
             "id": "ordinary",
@@ -3996,7 +4069,7 @@ def test_token_apikey_api_lists_encoded_keys_and_filters_by_email(client) -> Non
         {
             "id": "source-a",
             "user_id": 2,
-            "name": "svc:obj:v1:other@example.com",
+            "name": "svc:prod:obj:v1:other@example.com",
             "key": "sk-secret-3",
             "group_id": 22,
         },
@@ -4012,8 +4085,13 @@ def test_token_apikey_api_lists_encoded_keys_and_filters_by_email(client) -> Non
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["key_name_pattern"] == "service:environment:object:version:email"
     assert payload["total"] == 1
     assert payload["items"][0]["key_id"] == "admin-a"
+    assert payload["items"][0]["key_service"] == "svc"
+    assert payload["items"][0]["key_environment"] == "prod"
+    assert payload["items"][0]["key_object"] == "obj"
+    assert payload["items"][0]["key_version"] == "v1"
     assert payload["items"][0]["target_email"] == "target@example.com"
     assert payload["items"][0]["user_email"] == "admin@example.com"
     assert payload["items"][0]["key_value"] is None

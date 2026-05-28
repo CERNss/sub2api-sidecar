@@ -41,7 +41,7 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 
 #### Scenario: Operator transfers admin key ownership by encoded email
 - **GIVEN** the operator has a valid admin session
-- **AND** an admin user's API key name matches the `service:object:version:email` pattern
+- **AND** an admin user's API key name matches the `service:environment:object:version:email` pattern
 - **WHEN** the operator previews or executes the key transfer
 - **THEN** the system resolves `<email>` to exactly one existing Sub2API user by normalized email
 - **THEN** the system does not create users and does not fuzzy-match email values

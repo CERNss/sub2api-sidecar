@@ -602,6 +602,10 @@ class KeyTransferRequest(BaseModel):
 class KeyTransferItemResponse(BaseModel):
     key_id: Any
     key_name: str | None = None
+    key_service: str | None = None
+    key_environment: str | None = None
+    key_object: str | None = None
+    key_version: str | None = None
     source_user_id: Any | None = None
     source_group_id: Any | None = None
     target_user_id: Any | None = None
@@ -643,6 +647,10 @@ class ApiKeyAutomationItemResponse(BaseModel):
     key_id: Any | None = None
     name: str | None = None
     key_value: str | None = None
+    key_service: str | None = None
+    key_environment: str | None = None
+    key_object: str | None = None
+    key_version: str | None = None
     target_email: str | None = None
     user_id: Any | None = None
     user_email: str | None = None
@@ -660,7 +668,7 @@ class ApiKeyAutomationEnvelope(BaseModel):
     success: bool = True
     action: str
     status: str = "ok"
-    key_name_pattern: str = "service:object:version:email"
+    key_name_pattern: str = "service:environment:object:version:email"
     fallback_to_admin: bool | None = None
     fallback_reason: str | None = None
     item: ApiKeyAutomationItemResponse | None = None

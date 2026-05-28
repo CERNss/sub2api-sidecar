@@ -8,7 +8,8 @@ from typing import Any
 from app.clients.sub2api import Sub2APIClient
 from app.config import API_KEY_GROUP_SELECTION_FIRST, API_KEY_GROUP_SELECTION_RANDOM
 from app.errors import RotationExecutionError
-from app.services.rotation import RotationService
+from app.services.rotation import KEY_NAME_PATTERN as API_KEY_NAME_PATTERN
+from app.services.rotation import ParsedKeyName, RotationService
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class ApiKeyCreateResult:
     user_id: Any
     user_email: str | None
     group_id: Any
+    parsed_name: ParsedKeyName | None
     target_email: str | None
     fallback_to_admin: bool
     fallback_reason: str | None
@@ -34,7 +36,7 @@ class ApiKeyCreateTargetError:
 class ApiKeyAutomationService:
     """Token-facing API key operations backed by Sub2API admin APIs."""
 
-    KEY_NAME_PATTERN = "service:object:version:email"
+    KEY_NAME_PATTERN = API_KEY_NAME_PATTERN
 
     def __init__(
         self,
@@ -54,8 +56,15 @@ class ApiKeyAutomationService:
         target: str | None = None,
         key_options: dict[str, Any] | None = None,
     ) -> ApiKeyCreateResult | ApiKeyCreateTargetError:
+        parsed_name = self.rotation_service.parse_transfer_key_name(name)
+        if parsed_name is None:
+            return ApiKeyCreateTargetError(
+                status="INVALID_KEY_NAME_FORMAT",
+                target_email=None,
+                reason=f"API key name must match the {self.KEY_NAME_PATTERN} pattern",
+            )
         target_user, target_email, fallback_reason, target_error = self._resolve_create_target(
-            name,
+            parsed_name=parsed_name,
             target=target,
         )
         if target_error is not None:
@@ -80,6 +89,7 @@ class ApiKeyAutomationService:
             user_id=target_user_id,
             user_email=self._text_or_none(target_user.get("email")),
             group_id=target_group_id,
+            parsed_name=parsed_name,
             target_email=target_email,
             fallback_to_admin=fallback_reason is not None,
             fallback_reason=fallback_reason,
@@ -93,15 +103,20 @@ class ApiKeyAutomationService:
             if not isinstance(key_item, dict):
                 continue
             key_name = self._text_or_none(key_item.get("name"))
-            target_email = self.rotation_service.extract_transfer_email(key_name)
-            if not target_email:
+            parsed_name = self.rotation_service.parse_transfer_key_name(key_name)
+            if parsed_name is None:
                 continue
+            target_email = parsed_name.email
             if normalized_filter and self.rotation_service.normalize_email_value(target_email) != normalized_filter:
                 continue
             items.append(
                 {
                     "key_id": key_item.get("id") or key_item.get("key_id"),
                     "name": key_name,
+                    "key_service": parsed_name.service,
+                    "key_environment": parsed_name.environment,
+                    "key_object": parsed_name.object,
+                    "key_version": parsed_name.version,
                     "target_email": target_email,
                     "user_id": key_item.get("user_id") or key_item.get("owner_user_id"),
                     "user_email": key_item.get("owner_email"),
@@ -133,8 +148,8 @@ class ApiKeyAutomationService:
 
     def _resolve_create_target(
         self,
-        name: str,
         *,
+        parsed_name: ParsedKeyName,
         target: str | None = None,
     ) -> tuple[dict[str, Any], str | None, str | None, ApiKeyCreateTargetError | None]:
         explicit_target = (self._text_or_none(target) or "").strip()
@@ -169,20 +184,17 @@ class ApiKeyAutomationService:
                 )
             return target_user, target_email, None, None
 
-        target_email = self.rotation_service.extract_transfer_email(name)
-        if target_email:
-            users_by_email, duplicate_emails = self.rotation_service.users_by_exact_emails(
-                {target_email}
-            )
-            email_key = self.rotation_service.normalize_email_value(target_email)
-            if email_key in duplicate_emails:
-                return self._admin_user(), target_email, "USER_EMAIL_NOT_UNIQUE", None
-            target_user = users_by_email.get(email_key)
-            if target_user is not None:
-                return target_user, target_email, None, None
-            return self._admin_user(), target_email, "USER_NOT_FOUND", None
-
-        return self._admin_user(), None, "KEY_NAME_EMAIL_NOT_FOUND", None
+        target_email = parsed_name.email
+        users_by_email, duplicate_emails = self.rotation_service.users_by_exact_emails(
+            {target_email}
+        )
+        email_key = self.rotation_service.normalize_email_value(target_email)
+        if email_key in duplicate_emails:
+            return self._admin_user(), target_email, "USER_EMAIL_NOT_UNIQUE", None
+        target_user = users_by_email.get(email_key)
+        if target_user is not None:
+            return target_user, target_email, None, None
+        return self._admin_user(), target_email, "USER_NOT_FOUND", None
 
     def _admin_user(self) -> dict[str, Any]:
         admin_user_id = self.rotation_service.resolve_admin_user_id()

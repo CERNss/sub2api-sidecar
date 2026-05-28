@@ -153,7 +153,7 @@ from app.services.operational_data import (
 )
 from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
-from app.services.rotation import GroupMigrationRun, KeyTransferRun, RotationExecutionResult, RotationService
+from app.services.rotation import GroupMigrationRun, KeyTransferRun, RotationExecutionResult, RotationService, parse_key_name
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.services.usage_segmentation import UsageSegmentationService
 from app.services.usage_segmentation_scheduler import UsageSegmentationScheduler
@@ -889,6 +889,11 @@ def api_key_automation(
             return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
 
         item = dict(create_result.api_key)
+        if create_result.parsed_name is not None:
+            item["key_service"] = create_result.parsed_name.service
+            item["key_environment"] = create_result.parsed_name.environment
+            item["key_object"] = create_result.parsed_name.object
+            item["key_version"] = create_result.parsed_name.version
         item["target_email"] = create_result.target_email
         item["user_email"] = create_result.user_email
         item["group_id"] = create_result.group_id
@@ -936,6 +941,27 @@ def rotation_execution_response(
 
 def key_transfer_response(run: KeyTransferRun) -> KeyTransferEnvelope:
     record = run.run_record
+    items: list[KeyTransferItemResponse] = []
+    for item in run.items:
+        parsed = parse_key_name(item.key_name)
+        items.append(
+            KeyTransferItemResponse(
+                key_id=item.key_id,
+                key_name=item.key_name,
+                key_service=parsed.service if parsed else None,
+                key_environment=parsed.environment if parsed else None,
+                key_object=parsed.object if parsed else None,
+                key_version=parsed.version if parsed else None,
+                source_user_id=item.source_user_id,
+                source_group_id=item.source_group_id,
+                target_user_id=item.target_user_id,
+                target_email=item.target_email,
+                target_group_id=item.target_group_id,
+                status=item.status.value,
+                reason=item.reason,
+                quota=item.quota,
+            )
+        )
     return KeyTransferEnvelope(
         run_id=record.run_id if record else None,
         run_kind=record.run_kind.value if record else None,
@@ -948,21 +974,7 @@ def key_transfer_response(run: KeyTransferRun) -> KeyTransferEnvelope:
         moved_count=run.moved_count,
         skipped_count=run.skipped_count,
         failed_count=run.failed_count,
-        items=[
-            KeyTransferItemResponse(
-                key_id=item.key_id,
-                key_name=item.key_name,
-                source_user_id=item.source_user_id,
-                source_group_id=item.source_group_id,
-                target_user_id=item.target_user_id,
-                target_email=item.target_email,
-                target_group_id=item.target_group_id,
-                status=item.status.value,
-                reason=item.reason,
-                quota=item.quota,
-            )
-            for item in run.items
-        ],
+        items=items,
     )
 
 
@@ -979,6 +991,10 @@ def api_key_automation_item_response(
         key_id=item.get("id") or item.get("key_id"),
         name=item.get("name"),
         key_value=item.get("key") if include_key_value else None,
+        key_service=item.get("key_service"),
+        key_environment=item.get("key_environment"),
+        key_object=item.get("key_object"),
+        key_version=item.get("key_version"),
         target_email=item.get("target_email"),
         user_id=item.get("user_id") or item.get("owner_user_id"),
         user_email=item.get("user_email") or item.get("owner_email"),

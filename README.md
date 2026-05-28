@@ -47,7 +47,7 @@
 - `POST /api/v1/apikey`
   - Bearer token / `X-Access-Key` 鉴权的自动化接口
   - `action=create` 按指定 `name` 创建 API key，复用密钥管理里的邮箱解析和首个可用分组选择逻辑
-  - `action=list` 列出 `service:object:version:email` 格式 key，可用 `email` 精确过滤
+  - `action=list` 列出 `service:environment:object:version:email` 格式 key，可用 `email` 精确过滤
 - `POST /auth/api-token`
   - 登录后生成可用于自动化调用的长期 bearer-compatible API token
 - `POST /auth/logout`
@@ -94,10 +94,10 @@
 curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
   -H "Authorization: Bearer $SIDECAR_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"action":"create","name":"svc:obj:v1:user@example.com","quota":0}'
+  -d '{"action":"create","name":"svc:prod:obj:v1:user@example.com","quota":0}'
 ```
 
-创建时如果 `target` 为空，会沿用 key 名最后一段邮箱作为目标用户；如果能精确匹配一个 Sub2API 用户，会放到该用户第一个可用分组；无法匹配邮箱或没有对应账号时默认放到 admin 用户下。请求里的 `group_id` / `group_ids` 会被忽略，分组只由 sidecar 选择。
+创建时 `name` 必须是 `service:environment:object:version:email` 格式。`target` 为空时，会沿用 key 名最后一段邮箱作为目标用户；如果能精确匹配一个 Sub2API 用户，会放到该用户第一个可用分组；没有对应账号时默认放到 admin 用户下。请求里的 `group_id` / `group_ids` 会被忽略，分组只由 sidecar 选择。旧的 `service:object:version:email` 格式不会被创建或匹配。
 
 也可以显式传 `target` 强制指定用户：
 
@@ -105,7 +105,7 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
 curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
   -H "Authorization: Bearer $SIDECAR_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"action":"create","name":"svc:obj:v1:user@example.com","target":"forced@example.com","quota":0}'
+  -d '{"action":"create","name":"svc:prod:obj:v1:user@example.com","target":"forced@example.com","quota":0}'
 ```
 
 显式 `target` 不存在或不唯一时不会 fallback 到 admin，会返回 `{"success":false,"status":"USER_NOT_FOUND"}` 或 `{"success":false,"status":"USER_EMAIL_NOT_UNIQUE"}`。
@@ -119,7 +119,7 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
   -d '{"action":"list","email":"user@example.com"}'
 ```
 
-列表接口只返回 `service:object:version:email` 格式的 key，不返回原始 key 值。
+列表接口只返回 `service:environment:object:version:email` 格式的 key，不返回原始 key 值，并会返回解析后的 `key_service`、`key_environment`、`key_object`、`key_version` 和 `target_email`。
 
 ## 关键流程
 
