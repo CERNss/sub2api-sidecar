@@ -46,6 +46,9 @@ CONFIG_ENV_NAMES = (
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON",
     "SUB2API_API_KEY_GROUP_SELECTION",
+    "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_IDS",
+    "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_NAMES",
+    "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_EMAILS",
 )
 
 
@@ -98,6 +101,14 @@ app:
   access_key_ttl_hours: 6
 openai:
   oauth_redirect_uri: http://localhost:1555/callback
+notifications:
+  account_invalid_whitelist:
+    ids:
+      - acct-yaml
+    names:
+      - Manual Off
+    emails:
+      - manual@example.com
 sub2api:
   request_timeout_seconds: 12
   api_key_group_selection: random
@@ -142,6 +153,9 @@ sub2api:
     assert settings.database_url == "postgresql://sidecar:secret@postgres:5432/sidecar"
     assert settings.request_timeout_seconds == 12
     assert settings.api_key_group_selection == "random"
+    assert settings.account_invalid_alert_whitelist.ids == ("acct-yaml",)
+    assert settings.account_invalid_alert_whitelist.names == ("Manual Off",)
+    assert settings.account_invalid_alert_whitelist.emails == ("manual@example.com",)
 
     defaults = settings.default_sub2api_upstream.provisioning_defaults
     assert defaults.group_platform == "yaml-group"
@@ -152,6 +166,30 @@ sub2api:
     assert defaults.account_model_whitelist == ("yaml-model-a", "yaml-model-b")
     assert defaults.account_temporary_unschedulable is False
     assert defaults.account_temporary_unschedulable_rules[0].error_code == "418"
+
+
+def test_settings_env_overrides_account_invalid_whitelist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("NOTIFICATION_ACCOUNT_INVALID_WHITELIST_IDS", "acct-env, acct-two")
+    monkeypatch.setenv("NOTIFICATION_ACCOUNT_INVALID_WHITELIST_NAMES", "Manual Off")
+    monkeypatch.setenv(
+        "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_EMAILS",
+        "manual@example.com, disabled@example.com",
+    )
+
+    settings = Settings.from_env()
+
+    assert settings.account_invalid_alert_whitelist.ids == ("acct-env", "acct-two")
+    assert settings.account_invalid_alert_whitelist.names == ("Manual Off",)
+    assert settings.account_invalid_alert_whitelist.emails == (
+        "manual@example.com",
+        "disabled@example.com",
+    )
 
 
 def test_settings_env_overrides_config_yaml(

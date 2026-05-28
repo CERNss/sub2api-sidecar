@@ -168,6 +168,14 @@ class _PreconditionBlock:
     reason: str
 
 
+@dataclass
+class _GroupMigrationCandidate:
+    user: dict[str, Any]
+    direct_group_id: Any | None
+    direct_group_name: str | None
+    source_api_key_count: int
+
+
 class RotationService:
     def __init__(
         self,
@@ -547,16 +555,21 @@ class RotationService:
                 unsupported_reason or "Target group is not supported for orchestration"
             )
 
+        users = self.sub2api_client.list_users()
         source_group_key = self._normalize_key(source_group_id)
-        source_users = [
-            user
-            for user in self.sub2api_client.list_users()
-            if self._normalize_key(self._direct_user_group_from_item(user)[0]) == source_group_key
-        ]
-        source_users.sort(
-            key=lambda user: (
-                self._normalize_email(user.get("email")),
-                self._normalize_key(user.get("id")),
+        target_direct_user_count_before = self._direct_user_count_for_group(
+            users,
+            target_group_id,
+        )
+        migration_mode = "merge" if target_direct_user_count_before > 0 else "move"
+        source_candidates = self._group_migration_candidates(
+            users,
+            source_group_id,
+        )
+        source_candidates.sort(
+            key=lambda candidate: (
+                self._normalize_email(candidate.user.get("email")),
+                self._normalize_key(candidate.user.get("id")),
             )
         )
 
@@ -565,7 +578,8 @@ class RotationService:
         failed: list[dict[str, Any]] = []
         request_reason = reason or "group to group orchestration"
         now = datetime.now(timezone.utc)
-        for user in source_users:
+        for candidate in source_candidates:
+            user = candidate.user
             user_id = user.get("id")
             email = str(user.get("email") or "")
             if user_id in (None, "") or not email.strip():
@@ -591,7 +605,8 @@ class RotationService:
                 continue
 
             existing = self.store.get_user_assignment(user_id)
-            direct_group_id, direct_group_name = self._direct_user_group_from_item(user)
+            direct_group_id = candidate.direct_group_id
+            direct_group_name = candidate.direct_group_name
             assignment = UserGroupAssignment(
                 user_id=user_id,
                 email=email,
@@ -606,11 +621,22 @@ class RotationService:
             )
 
             try:
-                response = self.sub2api_client.replace_exclusive_user_group(
-                    user_id=user_id,
-                    old_group_id=source_group_id,
-                    new_group_id=target_group_id,
-                )
+                direct_source_match = self._normalize_key(direct_group_id) == source_group_key
+                if direct_source_match:
+                    response = self.sub2api_client.replace_exclusive_user_group(
+                        user_id=user_id,
+                        old_group_id=source_group_id,
+                        new_group_id=target_group_id,
+                    )
+                    upstream_migrated_keys = int(response.get("migrated_keys") or 0)
+                    source_match = "direct_group"
+                else:
+                    self.sub2api_client.set_user_group(
+                        user_id=user_id,
+                        group_id=target_group_id,
+                    )
+                    upstream_migrated_keys = 0
+                    source_match = "api_key_route"
                 resource_sync = self._sync_user_resources_to_group(
                     user_id=user_id,
                     email=email,
@@ -653,12 +679,15 @@ class RotationService:
                 trigger_type=RotationTrigger.manual,
                 status=RotationResultStatus.moved,
                 reason=request_reason,
-                migrated_keys=int(response.get("migrated_keys") or 0) + resource_sync["migrated_keys"],
+                migrated_keys=upstream_migrated_keys + resource_sync["migrated_keys"],
                 metadata={
                     "source_group_name": source_group.get("name") or "",
                     "target_group_name": target_group.get("name") or "",
                     "bound_accounts": resource_sync["bound_accounts"],
                     "supplemental_migrated_keys": resource_sync["migrated_keys"],
+                    "source_match": source_match,
+                    "source_api_key_count": candidate.source_api_key_count,
+                    "migration_mode": migration_mode,
                 },
             )
             moved.append(self._serialize_result(result))
@@ -676,6 +705,8 @@ class RotationService:
                 "target_group_id": str(target_group_id),
                 "target_group_name": str(target_group.get("name") or ""),
                 "reason": reason or "",
+                "mode": migration_mode,
+                "target_direct_user_count_before": target_direct_user_count_before,
             },
             planned=[],
             moved=moved,
@@ -687,6 +718,59 @@ class RotationService:
             target_group_id=target_group_id,
             run_record=run_record,
         )
+
+    def _direct_user_count_for_group(
+        self,
+        users: list[dict[str, Any]],
+        group_id: Any,
+    ) -> int:
+        group_key = self._normalize_key(group_id)
+        return sum(
+            1
+            for user in users
+            if self._normalize_key(self._direct_user_group_from_item(user)[0]) == group_key
+        )
+
+    def _group_migration_candidates(
+        self,
+        users: list[dict[str, Any]],
+        source_group_id: Any,
+    ) -> list[_GroupMigrationCandidate]:
+        source_group_key = self._normalize_key(source_group_id)
+        candidates: list[_GroupMigrationCandidate] = []
+        for user in users:
+            direct_group_id, direct_group_name = self._direct_user_group_from_item(user)
+            direct_source_match = self._normalize_key(direct_group_id) == source_group_key
+            source_api_key_count = 0
+            if direct_source_match:
+                candidates.append(
+                    _GroupMigrationCandidate(
+                        user=user,
+                        direct_group_id=direct_group_id,
+                        direct_group_name=direct_group_name,
+                        source_api_key_count=source_api_key_count,
+                    )
+                )
+                continue
+            user_id = user.get("id")
+            if user_id not in (None, ""):
+                api_keys = self.sub2api_client.get_user_api_keys(user_id)["items"]
+                source_api_key_count = sum(
+                    1
+                    for api_key in api_keys
+                    if isinstance(api_key, dict)
+                    and self._normalize_key(self._api_key_group_id(api_key)) == source_group_key
+                )
+            if source_api_key_count > 0:
+                candidates.append(
+                    _GroupMigrationCandidate(
+                        user=user,
+                        direct_group_id=direct_group_id,
+                        direct_group_name=direct_group_name,
+                        source_api_key_count=source_api_key_count,
+                    )
+                )
+        return candidates
 
     def _sync_user_resources_to_group(
         self,

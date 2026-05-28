@@ -134,6 +134,13 @@ class Sub2APIUpstream:
 
 
 @dataclass(frozen=True)
+class AccountInvalidAlertWhitelist:
+    ids: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    emails: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str
     app_base_url: str
@@ -146,6 +153,9 @@ class Settings:
     app_access_key_ttl_hours: int = 12
     request_timeout_seconds: int = 30
     api_key_group_selection: str = API_KEY_GROUP_SELECTION_FIRST
+    account_invalid_alert_whitelist: AccountInvalidAlertWhitelist = (
+        AccountInvalidAlertWhitelist()
+    )
 
     @property
     def default_sub2api_upstream(self) -> Sub2APIUpstream:
@@ -198,6 +208,9 @@ class Settings:
             default=30,
         )
         values["api_key_group_selection"] = _api_key_group_selection_setting(config)
+        values["account_invalid_alert_whitelist"] = _account_invalid_alert_whitelist_setting(
+            config
+        )
         values["app_access_key_ttl_hours"] = _int_setting(
             config,
             "APP_ACCESS_KEY_TTL_HOURS",
@@ -610,6 +623,28 @@ def _api_key_group_selection_setting(config: Mapping[str, Any]) -> str:
     return normalized
 
 
+def _account_invalid_alert_whitelist_setting(
+    config: Mapping[str, Any],
+) -> AccountInvalidAlertWhitelist:
+    return AccountInvalidAlertWhitelist(
+        ids=_string_list_setting(
+            config,
+            "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_IDS",
+            ("notifications", "account_invalid_whitelist", "ids"),
+        ),
+        names=_string_list_setting(
+            config,
+            "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_NAMES",
+            ("notifications", "account_invalid_whitelist", "names"),
+        ),
+        emails=_string_list_setting(
+            config,
+            "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_EMAILS",
+            ("notifications", "account_invalid_whitelist", "emails"),
+        ),
+    )
+
+
 def _normalize_base_path(raw_value: str) -> str:
     value = raw_value.strip()
     if value in {"", "/"}:
@@ -722,7 +757,31 @@ def _account_model_whitelist_setting(config: Mapping[str, Any]) -> tuple[str, ..
     return _parse_string_list_payload(payload, source=_config_label(config_path))
 
 
-def _parse_string_list_payload(payload: Any, *, source: str) -> tuple[str, ...]:
+def _string_list_setting(
+    config: Mapping[str, Any],
+    env_name: str,
+    config_path: tuple[str, ...],
+) -> tuple[str, ...]:
+    env_value = _env_string(env_name)
+    if env_value is not None:
+        return _parse_string_list_payload(env_value, source=env_name, allow_empty=True)
+
+    payload = _config_value(config, config_path)
+    if payload is None:
+        return ()
+    return _parse_string_list_payload(
+        payload,
+        source=_config_label(config_path),
+        allow_empty=True,
+    )
+
+
+def _parse_string_list_payload(
+    payload: Any,
+    *,
+    source: str,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
     if isinstance(payload, str):
         values = [value.strip() for value in payload.split(",")]
     elif isinstance(payload, list):
@@ -744,7 +803,7 @@ def _parse_string_list_payload(payload: Any, *, source: str) -> tuple[str, ...]:
         cleaned.append(value)
         seen.add(value)
 
-    if not cleaned:
+    if not cleaned and not allow_empty:
         raise ConfigurationError(f"{source} must contain at least one value")
 
     return tuple(cleaned)

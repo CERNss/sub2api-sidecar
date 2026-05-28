@@ -15,6 +15,7 @@ from app.models.operational_data import (
 )
 from app.services.notification_collector import (
     LOCAL_TIMEZONE,
+    AccountInvalidWhitelist,
     CollectorNoData,
     _account_capacity,
     _capacity_count_sample,
@@ -24,6 +25,7 @@ from app.services.notification_collector import (
     _date_value,
     _entity_snapshot,
     _group_name_for_account,
+    is_account_invalid_for_alert,
     _limit_usage_percent,
     _number,
     _quota_remaining_percent,
@@ -70,12 +72,14 @@ class OperationalDataCollector:
         timezone_name: str = LOCAL_TIMEZONE,
         source_key_prefix: str = "",
         metric_key_prefix: str = "",
+        account_invalid_whitelist: AccountInvalidWhitelist | object | None = None,
     ) -> None:
         self.client = client
         self.store = store
         self.timezone_name = timezone_name
         self.source_key_prefix = source_key_prefix
         self.metric_key_prefix = metric_key_prefix
+        self.account_invalid_whitelist = account_invalid_whitelist
 
     def collect(self, *, now: datetime | None = None) -> OperationalDataCollectionResult:
         started_at = now or datetime.now(timezone.utc)
@@ -475,7 +479,13 @@ class OperationalDataCollector:
                 add_sample(metric_key, sample)
 
         if accounts is not None:
-            add("account_invalid", lambda: _account_invalid_sample(accounts))
+            add(
+                "account_invalid",
+                lambda: _account_invalid_sample(
+                    accounts,
+                    account_invalid_whitelist=self.account_invalid_whitelist,
+                ),
+            )
             add("account_rate_limited", lambda: _account_rate_limited_sample(accounts))
             add("account_reauth_needed", lambda: _account_reauth_needed_sample(accounts))
             add("account_capacity_high", lambda: _account_capacity_high_sample(accounts))
@@ -940,13 +950,15 @@ def _usage_log_created_at(item: dict[str, Any], local_tz: tzinfo | None) -> date
     return parsed.astimezone(local_tz or timezone.utc)
 
 
-def _account_invalid_sample(accounts: list[dict[str, Any]]) -> CollectorSample:
+def _account_invalid_sample(
+    accounts: list[dict[str, Any]],
+    *,
+    account_invalid_whitelist: AccountInvalidWhitelist | object | None = None,
+) -> CollectorSample:
     invalid = [
         account
         for account in accounts
-        if _status_key(account.get("availability_status"))
-        in {"banned", "disabled", "expired", "invalid", "unavailable"}
-        or account.get("is_available") is False
+        if is_account_invalid_for_alert(account, account_invalid_whitelist)
     ]
     return _count_sample(invalid, accounts, "invalid_accounts")
 

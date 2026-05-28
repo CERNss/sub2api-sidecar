@@ -341,6 +341,7 @@ def get_notification_service() -> NotificationService:
                     collector=OperationalDataCollector(
                         client=get_sub2api_client(upstream.upstream_id),
                         store=store,
+                        account_invalid_whitelist=settings.account_invalid_alert_whitelist,
                         source_key_prefix=(
                             ""
                             if upstream.upstream_id == settings.default_sub2api_upstream_id
@@ -1499,6 +1500,7 @@ def orchestration_users(
                 status=user.get("status"),
                 current_group_id=user.get("current_group_id"),
                 current_group_name=user.get("current_group_name"),
+                group_ids=list(user.get("group_ids") or []),
                 local_group_id=local_assignment.current_group_id if local_assignment else None,
                 local_group_name=local_assignment.current_group_name if local_assignment else None,
                 has_local_assignment=local_assignment is not None,

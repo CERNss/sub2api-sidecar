@@ -151,6 +151,7 @@ class OrchestrationUserResponse(BaseModel):
     status: str | None = None
     current_group_id: Any | None = None
     current_group_name: str | None = None
+    group_ids: list[Any] = Field(default_factory=list)
     local_group_id: Any | None = None
     local_group_name: str | None = None
     has_local_assignment: bool = False

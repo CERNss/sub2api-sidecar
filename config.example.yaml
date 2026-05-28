@@ -13,6 +13,12 @@ database:
 openai:
   oauth_redirect_uri: https://sub2api.tcgcard.jp/sidecar/auth/callback
 
+notifications:
+  account_invalid_whitelist:
+    ids: []
+    names: []
+    emails: []
+
 sub2api:
   request_timeout_seconds: 30
   api_key_group_selection: random

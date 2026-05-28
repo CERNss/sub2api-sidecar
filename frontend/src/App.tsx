@@ -243,6 +243,7 @@ type OrchestrationUser = {
   status: string | null;
   current_group_id: unknown | null;
   current_group_name: string | null;
+  group_ids: unknown[];
   local_group_id: unknown | null;
   local_group_name: string | null;
   has_local_assignment: boolean;
@@ -1381,6 +1382,17 @@ function apiKeyRouteLabel(key: OrchestrationApiKey): string {
   }
   const groupName = key.group_name?.trim();
   return groupName ? `路由组 ${groupName} (${groupId})` : `路由组 ${groupId}`;
+}
+
+function userGroupIds(user: OrchestrationUser): string[] {
+  return Array.from(
+    new Set(
+      [
+        idValue(user.current_group_id),
+        ...(Array.isArray(user.group_ids) ? user.group_ids.map(idValue) : [])
+      ].filter(Boolean)
+    )
+  );
 }
 
 function apiKeyOwnerLabel(key: OrchestrationApiKey): string {
@@ -3618,6 +3630,53 @@ function ExistingOrchestrationView({
     }
   }
 
+  const groupMigrationScope = useMemo(() => {
+    if (!sourceGroupId) {
+      return {
+        directUserCount: 0,
+        routeKeyCount: 0,
+        sourceUserCount: 0,
+        targetExistingUserCount: 0,
+        mode: "move" as const
+      };
+    }
+    const sourceUserIds = new Set<string>();
+    let directUserCount = 0;
+    users.forEach((user) => {
+      const userId = idValue(user.user_id);
+      if (!userId) {
+        return;
+      }
+      if (idValue(user.current_group_id) === sourceGroupId) {
+        directUserCount += 1;
+        sourceUserIds.add(userId);
+      }
+    });
+
+    let routeKeyCount = 0;
+    Object.entries(apiKeysByUserId).forEach(([userId, keys]) => {
+      if (!userId) {
+        return;
+      }
+      const sourceKeys = keys.filter((key) => idValue(key.group_id) === sourceGroupId);
+      if (sourceKeys.length > 0) {
+        routeKeyCount += sourceKeys.length;
+        sourceUserIds.add(userId);
+      }
+    });
+
+    const targetExistingUserCount = targetGroupId
+      ? users.filter((user) => idValue(user.current_group_id) === targetGroupId).length
+      : 0;
+    return {
+      directUserCount,
+      routeKeyCount,
+      sourceUserCount: sourceUserIds.size,
+      targetExistingUserCount,
+      mode: targetExistingUserCount > 0 ? ("merge" as const) : ("move" as const)
+    };
+  }, [apiKeysByUserId, sourceGroupId, targetGroupId, users]);
+
   const toggleKeySelection = (keyId: string) => {
     if (!keyId) return;
     setSelectedKeyIds((current) =>
@@ -3647,32 +3706,35 @@ function ExistingOrchestrationView({
     };
     groups.forEach(upsertGraphGroup);
     users.forEach((user) => {
-      const currentGroupId = user.current_group_id ?? null;
-      const currentGroupValue = idValue(currentGroupId);
-      if (!currentGroupValue) {
-        return;
-      }
-      groupUserCounts.set(currentGroupValue, (groupUserCounts.get(currentGroupValue) ?? 0) + 1);
-      if (!graphGroups.has(currentGroupValue)) {
-        graphGroups.set(currentGroupValue, {
-          group_id: currentGroupId,
-          name: user.current_group_name ?? user.local_group_name ?? currentGroupValue,
-          group_kind: null,
-          platform: null,
-          status: null,
-          is_exclusive: true,
-          is_subscription: false,
-          rotation_supported: true,
-          unsupported_reason: null,
-          account_count: null,
-          active_account_count: null,
-          rpm_limit: null,
-          rate_multiplier: null,
-          daily_limit_usd: null,
-          weekly_limit_usd: null,
-          monthly_limit_usd: null
-        });
-      }
+      userGroupIds(user).forEach((groupValue) => {
+        const isDirectGroup = groupValue === idValue(user.current_group_id);
+        if (isDirectGroup) {
+          groupUserCounts.set(groupValue, (groupUserCounts.get(groupValue) ?? 0) + 1);
+        }
+        if (!graphGroups.has(groupValue)) {
+          graphGroups.set(groupValue, {
+            group_id: isDirectGroup ? user.current_group_id : groupValue,
+            name:
+              isDirectGroup
+                ? user.current_group_name ?? user.local_group_name ?? groupValue
+                : groupValue,
+            group_kind: null,
+            platform: null,
+            status: null,
+            is_exclusive: true,
+            is_subscription: false,
+            rotation_supported: true,
+            unsupported_reason: null,
+            account_count: null,
+            active_account_count: null,
+            rpm_limit: null,
+            rate_multiplier: null,
+            daily_limit_usd: null,
+            weekly_limit_usd: null,
+            monthly_limit_usd: null
+          });
+        }
+      });
     });
     userKeyRows.forEach(({ key }) => {
       const keyGroupValue = idValue(key.group_id);
@@ -3744,8 +3806,8 @@ function ExistingOrchestrationView({
       .map((group, fallbackIndex) => {
         const groupValue = idValue(group.group_id);
         const userIndexes = users
-          .map((user, index) => ({ index, groupValue: idValue(user.current_group_id) }))
-          .filter((item) => item.groupValue === groupValue)
+          .map((user, index) => ({ index, groupValues: userGroupIds(user) }))
+          .filter((item) => item.groupValues.includes(groupValue))
           .map((item) => item.index);
         const keyIndexes = userKeyRows
           .map((row, index) => ({ index, groupValue: idValue(row.key.group_id) }))
@@ -3765,13 +3827,15 @@ function ExistingOrchestrationView({
     const userRows = users
       .map((user, fallbackIndex) => {
         const userId = idValue(user.user_id);
-        const userGroupId = idValue(user.current_group_id);
+        const userGroupValues = userGroupIds(user);
         const keyGroupIndexes = userKeyRows
           .filter((row) => row.userId === userId)
           .map((row) => groupOrder.findIndex((item) => item.groupValue === idValue(row.key.group_id)))
           .filter((index) => index >= 0);
-        const userGroupIndex = groupOrder.findIndex((item) => item.groupValue === userGroupId);
-        const relatedGroupIndexes = userGroupIndex >= 0 ? [userGroupIndex, ...keyGroupIndexes] : keyGroupIndexes;
+        const userGroupIndexes = groupOrder
+          .map((item, index) => userGroupValues.includes(item.groupValue) ? index : -1)
+          .filter((index) => index >= 0);
+        const relatedGroupIndexes = [...userGroupIndexes, ...keyGroupIndexes];
         return {
           user,
           userId,
@@ -3846,7 +3910,11 @@ function ExistingOrchestrationView({
       createGraphNode({
         id: `user-${userId}`,
         kind: "user",
-        data: { userId, directGroupId: idValue(user.current_group_id) },
+        data: {
+          userId,
+          directGroupId: idValue(user.current_group_id),
+          relatedGroupIds: userGroupIds(user)
+        },
         selected: userId === selectedUserId,
         label: (
           <GraphNode
@@ -3925,20 +3993,21 @@ function ExistingOrchestrationView({
           );
       }),
       ...users
-        .filter((user) => idValue(user.current_group_id))
-        .map((user) => {
+        .flatMap((user) => {
           const userId = idValue(user.user_id);
-          const groupId = idValue(user.current_group_id);
-          const isActive = userId === selectedUserId;
-          return createGraphEdge({
-            id: `group-user-${groupId}-${userId}`,
-            source: `user-${userId}`,
-            target: `group-${groupId}`,
-            sourceKind: "user",
-            targetKind: "group",
-            relation: "user-group",
-            active: isActive,
-            label: isActive ? "直接用户组" : undefined
+          return userGroupIds(user).map((groupId) => {
+            const isDirectGroup = groupId === idValue(user.current_group_id);
+            const isActive = userId === selectedUserId;
+            return createGraphEdge({
+              id: `group-user-${groupId}-${userId}`,
+              source: `user-${userId}`,
+              target: `group-${groupId}`,
+              sourceKind: "user",
+              targetKind: "group",
+              relation: "user-group",
+              active: isActive,
+              label: isActive ? (isDirectGroup ? "直接用户组" : "允许分组") : undefined
+            });
           });
         }),
       ...userKeyRows.map(({ userId, key }) => {
@@ -4316,9 +4385,15 @@ function ExistingOrchestrationView({
             tone: "error"
           });
         } else if (payload.status === "empty") {
-          setStatus({ message: "源分组下没有可迁移的直接用户。", tone: "info" });
+          setStatus({ message: "源分组下没有可迁移的相关用户或路由 Key。", tone: "info" });
         } else {
-          setStatus({ message: `整组迁移完成（${counts.moved} 用户）`, tone: "success" });
+          setStatus({
+            message:
+              payload.config?.mode === "merge"
+                ? `整组迁移完成，已合并 ${counts.moved} 用户`
+                : `整组迁移完成（${counts.moved} 用户）`,
+            tone: "success"
+          });
         }
       } else {
         if (!selectedUser) {
@@ -4376,7 +4451,10 @@ function ExistingOrchestrationView({
           setStatus({ message: `部分执行成功（成功 ${total - failedCount} / 失败 ${failedCount}）`, tone: "error" });
         }
       }
-      await loadResources(mode === "group_migration" ? selectedUserId : idValue(selectedUser?.user_id));
+      await loadResources(
+        mode === "group_migration" ? "" : idValue(selectedUser?.user_id),
+        mode === "group_migration" ? "" : undefined
+      );
       if (mode !== "group_migration" && selectedUser) {
         await loadApiKeys(idValue(selectedUser.user_id));
       }
@@ -4485,10 +4563,12 @@ function ExistingOrchestrationView({
                   } else if (nextMode === "group_migration") {
                     setSelectedKeyIds([]);
                     setApiKeys([]);
+                    setUserSearch("");
                     const nextSourceGroupId = sourceGroupId || groups.find((group) => group.rotation_supported)?.group_id;
                     const nextSourceValue = idValue(nextSourceGroupId);
                     setSourceGroupId(nextSourceValue);
                     updateGraphGroupFilters(nextSourceValue ? [nextSourceValue] : []);
+                    void loadResources("", "");
                   }
                 }}
                 options={[
@@ -4505,7 +4585,7 @@ function ExistingOrchestrationView({
                     <Typography.Text strong>分组到分组</Typography.Text>
                   </Space>
                   <Typography.Text type="secondary">
-                    将源分组下的直接用户及其全部 API Keys 迁移到目标分组。
+                    将源分组相关用户及这些用户的全部 API Keys 合并到目标分组。
                   </Typography.Text>
                 </div>
               ) : (
@@ -4559,7 +4639,7 @@ function ExistingOrchestrationView({
 
               <Typography.Text type="secondary" className="manual-zone-hint">
                 {mode === "group_migration"
-                  ? `${groups.filter((group) => group.rotation_supported).length} 可迁移分组 · ${users.length} 用户`
+                  ? `${groups.filter((group) => group.rotation_supported).length} 可迁移分组 · ${groupMigrationScope.sourceUserCount} 相关用户`
                   : `${users.length} 用户 · ${groups.length} 分组`}
               </Typography.Text>
             </section>
@@ -4613,11 +4693,22 @@ function ExistingOrchestrationView({
                       <PartitionOutlined />
                       <Typography.Text strong>迁移范围</Typography.Text>
                     </Space>
-                    <Tag color={sourceGroupId && targetGroupId ? "green" : "default"}>Group → Group</Tag>
+                    <Space size={6} wrap>
+                      <Tag color={sourceGroupId && targetGroupId ? "green" : "default"}>Group → Group</Tag>
+                      {groupMigrationScope.mode === "merge" ? <Tag color="blue">合并模式</Tag> : null}
+                    </Space>
                   </div>
                   <Typography.Text className="manual-group-migration-description" type="secondary">
-                    执行时会扫描源分组下的直接用户，并把这些用户的全部 API Keys 统一迁移到目标分组。
+                    执行时会扫描源分组的直接用户和源组路由 Key 所属用户，并把这些用户的全部 API Keys 统一迁移到目标分组；目标分组已有用户会保留。
                   </Typography.Text>
+                  <Space wrap size={6}>
+                    <Tag>{groupMigrationScope.sourceUserCount} 相关用户</Tag>
+                    <Tag>{groupMigrationScope.directUserCount} 直接用户</Tag>
+                    <Tag>{groupMigrationScope.routeKeyCount} 源组 Key</Tag>
+                    {groupMigrationScope.targetExistingUserCount > 0 ? (
+                      <Tag color="blue">目标已有 {groupMigrationScope.targetExistingUserCount} 用户</Tag>
+                    ) : null}
+                  </Space>
                 </section>
               ) : (
                 <section className="orchestration-keys-panel manual-keys-panel" aria-label="用户 API Keys">
@@ -4689,7 +4780,10 @@ function ExistingOrchestrationView({
                 htmlType="button"
                 icon={<SendOutlined />}
                 loading={submitting}
-                disabled={loading || targetGroups.length === 0}
+                disabled={
+                  loading ||
+                  targetGroups.length === 0
+                }
                 onClick={() => void runExistingOrchestration()}
                 block
               >

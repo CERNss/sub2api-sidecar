@@ -33,6 +33,13 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 - **THEN** the request body includes `group_id`
 - **THEN** the system records a local rotation event for the key move
 
+#### Scenario: Operator migrates a group into another group
+- **GIVEN** the operator has selected a source group and a different target group
+- **WHEN** the operator executes group-to-group orchestration
+- **THEN** the system selects users whose direct group is the source group and users that own API keys routed to the source group
+- **THEN** the system migrates each selected user's full API key set to the target group
+- **THEN** existing users already in the target group remain in place and the run records merge mode when the target group was non-empty
+
 #### Scenario: Subscription groups are not used for bulk replace-group
 - **GIVEN** an upstream group is a subscription group
 - **WHEN** the operator attempts bulk replace-group orchestration to that group
@@ -167,6 +174,7 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **GIVEN** the operator is using the existing user/group orchestration view
 - **WHEN** the operator selects bulk replace-group mode and executes
 - **THEN** the UI submits the source group and target group to the authenticated replace-group orchestration API
+- **THEN** the UI treats source-group routed API keys as part of the group migration scope and shows merge mode when the target group already has users
 - **WHEN** the operator selects single-key mode and executes
 - **THEN** the UI submits the selected API key and target group to the authenticated API key group update API
 
@@ -385,6 +393,12 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **THEN** the persistence stage stores per-source collection status in PostgreSQL source-status tables
 - **THEN** the evaluation stage evaluates due enabled rules using PostgreSQL notification config, local metric samples, and notification rule state
 - **THEN** the system persists the updated rule state regardless of decision
+
+#### Scenario: Account invalid whitelist suppresses known manual closures
+- **GIVEN** deployment config lists account ids, names, or emails under `notifications.account_invalid_whitelist`
+- **WHEN** operational data derives the `account_invalid` metric from upstream accounts
+- **THEN** accounts matching the whitelist are excluded from the `account_invalid` count and snapshot
+- **THEN** the whitelist does not suppress other account signals such as rate limit, reauth, or capacity alerts
 
 #### Scenario: Rule cadence reads local samples
 - **GIVEN** the service is running with notifications configured

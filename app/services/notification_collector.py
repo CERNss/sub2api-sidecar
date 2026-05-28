@@ -7,6 +7,7 @@ from app.clients.sub2api import Sub2APIClient
 from app.models.notification import CollectorSample, NotificationRule
 
 CollectorFn = Callable[[NotificationRule], CollectorSample | None]
+AccountInvalidWhitelist = dict[str, frozenset[str]]
 
 
 KNOWN_SIGNAL_KEYS: tuple[str, ...] = (
@@ -73,9 +74,16 @@ def default_registry() -> CollectorRegistry:
     return CollectorRegistry()
 
 
-def sub2api_registry(client: Sub2APIClient) -> CollectorRegistry:
+def sub2api_registry(
+    client: Sub2APIClient,
+    *,
+    account_invalid_whitelist: AccountInvalidWhitelist | object | None = None,
+) -> CollectorRegistry:
     registry = CollectorRegistry()
-    collectors = Sub2APINotificationCollectors(client)
+    collectors = Sub2APINotificationCollectors(
+        client,
+        account_invalid_whitelist=account_invalid_whitelist,
+    )
     registry.register("account_invalid", collectors.account_invalid)
     registry.register("account_rate_limited", collectors.account_rate_limited)
     registry.register("account_reauth_needed", collectors.account_reauth_needed)
@@ -101,22 +109,23 @@ def sub2api_registry(client: Sub2APIClient) -> CollectorRegistry:
 
 
 class Sub2APINotificationCollectors:
-    def __init__(self, client: Sub2APIClient) -> None:
+    def __init__(
+        self,
+        client: Sub2APIClient,
+        *,
+        account_invalid_whitelist: AccountInvalidWhitelist | object | None = None,
+    ) -> None:
         self.client = client
+        self.account_invalid_whitelist = normalize_account_invalid_whitelist(
+            account_invalid_whitelist
+        )
 
     def account_invalid(self, _: NotificationRule) -> CollectorSample | None:
         accounts = self._accounts()
         invalid = [
             account
             for account in accounts
-            if _status_key(account.get("availability_status")) in {
-                "banned",
-                "disabled",
-                "expired",
-                "invalid",
-                "unavailable",
-            }
-            or account.get("is_available") is False
+            if is_account_invalid_for_alert(account, self.account_invalid_whitelist)
         ]
         return _count_sample(invalid, accounts, "invalid_accounts")
 
@@ -407,6 +416,105 @@ def _count_sample(matches: list[dict], source: list[dict], key: str) -> Collecto
             "total_count": len(source),
         },
     )
+
+
+def normalize_account_invalid_whitelist(
+    whitelist: AccountInvalidWhitelist | object | None,
+) -> AccountInvalidWhitelist:
+    if whitelist is None:
+        return {"ids": frozenset(), "names": frozenset(), "emails": frozenset()}
+    if isinstance(whitelist, dict):
+        return {
+            "ids": frozenset(_normalized_text_items(whitelist.get("ids"))),
+            "names": frozenset(_normalized_text_items(whitelist.get("names"))),
+            "emails": frozenset(_normalized_text_items(whitelist.get("emails"))),
+        }
+    return {
+        "ids": frozenset(_normalized_text_items(getattr(whitelist, "ids", ()))),
+        "names": frozenset(_normalized_text_items(getattr(whitelist, "names", ()))),
+        "emails": frozenset(_normalized_text_items(getattr(whitelist, "emails", ()))),
+    }
+
+
+def is_account_invalid_for_alert(
+    account: dict,
+    whitelist: AccountInvalidWhitelist | object | None = None,
+) -> bool:
+    if _account_matches_invalid_whitelist(
+        account,
+        normalize_account_invalid_whitelist(whitelist),
+    ):
+        return False
+    return _account_is_invalid(account)
+
+
+def _account_is_invalid(account: dict) -> bool:
+    return (
+        _status_key(account.get("availability_status"))
+        in {"banned", "disabled", "expired", "invalid", "unavailable"}
+        or account.get("is_available") is False
+    )
+
+
+def _account_matches_invalid_whitelist(
+    account: dict,
+    whitelist: AccountInvalidWhitelist,
+) -> bool:
+    if not any(whitelist.values()):
+        return False
+    account_id = _normalized_optional_text(account.get("id"))
+    if account_id and account_id in whitelist["ids"]:
+        return True
+    account_name = _normalized_optional_text(account.get("name"))
+    if account_name and account_name in whitelist["names"]:
+        return True
+    account_email = _normalized_optional_text(account.get("email"))
+    if account_email and account_email in whitelist["emails"]:
+        return True
+    raw = account.get("raw") if isinstance(account.get("raw"), dict) else {}
+    for field_name in ("id", "account_id", "openai_account_id"):
+        raw_id = _normalized_optional_text(raw.get(field_name))
+        if raw_id and raw_id in whitelist["ids"]:
+            return True
+    for field_name in ("name", "account_name"):
+        raw_name = _normalized_optional_text(raw.get(field_name))
+        if raw_name and raw_name in whitelist["names"]:
+            return True
+    for field_name in (
+        "email",
+        "account_email",
+        "login_email",
+        "account",
+        "username",
+    ):
+        raw_email = _normalized_optional_text(raw.get(field_name))
+        if raw_email and raw_email in whitelist["emails"]:
+            return True
+    return False
+
+
+def _normalized_text_items(values: object) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        iterable = values.split(",")
+    else:
+        try:
+            iterable = list(values)  # type: ignore[arg-type]
+        except TypeError:
+            iterable = [values]
+    normalized = []
+    for value in iterable:
+        text = _normalized_optional_text(value)
+        if text:
+            normalized.append(text)
+    return tuple(normalized)
+
+
+def _normalized_optional_text(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    return str(value).strip().lower()
 
 
 def _capacity_count_sample(

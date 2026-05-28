@@ -376,14 +376,33 @@ class FakeRotationSub2API:
                 200,
                 {"code": 0, "message": "success", "data": {"id": 101, "email": json["email"]}},
             )
-        if method == "PUT" and path == "/api/v1/admin/users/101":
+        if method == "PUT" and path.startswith("/api/v1/admin/users/"):
+            user_id_value = path.split("/")[5]
+            try:
+                user_id = int(user_id_value)
+            except ValueError:
+                user_id = user_id_value
             self.set_user_group_calls.append(
                 {
-                    "user_id": 101,
+                    "user_id": user_id,
                     "group_id": json["group_id"],
                     "allowed_groups": json["allowed_groups"],
                 }
             )
+            group_name = next(
+                (
+                    str(group.get("name") or "")
+                    for group in self.groups
+                    if str(group.get("id")) == str(json["group_id"])
+                ),
+                "",
+            )
+            for user in self.users:
+                if str(user.get("id")) == str(user_id):
+                    user["group_id"] = json["group_id"]
+                    user["group_name"] = group_name
+                    user["allowed_groups"] = list(json["allowed_groups"])
+                    break
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
             self.generate_auth_url_calls += 1
@@ -3054,6 +3073,8 @@ def test_group_migration_moves_direct_source_users_and_all_keys(client) -> None:
     assert payload["run_kind"] == "manual"
     assert payload["tag"] == "manual_group_migration"
     assert payload["status"] == "moved"
+    assert payload["config"]["mode"] == "move"
+    assert payload["config"]["target_direct_user_count_before"] == 0
     assert len(payload["moved"]) == 2
     assert payload["moved"][0]["user_id"] == 202
     assert payload["moved"][1]["user_id"] == 101
@@ -3072,7 +3093,7 @@ def test_group_migration_moves_direct_source_users_and_all_keys(client) -> None:
     assert len(runs[0].moved) == 2
 
 
-def test_group_migration_ignores_allowed_groups_without_direct_source_group(client) -> None:
+def test_group_migration_moves_users_with_source_group_keys_without_direct_group(client) -> None:
     backend = FakeRotationSub2API()
     backend.users = [
         {
@@ -3081,10 +3102,22 @@ def test_group_migration_ignores_allowed_groups_without_direct_source_group(clie
             "name": "allowed-only@example.com",
             "status": "active",
             "allowed_groups": [11, 22],
+        },
+        {
+            "id": 505,
+            "email": "target-existing@example.com",
+            "name": "target-existing@example.com",
+            "status": "active",
+            "group_id": 22,
+            "group_name": "rotation-high",
         }
     ]
     backend.user_api_keys[404] = [
         {"id": "key-404", "name": "allowed-key", "group_id": 11},
+        {"id": "key-404-extra", "name": "extra-key", "group_id": 33},
+    ]
+    backend.user_api_keys[505] = [
+        {"id": "key-505-target", "name": "target-key", "group_id": 22},
     ]
     login(client)
     save_operational_snapshots(backend)
@@ -3095,16 +3128,33 @@ def test_group_migration_ignores_allowed_groups_without_direct_source_group(clie
             json={
                 "source_group_id": 11,
                 "target_group_id": 22,
-                "reason": "do not infer from allowed groups",
+                "reason": "move by source key route",
             },
         )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "empty"
-    assert payload["moved"] == []
+    assert payload["status"] == "moved"
+    assert payload["config"]["mode"] == "merge"
+    assert payload["config"]["target_direct_user_count_before"] == 1
+    assert len(payload["moved"]) == 1
+    assert payload["moved"][0]["user_id"] == 404
+    assert payload["moved"][0]["migrated_keys"] == 2
+    assert payload["moved"][0]["metadata"]["source_match"] == "api_key_route"
+    assert payload["moved"][0]["metadata"]["source_api_key_count"] == 1
+    assert next(user for user in backend.users if user["id"] == 404)["group_id"] == 22
+    assert next(user for user in backend.users if user["id"] == 505)["group_id"] == 22
+    assert backend.user_api_keys[505] == [
+        {"id": "key-505-target", "name": "target-key", "group_id": 22},
+    ]
     assert backend.replace_calls == []
-    assert backend.api_key_group_calls == []
+    assert backend.set_user_group_calls == [
+        {"user_id": 404, "group_id": 22, "allowed_groups": [22]}
+    ]
+    assert backend.api_key_group_calls == [
+        {"key_id": "key-404", "group_id": 22},
+        {"key_id": "key-404-extra", "group_id": 22},
+    ]
 
 
 def test_group_migration_rejects_same_source_and_target(client) -> None:

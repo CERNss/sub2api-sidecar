@@ -377,6 +377,35 @@ def test_sub2api_collectors_account_signals() -> None:
     assert collectors.platform_key_expiry(_rule()).value >= 0
 
 
+def test_sub2api_collectors_account_invalid_whitelist_suppresses_only_invalid() -> None:
+    collectors = Sub2APINotificationCollectors(
+        _FakeSub2APIClient(),
+        account_invalid_whitelist={"ids": frozenset({"acct-1"})},
+    )
+
+    assert collectors.account_invalid(_rule()).value == 0
+    assert collectors.account_rate_limited(_rule()).value == 1
+    assert collectors.account_reauth_needed(_rule()).value == 1
+
+
+def test_sub2api_collectors_account_invalid_whitelist_matches_raw_email() -> None:
+    class _RawEmailClient(_FakeSub2APIClient):
+        def list_openai_accounts(self):
+            accounts = super().list_openai_accounts()
+            accounts[0]["raw"] = {
+                **accounts[0]["raw"],
+                "login_email": "Manual@Example.com",
+            }
+            return accounts
+
+    collectors = Sub2APINotificationCollectors(
+        _RawEmailClient(),
+        account_invalid_whitelist={"emails": frozenset({"manual@example.com"})},
+    )
+
+    assert collectors.account_invalid(_rule()).value == 0
+
+
 def test_sub2api_collectors_group_capacity_full_counts_grouped_capacity() -> None:
     class _FullGroupClient(_FakeSub2APIClient):
         def list_openai_accounts(self):
@@ -604,6 +633,22 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
     assert cost_sample.value == 100
     assert error_sample is not None
     assert error_sample.value == 100
+
+
+def test_operational_data_collector_applies_account_invalid_whitelist(client) -> None:
+    collector = OperationalDataCollector(
+        client=_FakeSub2APIClient(),
+        store=main.get_flow_store(),
+        account_invalid_whitelist={"ids": frozenset({"acct-1"})},
+    )
+
+    collector.collect(now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc))
+
+    latest = main.get_flow_store().get_latest_operational_metric_sample("account_invalid")
+    assert latest is not None
+    assert latest.value == 0
+    assert latest.snapshot is not None
+    assert latest.snapshot["invalid_accounts"] == []
 
 
 def test_admin_cost_spike_requires_cost_fields_not_request_fallback() -> None:
