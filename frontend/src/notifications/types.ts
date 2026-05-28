@@ -71,10 +71,31 @@ export type NotificationRule = {
   includeSnapshot: boolean;
 };
 
+export type AccountAlertWhitelist = {
+  ids: string[];
+  names: string[];
+  emails: string[];
+};
+
+export type GroupAlertWhitelist = {
+  ids: string[];
+  names: string[];
+};
+
 export type NotificationSettings = {
   webhooks: NotificationWebhook[];
   rules: NotificationRule[];
+  account_alert_whitelist: AccountAlertWhitelist;
+  group_alert_whitelist: GroupAlertWhitelist;
 };
+
+export function makeEmptyAccountAlertWhitelist(): AccountAlertWhitelist {
+  return { ids: [], names: [], emails: [] };
+}
+
+export function makeEmptyGroupAlertWhitelist(): GroupAlertWhitelist {
+  return { ids: [], names: [] };
+}
 
 export type NotificationPlaceholder = {
   value: string;

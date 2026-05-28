@@ -15,9 +15,13 @@ from app.models.operational_data import (
 )
 from app.services.notification_collector import (
     LOCAL_TIMEZONE,
-    AccountInvalidWhitelist,
+    AccountAlertWhitelist,
+    GroupAlertWhitelist,
     CollectorNoData,
     _account_capacity,
+    group_matches_alert_whitelist,
+    normalize_account_alert_whitelist,
+    normalize_group_alert_whitelist,
     _capacity_count_sample,
     _capacity_is_full,
     _count_sample,
@@ -72,14 +76,24 @@ class OperationalDataCollector:
         timezone_name: str = LOCAL_TIMEZONE,
         source_key_prefix: str = "",
         metric_key_prefix: str = "",
-        account_invalid_whitelist: AccountInvalidWhitelist | object | None = None,
+        alert_whitelist: dict | Callable[[], dict | None] | None = None,
     ) -> None:
         self.client = client
         self.store = store
         self.timezone_name = timezone_name
         self.source_key_prefix = source_key_prefix
         self.metric_key_prefix = metric_key_prefix
-        self.account_invalid_whitelist = account_invalid_whitelist
+        self.alert_whitelist = alert_whitelist
+
+    def _resolve_alert_whitelist(self) -> tuple[AccountAlertWhitelist, GroupAlertWhitelist]:
+        value = self.alert_whitelist
+        if callable(value):
+            value = value()
+        raw = value if isinstance(value, dict) else {}
+        return (
+            normalize_account_alert_whitelist(raw.get("account")),
+            normalize_group_alert_whitelist(raw.get("group")),
+        )
 
     def collect(self, *, now: datetime | None = None) -> OperationalDataCollectionResult:
         started_at = now or datetime.now(timezone.utc)
@@ -478,19 +492,26 @@ class OperationalDataCollector:
             for sample in collected:
                 add_sample(metric_key, sample)
 
+        # Whitelists only suppress the "known/intentional state" alerts: account_invalid
+        # (manually disabled accounts) and group_capacity_full (intentionally full groups).
+        # Every other signal reflects real anomalies and is never whitelisted.
+        account_whitelist, group_whitelist = self._resolve_alert_whitelist()
+
         if accounts is not None:
             add(
                 "account_invalid",
                 lambda: _account_invalid_sample(
-                    accounts,
-                    account_invalid_whitelist=self.account_invalid_whitelist,
+                    accounts, account_invalid_whitelist=account_whitelist
                 ),
             )
             add("account_rate_limited", lambda: _account_rate_limited_sample(accounts))
             add("account_reauth_needed", lambda: _account_reauth_needed_sample(accounts))
             add("account_capacity_high", lambda: _account_capacity_high_sample(accounts))
             add("account_capacity_full", lambda: _account_capacity_full_sample(accounts))
-            add("group_capacity_full", lambda: _group_capacity_full_sample(accounts))
+            add(
+                "group_capacity_full",
+                lambda: _group_capacity_full_sample(accounts, group_whitelist=group_whitelist),
+            )
             add("account_quota_low", lambda: _account_quota_low_sample(accounts))
             add("platform_key_health", lambda: _platform_key_health_sample(accounts))
             add("platform_key_quota", lambda: _account_quota_low_sample(accounts))
@@ -953,7 +974,7 @@ def _usage_log_created_at(item: dict[str, Any], local_tz: tzinfo | None) -> date
 def _account_invalid_sample(
     accounts: list[dict[str, Any]],
     *,
-    account_invalid_whitelist: AccountInvalidWhitelist | object | None = None,
+    account_invalid_whitelist: AccountAlertWhitelist | object | None = None,
 ) -> CollectorSample:
     invalid = [
         account
@@ -1018,7 +1039,11 @@ def _account_capacity_full_sample(accounts: list[dict[str, Any]]) -> CollectorSa
     return _capacity_count_sample(full, len(measurable), "full_accounts")
 
 
-def _group_capacity_full_sample(accounts: list[dict[str, Any]]) -> CollectorSample:
+def _group_capacity_full_sample(
+    accounts: list[dict[str, Any]],
+    *,
+    group_whitelist: GroupAlertWhitelist | None = None,
+) -> CollectorSample:
     grouped: dict[str, dict[str, Any]] = {}
     for account in accounts:
         capacity = _account_capacity(account)
@@ -1042,9 +1067,14 @@ def _group_capacity_full_sample(accounts: list[dict[str, Any]]) -> CollectorSamp
             group["current_capacity"] += used
             group["capacity"] += limit
             group["account_count"] += 1
-    measurable = [
+    candidate_groups = [
         group
         for group in grouped.values()
+        if not (group_whitelist and group_matches_alert_whitelist(group, group_whitelist))
+    ]
+    measurable = [
+        group
+        for group in candidate_groups
         if _number(group, "capacity") is not None and _number(group, "capacity") > 0
     ]
     if not measurable:

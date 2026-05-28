@@ -21,7 +21,11 @@ from app.models.flow import (
     ProvisionFlow,
 )
 from app.models.rotation import RotationPoolGroup, RotationPoolKind
-from app.models.schemas import ProvisionCompleteResponse, ProvisionStartResponse
+from app.models.schemas import (
+    ProvisionApiKeyStartResponse,
+    ProvisionCompleteResponse,
+    ProvisionStartResponse,
+)
 from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
@@ -214,6 +218,120 @@ class ProvisioningService:
             oauth_account_id=None,
             oauth_url=flow.oauth_url or "",
             oauth_redirect_uri=self._oauth_redirect_uri_from_url(flow.oauth_url),
+        )
+
+    def start_apikey_flow_for_upstream(
+        self,
+        *,
+        name: str,
+        api_base_url: str,
+        api_key: str,
+        upstream_id: str,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> ProvisionApiKeyStartResponse:
+        client = sub2api_client or self.sub2api_client
+        logger.info("Starting API key provisioning flow for name=%s", name)
+        flow_id = str(uuid.uuid4())
+        state = secrets.token_urlsafe(24)
+        self._record_event(
+            flow_id=flow_id,
+            event_type=ProvisionEventType.start_requested,
+            status=ProvisionEventStatus.info,
+            message="API key provisioning flow requested",
+            details={"name": name},
+        )
+        try:
+            group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(
+                name,
+                sub2api_client=client,
+            )
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.group_resolved,
+                status=ProvisionEventStatus.succeeded,
+                message="Target group assignment resolved",
+                details={
+                    "group_id": group_id,
+                    "assignment_mode": assignment_mode.value,
+                    "reason": assignment_reason,
+                },
+            )
+            account, account_action = self._resolve_apikey_account(
+                name=name,
+                api_base_url=api_base_url,
+                api_key=api_key,
+                group_id=group_id,
+                sub2api_client=client,
+            )
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.account_created,
+                status=ProvisionEventStatus.succeeded,
+                message="OpenAI API key account configured",
+                details={
+                    "account_id": account["id"],
+                    "group_id": group_id,
+                    "action": account_action,
+                },
+            )
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.account_bound,
+                status=ProvisionEventStatus.succeeded,
+                message="OpenAI API key account group assignment resolved",
+                details={
+                    "account_id": account["id"],
+                    "group_id": group_id,
+                    "action": account_action,
+                },
+            )
+        except Exception as exc:
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.failed,
+                status=ProvisionEventStatus.failed,
+                message="API key provisioning flow failed during start",
+                details={"error": str(exc)},
+            )
+            raise
+
+        flow = ProvisionFlow(
+            flow_id=flow_id,
+            upstream_id=upstream_id,
+            email=name,
+            group_id=group_id,
+            state=state,
+            status=FlowStatus.completed,
+            assignment_mode=assignment_mode,
+            assignment_reason=assignment_reason,
+            account_name=name,
+            oauth_url=None,
+            oauth_session_id=None,
+            oauth_account_id=account["id"],
+        )
+        self.flow_store.save(flow)
+        self._record_event(
+            flow_id=flow_id,
+            event_type=ProvisionEventType.completed,
+            status=ProvisionEventStatus.succeeded,
+            message="API key provisioning flow completed",
+            details={"account_id": account["id"], "group_id": group_id},
+        )
+        logger.info(
+            "API key provisioning flow completed | flow_id=%s | account_id=%s",
+            flow_id,
+            account["id"],
+        )
+        return ProvisionApiKeyStartResponse(
+            upstream_id=flow.upstream_id,
+            flow_id=flow.flow_id,
+            name=name,
+            group_id=group_id,
+            assignment_mode=assignment_mode.value,
+            assignment_reason=assignment_reason,
+            account_name=name,
+            status=flow.status.value,
+            account_id=account["id"],
         )
 
     def complete_oauth_from_callback_url(self, callback_url: str) -> ProvisionCompleteResponse:
@@ -471,6 +589,60 @@ class ProvisioningService:
         account = self._existing_account_payload(existing, email)
         client.ensure_default_scheduled_test_plan(account["id"])
         return account, "already_bound"
+
+    def _resolve_apikey_account(
+        self,
+        *,
+        name: str,
+        api_base_url: str,
+        api_key: str,
+        group_id: object,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> tuple[dict[str, object], str]:
+        client = sub2api_client or self.sub2api_client
+        existing = self._find_apikey_account(name, sub2api_client=client)
+        if existing is None:
+            account = client.create_openai_account_from_apikey(
+                name=name,
+                base_url=api_base_url,
+                api_key=api_key,
+                group_id=group_id,
+            )
+            client.ensure_default_scheduled_test_plan(account["id"])
+            return account, "created"
+
+        account_id = existing["id"]
+        account = client.configure_existing_openai_apikey_account(
+            account=existing,
+            name=name,
+            base_url=api_base_url,
+            api_key=api_key,
+            group_id=group_id,
+        )
+        if not self._account_has_group(existing, group_id):
+            client.bind_account_to_group(account_id, group_id)
+            client.ensure_default_scheduled_test_plan(account["id"])
+            return account, "configured_and_bound"
+        client.ensure_default_scheduled_test_plan(account["id"])
+        return account, "configured_existing"
+
+    def _find_apikey_account(
+        self,
+        name: str,
+        *,
+        sub2api_client: Sub2APIClient | None = None,
+    ) -> dict[str, object] | None:
+        client = sub2api_client or self.sub2api_client
+        candidate = self._find_oauth_account(name, sub2api_client=client)
+        if candidate is None:
+            return None
+        # Only reuse an existing account if it is already an API key account; never
+        # reconfigure (and clobber) an OAuth account that happens to share the name.
+        expected_type = str(client.provisioning_defaults.account_apikey_type).strip().lower()
+        account_type = str(candidate.get("account_type") or "").strip().lower()
+        if account_type and account_type != expected_type:
+            return None
+        return candidate
 
     def _configure_existing_oauth_account(
         self,

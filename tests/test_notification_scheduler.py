@@ -10,6 +10,8 @@ import requests
 
 import app.main as main
 from app.models.notification import (
+    AccountAlertWhitelist,
+    GroupAlertWhitelist,
     CollectorSample,
     NotificationOperator,
     NotificationRule,
@@ -635,20 +637,158 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
     assert error_sample.value == 100
 
 
-def test_operational_data_collector_applies_account_invalid_whitelist(client) -> None:
+def _latest_value(metric_key: str) -> float | None:
+    sample = main.get_flow_store().get_latest_operational_metric_sample(metric_key)
+    return sample.value if sample is not None else None
+
+
+def test_account_whitelist_suppresses_only_account_invalid(client) -> None:
+    # acct-1 is both disabled (invalid) and capacity-full (4/4).
     collector = OperationalDataCollector(
         client=_FakeSub2APIClient(),
         store=main.get_flow_store(),
-        account_invalid_whitelist={"ids": frozenset({"acct-1"})},
+        alert_whitelist={"account": {"ids": frozenset({"acct-1"})}},
     )
 
     collector.collect(now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc))
 
-    latest = main.get_flow_store().get_latest_operational_metric_sample("account_invalid")
-    assert latest is not None
-    assert latest.value == 0
-    assert latest.snapshot is not None
-    assert latest.snapshot["invalid_accounts"] == []
+    # The whitelist suppresses account_invalid only.
+    assert _latest_value("account_invalid") == 0
+    # Every other account-class signal still reflects the whitelisted account as-is.
+    assert _latest_value("account_capacity_full") == 1
+    assert _latest_value("account_rate_limited") == 1
+    assert _latest_value("account_reauth_needed") == 1
+
+
+def test_group_whitelist_excludes_full_group(client) -> None:
+    class _FullGroupClient(_FakeSub2APIClient):
+        def list_openai_accounts(self):
+            return [
+                {
+                    "id": "a1",
+                    "name": "A",
+                    "current_concurrency": 5,
+                    "concurrency": 5,
+                    "group_ids": ["g1"],
+                    "group_names": ["Group One"],
+                },
+                {
+                    "id": "a2",
+                    "name": "B",
+                    "current_concurrency": 6,
+                    "concurrency": 6,
+                    "group_ids": ["g2"],
+                    "group_names": ["Group Two"],
+                },
+            ]
+
+    baseline = OperationalDataCollector(client=_FullGroupClient(), store=main.get_flow_store())
+    baseline.collect(now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc))
+    assert _latest_value("group_capacity_full") == 2
+
+    filtered = OperationalDataCollector(
+        client=_FullGroupClient(),
+        store=main.get_flow_store(),
+        alert_whitelist={"group": {"names": ["Group One"]}},
+    )
+    filtered.collect(now=datetime(2026, 5, 10, 13, 0, tzinfo=timezone.utc))
+    assert _latest_value("group_capacity_full") == 1
+
+
+def test_admin_aggregates_ignore_whitelists(client) -> None:
+    # Ops/dashboard aggregates report true infra state and must NOT honor whitelists.
+    class _UnhealthyGroupClient(_FakeSub2APIClient):
+        def list_groups(self, platform=None):
+            return [{"id": "g1", "name": "Group One", "status": "disabled"}]
+
+    collector = OperationalDataCollector(
+        client=_UnhealthyGroupClient(),
+        store=main.get_flow_store(),
+        alert_whitelist={
+            "account": {"ids": frozenset({"acct-1"})},
+            "group": {"ids": frozenset({"g1"})},
+        },
+    )
+    collector.collect(now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc))
+
+    # 3 problem accounts + 1 problem group, none excluded by the whitelists.
+    assert _latest_value("admin_ops_alert") == 4
+    assert _latest_value("admin_group_channel") == 1
+
+
+def test_alert_whitelist_resolves_callable_once_per_collect(client) -> None:
+    calls = {"count": 0}
+
+    def _provider():
+        calls["count"] += 1
+        return {"account": {"ids": frozenset({"acct-1"})}}
+
+    collector = OperationalDataCollector(
+        client=_FakeSub2APIClient(),
+        store=main.get_flow_store(),
+        alert_whitelist=_provider,
+    )
+
+    collector.collect(now=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc))
+
+    assert _latest_value("account_invalid") == 0
+    assert calls["count"] == 1
+
+
+def test_notification_settings_cleans_and_round_trips_whitelists() -> None:
+    settings = NotificationSettings.model_validate(
+        {
+            "webhooks": [],
+            "rules": [],
+            "account_alert_whitelist": {
+                "ids": [" acct-1 ", "acct-1", "", "acct-2"],
+                "names": "  ",
+                "emails": ["ops@example.com"],
+            },
+            "group_alert_whitelist": {"ids": ["g1", "g1"], "names": ["Pool A"]},
+        }
+    )
+
+    assert settings.account_alert_whitelist.ids == ["acct-1", "acct-2"]
+    assert settings.account_alert_whitelist.names == []
+    assert settings.account_alert_whitelist.emails == ["ops@example.com"]
+    assert settings.group_alert_whitelist.ids == ["g1"]
+    assert settings.group_alert_whitelist.names == ["Pool A"]
+
+    restored = NotificationSettings.model_validate_json(
+        settings.model_dump_json(by_alias=True)
+    )
+    assert restored.account_alert_whitelist.ids == ["acct-1", "acct-2"]
+    assert restored.group_alert_whitelist.ids == ["g1"]
+
+
+def test_notification_settings_defaults_to_empty_whitelists() -> None:
+    settings = NotificationSettings.model_validate({"webhooks": [], "rules": []})
+
+    assert settings.account_alert_whitelist == AccountAlertWhitelist()
+    assert settings.group_alert_whitelist == GroupAlertWhitelist()
+
+
+def test_alert_whitelist_provider_merges_env_and_stored(client) -> None:
+    store = main.get_flow_store()
+    provider = main._alert_whitelist_provider(store, main.get_settings())
+
+    base = provider()
+    store.save_notification_settings(
+        NotificationSettings.model_validate(
+            {
+                "webhooks": [],
+                "rules": [],
+                "account_alert_whitelist": {"ids": ["acct-9"], "emails": ["x@example.com"]},
+                "group_alert_whitelist": {"names": ["Pool Z"]},
+            }
+        )
+    )
+
+    merged = provider()
+    assert merged["account"]["ids"] == base["account"]["ids"] + ["acct-9"]
+    assert "x@example.com" in merged["account"]["emails"]
+    assert merged["group"]["names"] == base["group"]["names"] + ["Pool Z"]
 
 
 def test_admin_cost_spike_requires_cost_fields_not_request_fallback() -> None:

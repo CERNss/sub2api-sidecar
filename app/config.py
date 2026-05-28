@@ -113,6 +113,7 @@ class Sub2APIProvisioningDefaults:
     account_provider: str = "openai"
     account_platform: str = "openai"
     account_type: str = "oauth"
+    account_apikey_type: str = "api_key"
     account_ws_mode: str = "context_pool"
     account_concurrency: int = 5
     account_temporary_unschedulable: bool = True
@@ -141,6 +142,12 @@ class AccountInvalidAlertWhitelist:
 
 
 @dataclass(frozen=True)
+class GroupAlertWhitelist:
+    ids: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str
     app_base_url: str
@@ -156,6 +163,7 @@ class Settings:
     account_invalid_alert_whitelist: AccountInvalidAlertWhitelist = (
         AccountInvalidAlertWhitelist()
     )
+    group_alert_whitelist: GroupAlertWhitelist = GroupAlertWhitelist()
 
     @property
     def default_sub2api_upstream(self) -> Sub2APIUpstream:
@@ -211,6 +219,7 @@ class Settings:
         values["account_invalid_alert_whitelist"] = _account_invalid_alert_whitelist_setting(
             config
         )
+        values["group_alert_whitelist"] = _group_alert_whitelist_setting(config)
         values["app_access_key_ttl_hours"] = _int_setting(
             config,
             "APP_ACCESS_KEY_TTL_HOURS",
@@ -417,6 +426,12 @@ def _provisioning_defaults_setting(config: Mapping[str, Any]) -> Sub2APIProvisio
             "SUB2API_ACCOUNT_TYPE",
             ("sub2api", "provisioning_defaults", "account_type"),
             default="oauth",
+        ),
+        account_apikey_type=_string_setting(
+            config,
+            "SUB2API_ACCOUNT_APIKEY_TYPE",
+            ("sub2api", "provisioning_defaults", "account_apikey_type"),
+            default="api_key",
         ),
         account_ws_mode=_string_setting(
             config,
@@ -641,6 +656,23 @@ def _account_invalid_alert_whitelist_setting(
             config,
             "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_EMAILS",
             ("notifications", "account_invalid_whitelist", "emails"),
+        ),
+    )
+
+
+def _group_alert_whitelist_setting(
+    config: Mapping[str, Any],
+) -> GroupAlertWhitelist:
+    return GroupAlertWhitelist(
+        ids=_string_list_setting(
+            config,
+            "NOTIFICATION_GROUP_WHITELIST_IDS",
+            ("notifications", "group_whitelist", "ids"),
+        ),
+        names=_string_list_setting(
+            config,
+            "NOTIFICATION_GROUP_WHITELIST_NAMES",
+            ("notifications", "group_whitelist", "names"),
         ),
     )
 

@@ -200,6 +200,43 @@ def test_notification_config_round_trip_redacts_secret(client) -> None:
     assert "policy" not in payload
 
 
+def test_notification_config_defaults_include_empty_whitelists(client) -> None:
+    login(client)
+    payload = client.get("/notifications/config").json()
+
+    assert payload["account_alert_whitelist"] == {"ids": [], "names": [], "emails": []}
+    assert payload["group_alert_whitelist"] == {"ids": [], "names": []}
+
+
+def test_notification_config_round_trip_alert_whitelists(client) -> None:
+    login(client)
+    body = {
+        "webhooks": [_webhook_body()],
+        "rules": [_rule_body()],
+        "account_alert_whitelist": {
+            "ids": [" acct-1 ", "acct-1", ""],
+            "names": [],
+            "emails": ["Ops@Example.com"],
+        },
+        "group_alert_whitelist": {"ids": ["g1"], "names": ["Pool A"]},
+    }
+
+    put_payload = client.put("/notifications/config", json=body).json()
+    # Entries are trimmed and de-duplicated; original casing is preserved.
+    assert put_payload["account_alert_whitelist"]["ids"] == ["acct-1"]
+    assert put_payload["account_alert_whitelist"]["emails"] == ["Ops@Example.com"]
+    assert put_payload["group_alert_whitelist"] == {"ids": ["g1"], "names": ["Pool A"]}
+
+    get_payload = client.get("/notifications/config").json()
+    assert get_payload["account_alert_whitelist"]["ids"] == ["acct-1"]
+    assert get_payload["group_alert_whitelist"]["names"] == ["Pool A"]
+
+    stored = main.get_flow_store().get_notification_settings()
+    assert stored is not None
+    assert stored.account_alert_whitelist.ids == ["acct-1"]
+    assert stored.group_alert_whitelist.names == ["Pool A"]
+
+
 def test_notification_config_preserves_redacted_secret_on_writeback(client) -> None:
     login(client)
     body = {

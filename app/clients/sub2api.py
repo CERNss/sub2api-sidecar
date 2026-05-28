@@ -566,6 +566,54 @@ class Sub2APIClient:
         data = self._request("PUT", path, json=payload)
         return {"id": account_id, "name": name, "raw": data}
 
+    def create_openai_account_from_apikey(
+        self,
+        *,
+        name: str,
+        base_url: str,
+        api_key: str,
+        group_id: Any,
+    ) -> dict[str, Any]:
+        payload = self._build_openai_apikey_account_payload(
+            name=name,
+            base_url=base_url,
+            api_key=api_key,
+            group_id=group_id,
+        )
+        data = self._request("POST", self.CREATE_OPENAI_ACCOUNT_PATH, json=payload)
+        body = self._unwrap_data(data)
+        account_id = self._extract_id(
+            body,
+            "id",
+            "account_id",
+            "data.id",
+            "data.account_id",
+            "account.id",
+            "data.account.id",
+        )
+        return {"id": account_id, "name": name, "raw": data}
+
+    def configure_existing_openai_apikey_account(
+        self,
+        *,
+        account: dict[str, Any],
+        name: str,
+        base_url: str,
+        api_key: str,
+        group_id: Any,
+    ) -> dict[str, Any]:
+        account_id = account["id"]
+        payload = self._build_existing_openai_apikey_account_payload(
+            account=account,
+            name=name,
+            base_url=base_url,
+            api_key=api_key,
+            group_id=group_id,
+        )
+        path = self.UPDATE_OPENAI_ACCOUNT_PATH.format(account_id=account_id)
+        data = self._request("PUT", path, json=payload)
+        return {"id": account_id, "name": name, "raw": data}
+
     def bind_account_to_group(self, account_id: Any, group_id: Any) -> dict[str, Any]:
         payload = {"account_id": account_id, "account_ids": [account_id]}
         path = self.BIND_ACCOUNT_TO_GROUP_PATH.format(group_id=group_id)
@@ -703,7 +751,7 @@ class Sub2APIClient:
             "load_factor": None,
             "priority": 1,
             "rate_multiplier": 1,
-            "group_ids": [group_id],
+            "group_ids": [self._coerce_numeric_id(group_id)],
             "expires_at": None,
             "auto_pause_on_expired": True,
         }
@@ -757,7 +805,7 @@ class Sub2APIClient:
             "credentials": credentials,
             "extra": extra,
             "concurrency": self.provisioning_defaults.account_concurrency,
-            "group_ids": [group_id],
+            "group_ids": [self._coerce_numeric_id(group_id)],
         }
         for field_name in (
             "notes",
@@ -771,6 +819,105 @@ class Sub2APIClient:
             if isinstance(raw, dict) and field_name in raw:
                 payload[field_name] = raw[field_name]
         return payload
+
+    def _build_openai_apikey_account_payload(
+        self,
+        *,
+        name: str,
+        base_url: str,
+        api_key: str,
+        group_id: Any,
+    ) -> dict[str, Any]:
+        credentials = self._build_openai_apikey_credentials(
+            api_key=api_key, base_url=base_url
+        )
+        credentials["temp_unschedulable_enabled"] = (
+            self.provisioning_defaults.account_temporary_unschedulable
+        )
+        credentials["temp_unschedulable_rules"] = [
+            self._serialize_rule(rule)
+            for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
+        ]
+        credentials["model_mapping"] = {
+            model_name: model_name
+            for model_name in self.provisioning_defaults.account_model_whitelist
+        }
+        return {
+            "name": name,
+            "notes": "",
+            "provider": self.provisioning_defaults.account_provider,
+            "platform": self.provisioning_defaults.account_platform,
+            "type": self.provisioning_defaults.account_apikey_type,
+            "credentials": credentials,
+            "extra": {},
+            "proxy_id": None,
+            "concurrency": self.provisioning_defaults.account_concurrency,
+            "load_factor": None,
+            "priority": 1,
+            "rate_multiplier": 1,
+            "group_ids": [self._coerce_numeric_id(group_id)],
+            "expires_at": None,
+            "auto_pause_on_expired": True,
+        }
+
+    def _build_existing_openai_apikey_account_payload(
+        self,
+        *,
+        account: dict[str, Any],
+        name: str,
+        base_url: str,
+        api_key: str,
+        group_id: Any,
+    ) -> dict[str, Any]:
+        raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
+        credentials = self._merged_dict_from_account(account, raw, "credentials")
+        extra = self._merged_dict_from_account(account, raw, "extra")
+        credentials.update(self._build_openai_apikey_credentials(api_key=api_key, base_url=base_url))
+        credentials.update(
+            {
+                "temp_unschedulable_enabled": (
+                    self.provisioning_defaults.account_temporary_unschedulable
+                ),
+                "temp_unschedulable_rules": [
+                    self._serialize_rule(rule)
+                    for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
+                ],
+                "model_mapping": {
+                    model_name: model_name
+                    for model_name in self.provisioning_defaults.account_model_whitelist
+                },
+            }
+        )
+        payload: dict[str, Any] = {
+            "name": name,
+            "provider": self.provisioning_defaults.account_provider,
+            "platform": self.provisioning_defaults.account_platform,
+            "type": self.provisioning_defaults.account_apikey_type,
+            "credentials": credentials,
+            "extra": extra,
+            "concurrency": self.provisioning_defaults.account_concurrency,
+            "group_ids": [self._coerce_numeric_id(group_id)],
+        }
+        for field_name in (
+            "notes",
+            "proxy_id",
+            "load_factor",
+            "priority",
+            "rate_multiplier",
+            "expires_at",
+            "auto_pause_on_expired",
+        ):
+            if isinstance(raw, dict) and field_name in raw:
+                payload[field_name] = raw[field_name]
+        return payload
+
+    def _build_openai_apikey_credentials(
+        self, *, api_key: str, base_url: str
+    ) -> dict[str, Any]:
+        credentials: dict[str, Any] = {"api_key": api_key}
+        if base_url not in (None, ""):
+            credentials["base_url"] = base_url
+        return credentials
 
     def _merged_dict_from_account(
         self,

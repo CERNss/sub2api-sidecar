@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class NotificationSeverity(str, Enum):
@@ -92,11 +92,69 @@ class NotificationRule(BaseModel):
     include_snapshot: bool = Field(default=True, alias="includeSnapshot")
 
 
+def _clean_whitelist_entries(value: object) -> list[str]:
+    """Trim, drop empties, and de-duplicate whitelist entries (order-preserving)."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items: list[str] = value.split(",")
+    else:
+        try:
+            items = list(value)  # type: ignore[arg-type]
+        except TypeError:
+            items = [value]  # type: ignore[list-item]
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+class AccountAlertWhitelist(BaseModel):
+    """Accounts excluded from every account-class alert signal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[str] = Field(default_factory=list)
+    names: list[str] = Field(default_factory=list)
+    emails: list[str] = Field(default_factory=list)
+
+    @field_validator("ids", "names", "emails", mode="before")
+    @classmethod
+    def _clean(cls, value: object) -> list[str]:
+        return _clean_whitelist_entries(value)
+
+
+class GroupAlertWhitelist(BaseModel):
+    """Groups excluded from every group-class alert signal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[str] = Field(default_factory=list)
+    names: list[str] = Field(default_factory=list)
+
+    @field_validator("ids", "names", mode="before")
+    @classmethod
+    def _clean(cls, value: object) -> list[str]:
+        return _clean_whitelist_entries(value)
+
+
 class NotificationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     webhooks: list[NotificationWebhook] = Field(default_factory=list)
     rules: list[NotificationRule] = Field(default_factory=list)
+    account_alert_whitelist: AccountAlertWhitelist = Field(
+        default_factory=AccountAlertWhitelist
+    )
+    group_alert_whitelist: GroupAlertWhitelist = Field(
+        default_factory=GroupAlertWhitelist
+    )
 
 
 class NotificationDeliveryStatus(str, Enum):

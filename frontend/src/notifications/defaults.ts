@@ -3,6 +3,8 @@ import {
   NotificationSettings,
   NotificationWebhook,
   defaultWebhookPayloadFields,
+  makeEmptyAccountAlertWhitelist,
+  makeEmptyGroupAlertWhitelist,
   notificationSignalByKey
 } from "./types";
 
@@ -26,7 +28,9 @@ export function makeDefaultWebhook(): NotificationWebhook {
 export function makeDefaultSettings(): NotificationSettings {
   return {
     webhooks: [makeDefaultWebhook()],
-    rules: []
+    rules: [],
+    account_alert_whitelist: makeEmptyAccountAlertWhitelist(),
+    group_alert_whitelist: makeEmptyGroupAlertWhitelist()
   };
 }
 
