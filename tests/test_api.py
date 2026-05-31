@@ -3567,6 +3567,225 @@ def test_key_transfer_accepts_explicit_non_admin_source_user(client) -> None:
     assert payload["items"][0]["target_group_id"] == 17
 
 
+def test_key_transfer_replaces_group_with_target_user_first_allowed_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.extend(
+        [
+            {
+                "id": 2,
+                "name": "target-first",
+                "type": "standard",
+                "platform": "openai",
+                "status": "active",
+                "is_exclusive": True,
+            },
+            {
+                "id": 17,
+                "name": "target-current",
+                "type": "standard",
+                "platform": "openai",
+                "status": "active",
+                "is_exclusive": True,
+            },
+        ]
+    )
+    backend.users = [
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+        },
+        {
+            "id": 2,
+            "email": "target@example.com",
+            "name": "Target",
+            "status": "active",
+            "current_group_id": 17,
+            "allowed_groups": [2, 11, 17],
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": "migrate-first-group",
+            "user_id": 1,
+            "key": "sk-migrate-first-group",
+            "name": "rotom:prod:codex:v1:target@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"source_user_id": 1, "key_ids": ["migrate-first-group"], "dry_run": False},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["moved_count"] == 1
+    assert payload["items"][0]["target_user_id"] == 2
+    assert payload["items"][0]["target_group_id"] == 2
+    assert backend.api_key_owner_calls == [
+        {
+            "key_id": "migrate-first-group",
+            "user_id": 2,
+            "group_id": 2,
+            "quota": 0.0,
+            "reset_quota": True,
+        }
+    ]
+
+
+def test_key_transfer_replaces_group_with_camelcase_first_allowed_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.extend(
+        [
+            {
+                "id": 2,
+                "name": "target-first",
+                "type": "standard",
+                "platform": "openai",
+                "status": "active",
+                "is_exclusive": True,
+            },
+            {
+                "id": 17,
+                "name": "target-current",
+                "type": "standard",
+                "platform": "openai",
+                "status": "active",
+                "is_exclusive": True,
+            },
+        ]
+    )
+    backend.users = [
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 11,
+        },
+        {
+            "id": 2,
+            "email": "target@example.com",
+            "name": "Target",
+            "status": "active",
+            "currentGroup": {"groupId": 17, "groupName": "target-current"},
+            "allowedGroups": [
+                {"groupId": 2, "groupName": "target-first"},
+                {"groupId": 11, "groupName": "rotation-low"},
+                {"groupId": 17, "groupName": "target-current"},
+            ],
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": "migrate-camel-group",
+            "user_id": 1,
+            "key": "sk-migrate-camel-group",
+            "name": "rotom:prod:codex:v1:target@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"source_user_id": 1, "key_ids": ["migrate-camel-group"], "dry_run": False},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["moved_count"] == 1
+    assert payload["items"][0]["target_user_id"] == 2
+    assert payload["items"][0]["target_group_id"] == 2
+    assert backend.api_key_owner_calls == [
+        {
+            "key_id": "migrate-camel-group",
+            "user_id": 2,
+            "group_id": 2,
+            "quota": 0.0,
+            "reset_quota": True,
+        }
+    ]
+
+
+def test_key_transfer_ignores_source_group_when_target_first_group_differs(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 17,
+            "name": "target-second",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.users = [
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 2,
+        },
+        {
+            "id": 2,
+            "email": "target@example.com",
+            "name": "Target",
+            "status": "active",
+            "allowed_groups": [11, 17],
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": "migrate-source-group-not-target",
+            "user_id": 1,
+            "key": "sk-migrate-source-group-not-target",
+            "name": "rotom:prod:codex:v1:target@example.com",
+            "group_id": 2,
+            "quota": 10.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={
+                "source_user_id": 1,
+                "key_ids": ["migrate-source-group-not-target"],
+                "dry_run": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["moved_count"] == 1
+    assert payload["items"][0]["source_group_id"] == 2
+    assert payload["items"][0]["target_group_id"] == 11
+    assert backend.api_key_owner_calls == [
+        {
+            "key_id": "migrate-source-group-not-target",
+            "user_id": 2,
+            "group_id": 11,
+            "quota": 0.0,
+            "reset_quota": True,
+        }
+    ]
+
+
 def test_key_transfer_selected_keys_without_source_falls_back_to_all_users(client) -> None:
     backend = FakeRotationSub2API()
     backend.groups.append(

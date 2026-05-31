@@ -2634,24 +2634,42 @@ class RotationService:
             if not any(self._normalize_key(existing) == self._normalize_key(group_id) for existing in candidate_group_ids):
                 candidate_group_ids.append(group_id)
 
-        group_ids = user.get("group_ids")
-        if isinstance(group_ids, list):
-            for group_id in group_ids:
-                add(group_id)
-        group_id = user.get("current_group_id") or user.get("group_id")
-        add(group_id)
-        raw = user.get("raw")
-        if isinstance(raw, dict):
-            for field_name in ("group_ids", "allowed_groups", "groups"):
-                raw_groups = raw.get(field_name)
+        def add_group_value(value: Any) -> None:
+            if isinstance(value, dict):
+                add(value.get("id") or value.get("group_id") or value.get("groupId"))
+                return
+            add(value)
+
+        def add_group_lists(container: dict[str, Any]) -> None:
+            for field_name in ("group_ids", "groupIds", "allowed_groups", "allowedGroups", "groups"):
+                raw_groups = container.get(field_name)
                 if not isinstance(raw_groups, list):
                     continue
                 for raw_group in raw_groups:
-                    if isinstance(raw_group, dict):
-                        group_id = raw_group.get("id") or raw_group.get("group_id")
-                    else:
-                        group_id = raw_group
-                    add(group_id)
+                    add_group_value(raw_group)
+
+        def add_current_group(container: dict[str, Any]) -> None:
+            for field_name in (
+                "current_group_id",
+                "currentGroupId",
+                "group_id",
+                "groupId",
+                "default_group_id",
+                "defaultGroupId",
+            ):
+                add(container.get(field_name))
+            for field_name in ("current_group", "currentGroup", "group", "default_group", "defaultGroup"):
+                group = container.get(field_name)
+                if isinstance(group, dict):
+                    add_group_value(group)
+
+        raw = user.get("raw")
+        if isinstance(raw, dict):
+            add_group_lists(raw)
+        add_group_lists(user)
+        add_current_group(user)
+        if isinstance(raw, dict):
+            add_current_group(raw)
         return candidate_group_ids
 
     def candidate_group_ids_for_user(self, user: dict[str, Any]) -> list[Any]:
