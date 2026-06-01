@@ -2809,6 +2809,8 @@ function OperatorWorkspace() {
         <CreditControlView
           activeTab={activeCreditTab}
           onTabChange={navigateCreditTab}
+          selectedUpstreamId={effectiveUpstreamId}
+          defaultUpstreamId={upstreams.find((upstream) => upstream.is_default)?.upstream_id ?? upstreams[0]?.upstream_id ?? ""}
           onAuthExpired={handleAuthExpired}
         />
       ) : activeView === "keyTransfer" ? (
@@ -2827,6 +2829,7 @@ function OperatorWorkspace() {
           activeTab={activeOrchestrationTab}
           onTabChange={navigateOrchestrationTab}
           selectedUpstreamId={effectiveUpstreamId}
+          defaultUpstreamId={upstreams.find((upstream) => upstream.is_default)?.upstream_id ?? upstreams[0]?.upstream_id ?? ""}
           onAuthExpired={handleAuthExpired}
         />
       )}
@@ -3427,11 +3430,13 @@ function ExistingOrchestrationView({
   activeTab,
   onTabChange,
   selectedUpstreamId,
+  defaultUpstreamId,
   onAuthExpired
 }: {
   activeTab: OrchestrationTab;
   onTabChange: (tab: OrchestrationTab) => void;
   selectedUpstreamId: string;
+  defaultUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [mode, setMode] = useState<OrchestrationMode>("replace_group");
@@ -4832,6 +4837,8 @@ function ExistingOrchestrationView({
           </form>
         ) : (
           <DynamicOrchestrationView
+            selectedUpstreamId={selectedUpstreamId}
+            defaultUpstreamId={defaultUpstreamId}
             onAuthExpired={onAuthExpired}
             onRunRecorded={() => setRecordsRefreshSignal((value) => value + 1)}
           />
@@ -4896,12 +4903,17 @@ function ExistingOrchestrationView({
 function CreditControlView({
   activeTab,
   onTabChange,
+  selectedUpstreamId,
+  defaultUpstreamId,
   onAuthExpired
 }: {
   activeTab: CreditControlTab;
   onTabChange: (tab: CreditControlTab) => void;
+  selectedUpstreamId: string;
+  defaultUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
+  const defaultOnly = Boolean(defaultUpstreamId && selectedUpstreamId && selectedUpstreamId !== defaultUpstreamId);
   const [filters, setFilters] = useState<CreditUserFilters>({
     window: "1d",
     search: "",
@@ -4990,6 +5002,14 @@ function CreditControlView({
   }
 
   async function loadUsers(nextPage = page) {
+    if (defaultOnly) {
+      setUsers([]);
+      setTotal(0);
+      setAggregates({});
+      setSelectedUserIds([]);
+      setStatus({ message: "余额管理当前只绑定默认 Sub2API 上游。", tone: "info" });
+      return;
+    }
     setLoadingUsers(true);
     try {
       const payload = await requestJson<CreditControlUsersPayload>(
@@ -5019,6 +5039,10 @@ function CreditControlView({
   }
 
   async function loadSegmentOverview() {
+    if (defaultOnly) {
+      setSegmentOverviewCounts({});
+      return;
+    }
     try {
       const payload = await requestJson<UsageSegmentationPayload>(
         "/api/usage-segmentation/users?limit=1",
@@ -5034,6 +5058,10 @@ function CreditControlView({
   }
 
   async function loadRuntimeSettings() {
+    if (defaultOnly) {
+      setRuntimeSettings({ enabled: false });
+      return;
+    }
     try {
       const payload = await requestJson<CreditControlRuntimeSettingsPayload>(
         "/api/credit-control/settings",
@@ -5049,6 +5077,10 @@ function CreditControlView({
   }
 
   async function saveRuntimeSettings(enabled: boolean) {
+    if (defaultOnly) {
+      setStatus({ message: "余额管理当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     const previous = runtimeSettings;
     setRuntimeSettings((current) => ({ ...current, enabled }));
     setRuntimeBusy(true);
@@ -5071,6 +5103,9 @@ function CreditControlView({
   }
 
   async function loadUserDetail(userId: string) {
+    if (defaultOnly) {
+      return;
+    }
     setSelectedUserId(userId);
     setDetailOpen(true);
     setLoadingDetail(true);
@@ -5092,6 +5127,10 @@ function CreditControlView({
   }
 
   async function runAdjustment(preview: boolean) {
+    if (defaultOnly) {
+      setStatus({ message: "余额管理当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     if (!adjustmentAmount || adjustmentAmount === 0) {
       setStatus({ message: "请输入非 0 调整金额。", tone: "error" });
       return;
@@ -5129,6 +5168,10 @@ function CreditControlView({
   }
 
   async function loadPolicies() {
+    if (defaultOnly) {
+      setPolicies([]);
+      return;
+    }
     setLoadingPolicies(true);
     try {
       const payload = await requestJson<CreditControlPoliciesPayload>(
@@ -5148,6 +5191,10 @@ function CreditControlView({
   }
 
   async function savePolicy() {
+    if (defaultOnly) {
+      setStatus({ message: "余额管理当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     if (!policyDraft.name.trim()) {
       setStatus({ message: "请输入策略名称。", tone: "error" });
       return;
@@ -5183,6 +5230,10 @@ function CreditControlView({
   }
 
   async function previewPolicy() {
+    if (defaultOnly) {
+      setStatus({ message: "余额管理当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     setPolicyBusy("preview");
     try {
       const payload = await requestJson<CreditControlPolicyPreview>(
@@ -5202,6 +5253,10 @@ function CreditControlView({
   }
 
   async function deletePolicy(policyId: string) {
+    if (defaultOnly) {
+      setStatus({ message: "余额管理当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     setPolicyBusy("delete");
     try {
       await requestJson<ApiPayload>(
@@ -5222,6 +5277,10 @@ function CreditControlView({
   }
 
   async function loadRuns() {
+    if (defaultOnly) {
+      setRuns([]);
+      return;
+    }
     setLoadingRuns(true);
     try {
       const payload = await requestJson<CreditControlRunsPayload>(
@@ -5241,6 +5300,10 @@ function CreditControlView({
   }
 
   async function loadAudit() {
+    if (defaultOnly) {
+      setAuditItems([]);
+      return;
+    }
     setLoadingAudit(true);
     try {
       const payload = await requestJson<CreditControlAuditPayload>(
@@ -5260,10 +5323,24 @@ function CreditControlView({
   }
 
   useEffect(() => {
+    if (defaultOnly) {
+      setUsers([]);
+      setTotal(0);
+      setAggregates({});
+      setSegmentOverviewCounts({});
+      setSelectedUserIds([]);
+      setPolicies([]);
+      setRuns([]);
+      setAuditItems([]);
+      setDetail(null);
+      setDetailOpen(false);
+      setStatus({ message: "余额管理当前只绑定默认 Sub2API 上游。", tone: "info" });
+      return;
+    }
     void loadRuntimeSettings();
     void loadUsers();
     void loadSegmentOverview();
-  }, []);
+  }, [defaultOnly]);
 
   useEffect(() => {
     if (activeTab === "policies") void loadPolicies();
@@ -5302,6 +5379,7 @@ function CreditControlView({
               <Switch
                 checked={runtimeSettings.enabled}
                 loading={runtimeBusy}
+                disabled={defaultOnly}
                 onChange={(checked) => void saveRuntimeSettings(checked)}
               />
               <span>自动充值后台执行</span>
@@ -5319,6 +5397,7 @@ function CreditControlView({
             <AntButton
               icon={<ReloadOutlined />}
               loading={loadingUsers || loadingPolicies || loadingRuns || loadingAudit}
+              disabled={defaultOnly}
               onClick={() => {
                 if (activeTab === "users") {
                   void loadUsers();
@@ -5333,6 +5412,15 @@ function CreditControlView({
             </AntButton>
           </Space>
         </div>
+
+        {defaultOnly ? (
+          <Alert
+            className="credit-status"
+            showIcon
+            type="warning"
+            message="余额管理当前只绑定默认 Sub2API 上游。切回默认上游后再配置或执行。"
+          />
+        ) : null}
 
         {status.message ? (
           <Alert
@@ -5352,10 +5440,12 @@ function CreditControlView({
                     prefix={<Search size={15} />}
                     value={filters.search}
                     placeholder="用户 / email / ID"
+                    disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))}
                   />
                   <Select
                     value={filters.window}
+                    disabled={defaultOnly}
                     onChange={(value) => setFilters((current) => ({ ...current, window: value }))}
                     options={[
                       { label: "最近 5 小时", value: "5h" },
@@ -5367,19 +5457,28 @@ function CreditControlView({
                   <Input
                     value={filters.status}
                     placeholder="状态"
+                    disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
                   />
                   <Input
                     value={filters.groupId}
                     placeholder="Group ID"
+                    disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, groupId: event.target.value }))}
                   />
                   <Select
                     value={filters.usageSegment}
+                    disabled={defaultOnly}
                     onChange={(value) => setFilters((current) => ({ ...current, usageSegment: value }))}
                     options={[...usageSegmentOptions]}
                   />
-                  <AntButton type="primary" htmlType="submit" icon={<Search size={15} />} loading={loadingUsers}>
+                  <AntButton
+                    type="primary"
+                    htmlType="submit"
+                    icon={<Search size={15} />}
+                    loading={loadingUsers}
+                    disabled={defaultOnly}
+                  >
                     查询
                   </AntButton>
                 </div>
@@ -5387,21 +5486,25 @@ function CreditControlView({
                   <Input
                     value={filters.balanceMin}
                     placeholder="余额 ≥"
+                    disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, balanceMin: event.target.value }))}
                   />
                   <Input
                     value={filters.balanceMax}
                     placeholder="余额 ≤"
+                    disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, balanceMax: event.target.value }))}
                   />
                   <Input
                     value={filters.consumptionMin}
                     placeholder="消耗 ≥"
+                    disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, consumptionMin: event.target.value }))}
                   />
                   <Input
                     value={filters.consumptionMax}
                     placeholder="消耗 ≤"
+                    disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, consumptionMax: event.target.value }))}
                   />
                 </div>
@@ -5442,7 +5545,10 @@ function CreditControlView({
                 dataSource={users}
                 rowSelection={{
                   selectedRowKeys: selectedUserIds,
-                  onChange: (keys) => setSelectedUserIds(keys.map(String))
+                  onChange: (keys) => {
+                    if (!defaultOnly) setSelectedUserIds(keys.map(String));
+                  },
+                  getCheckboxProps: () => ({ disabled: defaultOnly })
                 }}
                 pagination={{
                   current: Math.floor(page.offset / page.limit) + 1,
@@ -5461,6 +5567,7 @@ function CreditControlView({
                       <button
                         className="credit-user-link"
                         type="button"
+                        disabled={defaultOnly}
                         onClick={() => void loadUserDetail(idValue(user.user_id))}
                       >
                         <strong>{creditUserName(user)}</strong>
@@ -5527,6 +5634,7 @@ function CreditControlView({
                 <AntSegmented
                   block
                   value={adjustmentMode}
+                  disabled={defaultOnly}
                   onChange={(value) => setAdjustmentMode(value as AdjustmentTargetMode)}
                   options={[
                     { label: `已选 ${selectedUserIds.length}`, value: "selected" },
@@ -5539,18 +5647,21 @@ function CreditControlView({
                   step={1}
                   precision={4}
                   placeholder="正数充值，负数扣减"
+                  disabled={defaultOnly}
                   onChange={setAdjustmentAmount}
                 />
                 <Input.TextArea
                   rows={3}
                   value={adjustmentReason}
                   placeholder="调整原因"
+                  disabled={defaultOnly}
                   onChange={(event) => setAdjustmentReason(event.target.value)}
                 />
                 <Space wrap>
                   <AntButton
                     icon={<Eye size={15} />}
                     loading={adjustmentBusy === "preview"}
+                    disabled={defaultOnly}
                     onClick={() => void runAdjustment(true)}
                   >
                     预览
@@ -5559,7 +5670,7 @@ function CreditControlView({
                     type="primary"
                     icon={<Send size={15} />}
                     loading={adjustmentBusy === "run"}
-                    disabled={!adjustmentPreview}
+                    disabled={defaultOnly || !adjustmentPreview}
                     onClick={() => void runAdjustment(false)}
                   >
                     确认执行
@@ -5598,13 +5709,21 @@ function CreditControlView({
                 renderItem={(policy) => (
                   <List.Item
                     actions={[
-                      <AntButton key="edit" size="small" onClick={() => setPolicyDraft(policyToDraft(policy))}>编辑</AntButton>,
+                      <AntButton
+                        key="edit"
+                        size="small"
+                        disabled={defaultOnly}
+                        onClick={() => setPolicyDraft(policyToDraft(policy))}
+                      >
+                        编辑
+                      </AntButton>,
                       <AntButton
                         key="delete"
                         size="small"
                         danger
                         icon={<Trash2 size={14} />}
                         loading={policyBusy === "delete"}
+                        disabled={defaultOnly}
                         onClick={() => void deletePolicy(policy.policy_id)}
                       />
                     ]}
@@ -5633,6 +5752,7 @@ function CreditControlView({
                 <Input
                   value={policyDraft.name}
                   placeholder="策略名称"
+                  disabled={defaultOnly}
                   onChange={(event) => setPolicyDraft((current) => ({ ...current, name: event.target.value }))}
                 />
                 <InputNumber
@@ -5640,10 +5760,12 @@ function CreditControlView({
                   value={policyDraft.amount}
                   min={0}
                   precision={4}
+                  disabled={defaultOnly}
                   onChange={(value) => setPolicyDraft((current) => ({ ...current, amount: value ?? 0 }))}
                 />
                 <Select
                   value={policyDraft.schedule_type}
+                  disabled={defaultOnly}
                   onChange={(value) => setPolicyDraft((current) => ({ ...current, schedule_type: value }))}
                   options={[
                     { label: "一次性", value: "one_time" },
@@ -5653,15 +5775,18 @@ function CreditControlView({
                 <Input
                   value={policyDraft.schedule}
                   placeholder={policyDraft.schedule_type === "one_time" ? "2026-05-14T10:00:00+08:00" : "0 9 * * 1"}
+                  disabled={defaultOnly}
                   onChange={(event) => setPolicyDraft((current) => ({ ...current, schedule: event.target.value }))}
                 />
                 <Input
                   value={policyDraft.timezone}
                   placeholder="Asia/Shanghai"
+                  disabled={defaultOnly}
                   onChange={(event) => setPolicyDraft((current) => ({ ...current, timezone: event.target.value }))}
                 />
                 <Select
                   value={policyDraft.target_scope}
+                  disabled={defaultOnly}
                   onChange={(value) => setPolicyDraft((current) => ({ ...current, target_scope: value }))}
                   options={[
                     { label: "全部用户", value: "all" },
@@ -5674,6 +5799,7 @@ function CreditControlView({
                   <Input
                     value={policyDraft.target_group_id}
                     placeholder="Group ID"
+                    disabled={defaultOnly}
                     onChange={(event) => setPolicyDraft((current) => ({ ...current, target_group_id: event.target.value }))}
                   />
                 ) : null}
@@ -5681,6 +5807,7 @@ function CreditControlView({
                   <Input
                     value={policyDraft.target_user_ids}
                     placeholder="User IDs，用逗号分隔"
+                    disabled={defaultOnly}
                     onChange={(event) => setPolicyDraft((current) => ({ ...current, target_user_ids: event.target.value }))}
                   />
                 ) : null}
@@ -5688,25 +5815,41 @@ function CreditControlView({
                   <Input
                     value={policyDraft.target_balance_below}
                     placeholder="余额阈值"
+                    disabled={defaultOnly}
                     onChange={(event) => setPolicyDraft((current) => ({ ...current, target_balance_below: event.target.value }))}
                   />
                 ) : null}
                 <label className="credit-switch-row">
                   <Switch
                     checked={policyDraft.enabled}
+                    disabled={defaultOnly}
                     onChange={(checked) => setPolicyDraft((current) => ({ ...current, enabled: checked }))}
                   />
                   <span>启用策略</span>
                 </label>
               </div>
               <Space wrap>
-                <AntButton icon={<Eye size={15} />} loading={policyBusy === "preview"} onClick={() => void previewPolicy()}>
+                <AntButton
+                  icon={<Eye size={15} />}
+                  loading={policyBusy === "preview"}
+                  disabled={defaultOnly}
+                  onClick={() => void previewPolicy()}
+                >
                   预览影响
                 </AntButton>
-                <AntButton type="primary" icon={<Save size={15} />} loading={policyBusy === "save"} onClick={() => void savePolicy()}>
+                <AntButton
+                  type="primary"
+                  icon={<Save size={15} />}
+                  loading={policyBusy === "save"}
+                  disabled={defaultOnly}
+                  onClick={() => void savePolicy()}
+                >
                   保存策略
                 </AntButton>
-                <AntButton onClick={() => { setPolicyDraft(defaultPolicyDraft()); setPolicyPreview(null); }}>
+                <AntButton
+                  disabled={defaultOnly}
+                  onClick={() => { setPolicyDraft(defaultPolicyDraft()); setPolicyPreview(null); }}
+                >
                   清空
                 </AntButton>
               </Space>
@@ -6147,12 +6290,17 @@ function RunRecordsPanel({
 }
 
 function DynamicOrchestrationView({
+  selectedUpstreamId,
+  defaultUpstreamId,
   onAuthExpired,
   onRunRecorded
 }: {
+  selectedUpstreamId: string;
+  defaultUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onRunRecorded: () => void;
 }) {
+  const defaultOnly = Boolean(defaultUpstreamId && selectedUpstreamId && selectedUpstreamId !== defaultUpstreamId);
   const [candidates, setCandidates] = useState<RotationPoolCandidate[]>([]);
   const [config, setConfig] = useState<AutoRotationConfig>({
     enabled: false,
@@ -6204,6 +6352,12 @@ function DynamicOrchestrationView({
     }, group.is_subscription)
   );
   async function loadDynamicConfig() {
+    if (defaultOnly) {
+      setCandidates([]);
+      setSelectedPoolCandidateIds([]);
+      setStatus({ message: "动态轮转当前只绑定默认 Sub2API 上游。", tone: "info" });
+      return;
+    }
     setLoading(true);
     try {
       const [poolPayload, configPayload] = await Promise.all([
@@ -6229,10 +6383,20 @@ function DynamicOrchestrationView({
   }
 
   useEffect(() => {
+    if (defaultOnly) {
+      setCandidates([]);
+      setSelectedPoolCandidateIds([]);
+      setStatus({ message: "动态轮转当前只绑定默认 Sub2API 上游。", tone: "info" });
+      return;
+    }
     void loadDynamicConfig();
-  }, []);
+  }, [defaultOnly]);
 
   async function saveConfig(nextConfig = config, { showStatus = true } = {}) {
+    if (defaultOnly) {
+      setStatus({ message: "动态轮转当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return false;
+    }
     setSaving(true);
     try {
       const payload = await requestJson<AutoRotationConfigPayload>(
@@ -6262,6 +6426,10 @@ function DynamicOrchestrationView({
   }
 
   async function togglePoolGroup(group: RotationPoolCandidate, poolKind: "landing" | "rotation") {
+    if (defaultOnly) {
+      setStatus({ message: "动态轮转当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     const selected = poolKind === "landing" ? group.landing_selected : group.rotation_selected || group.selected;
     const poolSize = poolKind === "landing" ? selectedLandingGroups.length : selectedGroups.length;
     setSaving(true);
@@ -6303,6 +6471,10 @@ function DynamicOrchestrationView({
   }
 
   async function addPoolGroups(groupsToAdd: RotationPoolCandidate[], poolKind: "landing" | "rotation") {
+    if (defaultOnly) {
+      setStatus({ message: "动态轮转当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     if (groupsToAdd.length === 0) {
       return;
     }
@@ -6355,7 +6527,7 @@ function DynamicOrchestrationView({
             <AntButton
               key="remove"
               size="small"
-              disabled={saving}
+              disabled={defaultOnly || saving}
               onClick={() => void togglePoolGroup(group, poolKind)}
             >
               移出
@@ -6375,6 +6547,10 @@ function DynamicOrchestrationView({
   );
 
   async function runDynamic(dryRun: boolean) {
+    if (defaultOnly) {
+      setStatus({ message: "动态轮转当前只绑定默认 Sub2API 上游。", tone: "error" });
+      return;
+    }
     setRunning(dryRun ? "preview" : "run");
     setStatus({ message: dryRun ? "正在保存并预览动态编排" : "正在保存并执行动态编排", tone: "info" });
     try {
@@ -6417,8 +6593,25 @@ function DynamicOrchestrationView({
             <span>池配置</span>
           </Space>
         }
-        extra={<AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadDynamicConfig()}>刷新</AntButton>}
+        extra={
+          <AntButton
+            icon={<ReloadOutlined />}
+            loading={loading}
+            disabled={defaultOnly}
+            onClick={() => void loadDynamicConfig()}
+          >
+            刷新
+          </AntButton>
+        }
       >
+        {defaultOnly ? (
+          <Alert
+            className="operator-status-alert"
+            showIcon
+            type="warning"
+            message="动态轮转当前只绑定默认 Sub2API 上游。切回默认上游后再配置或执行。"
+          />
+        ) : null}
         <div className="dynamic-pool-builder">
           <div className="ant-field">
             <Typography.Text strong>候选分组</Typography.Text>
@@ -6429,6 +6622,7 @@ function DynamicOrchestrationView({
               showSearch
               allowClear
               loading={loading}
+              disabled={defaultOnly}
               optionFilterProp="searchText"
               onChange={(values) => setSelectedPoolCandidateIds(values)}
               options={poolCandidateOptions}
@@ -6440,14 +6634,14 @@ function DynamicOrchestrationView({
           <Space wrap>
             <AntButton
               type="primary"
-              disabled={landingPoolCandidates.length === 0 || saving}
+              disabled={defaultOnly || landingPoolCandidates.length === 0 || saving}
               onClick={() => void addPoolGroups(landingPoolCandidates, "landing")}
             >
               加入 Landing 池{landingPoolCandidates.length ? `（${landingPoolCandidates.length}）` : ""}
             </AntButton>
             <AntButton
               type="primary"
-              disabled={rotationPoolCandidates.length === 0 || saving}
+              disabled={defaultOnly || rotationPoolCandidates.length === 0 || saving}
               onClick={() => void addPoolGroups(rotationPoolCandidates, "rotation")}
             >
               加入轮转池{rotationPoolCandidates.length ? `（${rotationPoolCandidates.length}）` : ""}
@@ -6487,6 +6681,7 @@ function DynamicOrchestrationView({
             <Typography.Text strong>启用执行</Typography.Text>
             <AntSegmented
               value={config.enabled ? "on" : "off"}
+              disabled={defaultOnly}
               onChange={(value) => setConfig((current) => ({ ...current, enabled: value === "on" }))}
               options={[
                 { label: "关闭", value: "off" },
@@ -6498,6 +6693,7 @@ function DynamicOrchestrationView({
             <Typography.Text strong>自动分配新用户</Typography.Text>
             <AntSegmented
               value={config.auto_assign_new_users ? "on" : "off"}
+              disabled={defaultOnly}
               onChange={(value) => setConfig((current) => ({ ...current, auto_assign_new_users: value === "on" }))}
               options={[
                 { label: "关闭", value: "off" },
@@ -6512,6 +6708,7 @@ function DynamicOrchestrationView({
             </Space>
             <AntSegmented
               value={config.usage_window}
+              disabled={defaultOnly}
               onChange={(value) =>
                 setConfig((current) => ({
                   ...current,
@@ -6526,6 +6723,7 @@ function DynamicOrchestrationView({
             <Input
               type="number"
               min={0}
+              disabled={defaultOnly}
               value={config.cooldown_minutes}
               onChange={(event) => setConfig((current) => ({
                 ...current,
@@ -6539,6 +6737,7 @@ function DynamicOrchestrationView({
               type="number"
               min={0}
               step={0.1}
+              disabled={defaultOnly}
               value={config.imbalance_epsilon}
               onChange={(event) => setConfig((current) => ({
                 ...current,
@@ -6552,6 +6751,7 @@ function DynamicOrchestrationView({
               type="number"
               min={0}
               step={0.1}
+              disabled={defaultOnly}
               value={config.improvement_delta}
               onChange={(event) => setConfig((current) => ({
                 ...current,
@@ -6587,6 +6787,7 @@ function DynamicOrchestrationView({
               type="primary"
               icon={<SendOutlined />}
               loading={saving}
+              disabled={defaultOnly}
               onClick={() => void saveConfig()}
             >
               保存配置
@@ -6594,7 +6795,7 @@ function DynamicOrchestrationView({
             <AntButton
               icon={<NodeIndexOutlined />}
               loading={running === "preview"}
-              disabled={running !== null || loading || selectedGroups.length === 0}
+              disabled={defaultOnly || running !== null || loading || selectedGroups.length === 0}
               onClick={() => void runDynamic(true)}
             >
               预览动态编排
@@ -6603,7 +6804,7 @@ function DynamicOrchestrationView({
               danger
               icon={<SyncOutlined />}
               loading={running === "run"}
-              disabled={running !== null || loading || selectedGroups.length === 0 || !config.enabled}
+              disabled={defaultOnly || running !== null || loading || selectedGroups.length === 0 || !config.enabled}
               onClick={() => void runDynamic(false)}
             >
               执行动态编排

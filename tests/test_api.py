@@ -1884,6 +1884,84 @@ sub2api:
     clear_caches()
 
 
+def test_secondary_upstream_provisioning_ignores_default_landing_pool(client, tmp_path, monkeypatch, app_env) -> None:
+    config_path = tmp_path / "multi-upstream.yaml"
+    config_path.write_text(
+        f"""
+{database_config_from_app_env(app_env)}
+app:
+  base_url: http://testserver
+openai:
+  oauth_redirect_uri: http://localhost:1455/callback
+sub2api:
+  upstreams:
+    - id: main
+      name: Main Sub2API
+      base_url: http://main-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+    - id: secondary
+      name: Secondary Sub2API
+      base_url: http://secondary-sub2api.local
+      admin_api_key_env: SUB2API_SECONDARY_ADMIN_API_KEY
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("SUB2API_SECONDARY_ADMIN_API_KEY", "secondary-key")
+    clear_caches()
+    login(client)
+    main.get_flow_store().upsert_rotation_pool_group(
+        RotationPoolGroup(
+            group_id=11,
+            pool_kind=RotationPoolKind.landing,
+            group_name="main-landing",
+            platform="openai",
+            status="active",
+            is_exclusive=True,
+            priority=0,
+        )
+    )
+    create_group_payloads: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if method == "GET" and path in {"/api/v1/admin/groups/all", "/api/v1/admin/accounts"}:
+            return FakeResponse(200, {"code": 0, "message": "success", "data": []})
+        if method == "POST" and path == "/api/v1/admin/groups":
+            create_group_payloads.append(dict(json or {}))
+            return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": 77, "name": json["name"]}})
+        if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "auth_url": f"https://auth.example.com/authorize?state=secondary-{json['state']}",
+                        "session_id": f"session-{json['state']}",
+                    },
+                },
+            )
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.post(
+            "/provision/start",
+            json={"email": "secondary-new@example.com", "upstream_id": "secondary"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["upstream_id"] == "secondary"
+    assert payload["group_id"] == 77
+    assert payload["assignment_mode"] == "dedicated"
+    assert payload["assignment_reason"] == "dedicated provisioning group"
+    assert create_group_payloads[0]["name"] == "secondary-new@example.com"
+
+    monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
+    clear_caches()
+
+
 def test_sub2api_login_exchanges_admin_jwt_for_sidecar_session(client) -> None:
     calls: list[dict[str, object]] = []
 

@@ -68,6 +68,7 @@ class ProvisioningService:
         try:
             group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(
                 email,
+                upstream_id=upstream_id,
                 sub2api_client=client,
             )
             self._record_event(
@@ -243,6 +244,7 @@ class ProvisioningService:
         try:
             group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(
                 name,
+                upstream_id=upstream_id,
                 sub2api_client=client,
             )
             self._record_event(
@@ -507,6 +509,7 @@ class ProvisioningService:
         self,
         email: str,
         *,
+        upstream_id: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[object, AssignmentMode, str]:
         client = sub2api_client or self.sub2api_client
@@ -518,13 +521,14 @@ class ProvisioningService:
                 AssignmentMode.dedicated,
                 "existing dedicated provisioning group",
             )
-        landing_group = self._select_landing_pool_group()
-        if landing_group is not None:
-            return (
-                landing_group.group_id,
-                AssignmentMode.managed_pool,
-                "landing pool assignment",
-            )
+        if upstream_id == self.default_upstream_id:
+            landing_group = self._select_landing_pool_group()
+            if landing_group is not None:
+                return (
+                    landing_group.group_id,
+                    AssignmentMode.managed_pool,
+                    "landing pool assignment",
+                )
         group = client.create_group(group_name)
         return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
 
