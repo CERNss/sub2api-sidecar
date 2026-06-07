@@ -4,6 +4,10 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from typing import Protocol
+
+from app.models.auth import PersistedAuthSession
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +23,29 @@ class AuthSession:
     purpose: str
 
 
+class PersistentAuthSessionStore(Protocol):
+    def save_auth_session(self, session: PersistedAuthSession) -> PersistedAuthSession:
+        raise NotImplementedError
+
+    def get_auth_session(self, access_key_hash: str) -> PersistedAuthSession | None:
+        raise NotImplementedError
+
+    def revoke_auth_session(self, access_key_hash: str) -> None:
+        raise NotImplementedError
+
+    def revoke_auth_sessions(self, *, username: str, purpose: str) -> int:
+        raise NotImplementedError
+
+
 class EphemeralAdminAuthManager:
-    """Small in-memory auth manager for local operator access."""
+    """Auth manager for local operator sessions and persisted API tokens."""
 
     def __init__(
         self,
         username: str,
         password: str | None,
         access_key_ttl_hours: int,
+        session_store: PersistentAuthSessionStore | None = None,
     ) -> None:
         if access_key_ttl_hours <= 0:
             raise ValueError("access_key_ttl_hours must be greater than zero")
@@ -35,6 +54,7 @@ class EphemeralAdminAuthManager:
         self.access_key_ttl = timedelta(hours=access_key_ttl_hours)
         self.password = password or secrets.token_urlsafe(18)
         self.password_source = "env_override" if password else "generated"
+        self.session_store = session_store
         self._sessions: dict[str, AuthSession] = {}
 
         self._log_startup_credentials()
@@ -60,7 +80,12 @@ class EphemeralAdminAuthManager:
 
     def create_api_token(self, username: str) -> AuthSession:
         revoked_count = self.revoke_api_tokens(username=username)
-        session = self._create_session(username=username, purpose="api_token", expires_in=None)
+        session = self._create_session(
+            username=username,
+            purpose="api_token",
+            expires_in=None,
+            persist=True,
+        )
         logger.info(
             "Admin API token rotated | username=%s | revoked_count=%s",
             username,
@@ -69,6 +94,12 @@ class EphemeralAdminAuthManager:
         return session
 
     def revoke_api_tokens(self, username: str) -> int:
+        revoked_count = 0
+        if self.session_store is not None:
+            revoked_count = self.session_store.revoke_auth_sessions(
+                username=username,
+                purpose="api_token",
+            )
         token_keys = [
             access_key
             for access_key, session in self._sessions.items()
@@ -76,7 +107,7 @@ class EphemeralAdminAuthManager:
         ]
         for access_key in token_keys:
             self._sessions.pop(access_key, None)
-        return len(token_keys)
+        return max(revoked_count, len(token_keys))
 
     def _create_session(
         self,
@@ -84,6 +115,7 @@ class EphemeralAdminAuthManager:
         username: str,
         purpose: str,
         expires_in: timedelta | None,
+        persist: bool = False,
     ) -> AuthSession:
         self._purge_expired_sessions()
         now = datetime.now(timezone.utc)
@@ -96,6 +128,17 @@ class EphemeralAdminAuthManager:
             purpose=purpose,
         )
         self._sessions[session.access_key] = session
+        if persist and self.session_store is not None:
+            self.session_store.save_auth_session(
+                PersistedAuthSession(
+                    access_key_hash=self._hash_access_key(session.access_key),
+                    username=session.username,
+                    purpose=session.purpose,
+                    created_at=session.created_at,
+                    updated_at=session.created_at,
+                    expires_at=session.expires_at,
+                )
+            )
         logger.info(
             "Admin session issued | username=%s | purpose=%s | expires_at=%s",
             session.username,
@@ -110,18 +153,25 @@ class EphemeralAdminAuthManager:
 
         self._purge_expired_sessions()
         session = self._sessions.get(access_key)
-        if not session:
-            return None
+        if session:
+            if session.purpose == "api_token" and self.session_store is not None:
+                persisted_session = self._load_persisted_session(access_key)
+                if persisted_session is None:
+                    self._sessions.pop(access_key, None)
+                return persisted_session
+            if session.expires_at is not None and session.expires_at <= datetime.now(timezone.utc):
+                self._sessions.pop(access_key, None)
+                return None
+            return session
 
-        if session.expires_at is not None and session.expires_at <= datetime.now(timezone.utc):
-            self._sessions.pop(access_key, None)
-            return None
-        return session
+        return self._load_persisted_session(access_key)
 
     def revoke(self, access_key: str | None) -> None:
         if not access_key:
             return
         self._sessions.pop(access_key, None)
+        if self.session_store is not None:
+            self.session_store.revoke_auth_session(self._hash_access_key(access_key))
 
     def _credentials_match(self, username: str, password: str) -> bool:
         return secrets.compare_digest(username, self.username) and secrets.compare_digest(
@@ -137,6 +187,32 @@ class EphemeralAdminAuthManager:
         ]
         for access_key in expired_keys:
             self._sessions.pop(access_key, None)
+
+    def _load_persisted_session(self, access_key: str) -> AuthSession | None:
+        if self.session_store is None:
+            return None
+        persisted = self.session_store.get_auth_session(self._hash_access_key(access_key))
+        if persisted is None:
+            return None
+        if persisted.revoked_at is not None:
+            return None
+        now = datetime.now(timezone.utc)
+        if persisted.expires_at is not None and persisted.expires_at <= now:
+            self.session_store.revoke_auth_session(persisted.access_key_hash)
+            return None
+
+        session = AuthSession(
+            access_key=access_key,
+            username=persisted.username,
+            created_at=persisted.created_at,
+            expires_at=persisted.expires_at,
+            purpose=persisted.purpose,
+        )
+        self._sessions[access_key] = session
+        return session
+
+    def _hash_access_key(self, access_key: str) -> str:
+        return sha256(access_key.encode("utf-8")).hexdigest()
 
     def _log_startup_credentials(self) -> None:
         if self.password_source == "generated":

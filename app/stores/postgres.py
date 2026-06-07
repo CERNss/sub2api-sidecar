@@ -8,6 +8,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
+from app.models.auth import PersistedAuthSession
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
 from app.models.group_usage import GroupUsageSegmentRecord
 from app.models.credit import (
@@ -1372,6 +1373,118 @@ class PostgresFlowStore(FlowStore):
             ).fetchone()
         return int(row["total"] if row else 0)
 
+    def save_auth_session(
+        self,
+        session: PersistedAuthSession,
+    ) -> PersistedAuthSession:
+        payload = session.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO auth_sessions (
+                    access_key_hash,
+                    username,
+                    purpose,
+                    expires_at,
+                    revoked_at,
+                    payload,
+                    created_at,
+                    updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(access_key_hash) DO UPDATE SET
+                    username = excluded.username,
+                    purpose = excluded.purpose,
+                    expires_at = excluded.expires_at,
+                    revoked_at = excluded.revoked_at,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session.access_key_hash,
+                    session.username,
+                    session.purpose,
+                    session.expires_at.isoformat() if session.expires_at else None,
+                    session.revoked_at.isoformat() if session.revoked_at else None,
+                    payload,
+                    session.created_at.isoformat(),
+                    session.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return session
+
+    def get_auth_session(self, access_key_hash: str) -> PersistedAuthSession | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM auth_sessions
+            WHERE access_key_hash = %s AND revoked_at IS NULL
+            """,
+            (access_key_hash,),
+            PersistedAuthSession,
+        )
+
+    def revoke_auth_session(self, access_key_hash: str) -> None:
+        now = datetime.now(timezone.utc)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload FROM auth_sessions
+                WHERE access_key_hash = %s AND revoked_at IS NULL
+                """,
+                (access_key_hash,),
+            ).fetchone()
+            if row:
+                session = PersistedAuthSession.model_validate_json(row["payload"])
+                session.revoked_at = now
+                session.updated_at = now
+                connection.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET revoked_at = %s, updated_at = %s, payload = %s
+                    WHERE access_key_hash = %s
+                    """,
+                    (
+                        now.isoformat(),
+                        now.isoformat(),
+                        session.model_dump_json(),
+                        access_key_hash,
+                    ),
+                )
+                connection.commit()
+
+    def revoke_auth_sessions(self, *, username: str, purpose: str) -> int:
+        now = datetime.now(timezone.utc)
+        revoked_count = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload FROM auth_sessions
+                WHERE username = %s AND purpose = %s AND revoked_at IS NULL
+                """,
+                (username, purpose),
+            ).fetchall()
+            for row in rows:
+                session = PersistedAuthSession.model_validate_json(row["payload"])
+                session.revoked_at = now
+                session.updated_at = now
+                cursor = connection.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET revoked_at = %s, updated_at = %s, payload = %s
+                    WHERE access_key_hash = %s AND revoked_at IS NULL
+                    """,
+                    (
+                        now.isoformat(),
+                        now.isoformat(),
+                        session.model_dump_json(),
+                        session.access_key_hash,
+                    ),
+                )
+                if cursor.rowcount > 0:
+                    revoked_count += cursor.rowcount
+            connection.commit()
+        return revoked_count
+
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -1720,6 +1833,26 @@ class PostgresFlowStore(FlowStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_group_usage_segments_list
                 ON group_usage_segments(refreshed_at DESC, group_name ASC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    access_key_hash TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    expires_at TEXT,
+                    revoked_at TEXT,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_auth_sessions_lookup
+                ON auth_sessions(username, purpose, revoked_at)
                 """
             )
             connection.commit()

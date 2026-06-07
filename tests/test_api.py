@@ -4259,6 +4259,30 @@ def test_api_token_endpoint_issues_bearer_compatible_token(client) -> None:
     assert browser_session_response.status_code == 200
 
 
+def test_api_token_persists_across_auth_manager_restart(client) -> None:
+    login_payload = login(client)
+    login_access_key = login_payload["access_key"]
+    token_response = client.post("/auth/api-token")
+
+    assert token_response.status_code == 200
+    access_key = token_response.json()["access_key"]
+
+    main.get_auth_manager.cache_clear()
+
+    persisted_token_response = client.get(
+        "/auth/session",
+        headers={"Authorization": f"Bearer {access_key}"},
+    )
+    browser_session_response = client.get(
+        "/auth/session",
+        headers={"Authorization": f"Bearer {login_access_key}"},
+    )
+
+    assert persisted_token_response.status_code == 200
+    assert persisted_token_response.json()["expires_at"] is None
+    assert browser_session_response.status_code == 401
+
+
 def test_token_apikey_api_creates_key_for_matching_email_user(client) -> None:
     backend = FakeRotationSub2API()
     backend.users.insert(

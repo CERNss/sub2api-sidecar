@@ -267,6 +267,7 @@ def get_auth_manager() -> EphemeralAdminAuthManager:
         username=settings.app_auth_username,
         password=settings.app_auth_password,
         access_key_ttl_hours=settings.app_access_key_ttl_hours,
+        session_store=get_flow_store(),
     )
 
 

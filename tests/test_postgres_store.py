@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from app.models.auth import PersistedAuthSession
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionEventStatus, ProvisionEventType, ProvisionFlow
 from app.models.group_usage import GroupUsageSegmentRecord
 from app.models.operational_data import (
@@ -456,6 +457,55 @@ def test_postgres_store_persists_runtime_settings(app_env: dict[str, str]) -> No
     assert credit.enabled is False
     assert provisioning is not None
     assert provisioning.assignment_mode == AssignmentMode.managed_pool
+
+
+def test_postgres_store_persists_and_revokes_auth_sessions(app_env: dict[str, str]) -> None:
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store = PostgresFlowStore(app_env["database_url"])
+    store.save_auth_session(
+        PersistedAuthSession(
+            access_key_hash="token-hash-1",
+            username="admin",
+            purpose="api_token",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.save_auth_session(
+        PersistedAuthSession(
+            access_key_hash="token-hash-2",
+            username="other",
+            purpose="api_token",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.save_auth_session(
+        PersistedAuthSession(
+            access_key_hash="session-hash-1",
+            username="admin",
+            purpose="external",
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(hours=12),
+        )
+    )
+
+    reloaded = PostgresFlowStore(app_env["database_url"])
+    persisted = reloaded.get_auth_session("token-hash-1")
+    revoked_count = reloaded.revoke_auth_sessions(username="admin", purpose="api_token")
+
+    assert persisted is not None
+    assert persisted.username == "admin"
+    assert persisted.purpose == "api_token"
+    assert revoked_count == 1
+    assert reloaded.get_auth_session("token-hash-1") is None
+    assert reloaded.get_auth_session("token-hash-2") is not None
+    assert reloaded.get_auth_session("session-hash-1") is not None
+
+    reloaded.revoke_auth_session("session-hash-1")
+
+    assert reloaded.get_auth_session("session-hash-1") is None
 
 
 def test_postgres_store_persists_latest_user_usage_segments(app_env: dict[str, str]) -> None:
