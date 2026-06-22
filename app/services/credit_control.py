@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import psycopg
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.clients.sub2api import Sub2APIClient, Sub2APIError
@@ -51,10 +51,20 @@ class CreditControlError(Exception):
     """Raised when credit-control validation or execution fails."""
 
 
+class OperationalDataRefresher(Protocol):
+    def refresh_before_mutation(self) -> Any: ...
+
+
 class CreditControlService:
-    def __init__(self, store: PostgresFlowStore, sub2api_client: Sub2APIClient) -> None:
+    def __init__(
+        self,
+        store: PostgresFlowStore,
+        sub2api_client: Sub2APIClient,
+        operational_data_refresher: OperationalDataRefresher | None = None,
+    ) -> None:
         self.store = store
         self.sub2api_client = sub2api_client
+        self.operational_data_refresher = operational_data_refresher
 
     def list_users(
         self,
@@ -195,6 +205,7 @@ class CreditControlService:
         actor: str | None,
     ) -> CreditRechargeRunRecord:
         self._validate_adjustment(amount=amount, reason=reason, target_scope=target_scope)
+        self._refresh_operational_data_before_mutation()
         targets = self.resolve_target_scope(target_scope)
         if not targets:
             raise CreditControlError("target set is empty")
@@ -256,10 +267,13 @@ class CreditControlService:
         operation: CreditBalanceOperation,
         reason: str,
         actor: str | None,
+        refresh_before_mutation: bool = True,
     ) -> CreditRechargeRunRecord:
         self._validate_adjustment(amount=amount, reason=reason, target_scope=target_scope)
         if not users:
             raise CreditControlError("target set is empty")
+        if refresh_before_mutation:
+            self._refresh_operational_data_before_mutation()
         record = self._execute_outcomes(
             targets=users,
             amount=amount,
@@ -365,6 +379,7 @@ class CreditControlService:
 
     def run_policy_now(self, policy_id: str, *, actor: str | None) -> CreditRechargeRunRecord:
         policy = self.get_policy(policy_id)
+        self._refresh_operational_data_before_mutation()
         return self._execute_policy(policy, scheduled_for=datetime.now(timezone.utc), actor=actor)
 
     def tick(self) -> list[CreditRechargeRunRecord]:
@@ -378,6 +393,7 @@ class CreditControlService:
                 if self.store.get_credit_run_by_occurrence(policy.policy_id, occurrence_key):
                     self._advance_policy_after_occurrence(policy, scheduled_for)
                 else:
+                    self._refresh_operational_data_before_mutation()
                     records.append(
                         self._execute_policy(
                             policy,
@@ -505,6 +521,14 @@ class CreditControlService:
         self._audit_run(record)
         self._advance_policy_after_occurrence(policy, scheduled_for, catch_up=catch_up)
         return record
+
+    def refresh_operational_data_before_mutation(self) -> None:
+        self._refresh_operational_data_before_mutation()
+
+    def _refresh_operational_data_before_mutation(self) -> None:
+        if self.operational_data_refresher is None:
+            return
+        self.operational_data_refresher.refresh_before_mutation()
 
     def _execute_outcomes(
         self,

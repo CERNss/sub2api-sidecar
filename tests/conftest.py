@@ -40,6 +40,7 @@ def clear_app_caches() -> None:
     main.get_api_key_automation_service.cache_clear()
     main.get_provisioning_service.cache_clear()
     main.get_notification_service.cache_clear()
+    main.get_operational_data_refresher.cache_clear()
     main.get_credit_control_service.cache_clear()
     main.get_usage_segmentation_service.cache_clear()
     main.get_group_usage_service.cache_clear()

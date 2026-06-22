@@ -63,6 +63,7 @@ class ApiKeyAutomationService:
                 target_email=None,
                 reason=f"API key name must match the {self.KEY_NAME_PATTERN} pattern",
             )
+        self.rotation_service.refresh_operational_data_before_mutation()
         target_user, target_email, fallback_reason, target_error = self._resolve_create_target(
             parsed_name=parsed_name,
             target=target,

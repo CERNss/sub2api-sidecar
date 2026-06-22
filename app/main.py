@@ -149,6 +149,8 @@ from app.services.notification import (
 from app.services.notification_delivery import NotificationDeliveryService
 from app.services.operational_data import (
     MultiUpstreamOperationalDataCollector,
+    OperationalDataRefresher,
+    OperationalDataRefreshError,
     OperationalDataCollector,
     UpstreamOperationalDataCollector,
 )
@@ -303,6 +305,7 @@ def get_rotation_service_for_upstream(upstream_id: str | None = None) -> Rotatio
         store=get_flow_store(),
         sub2api_client=get_sub2api_client(selected_upstream_id),
         settings=settings,
+        operational_data_refresher=get_operational_data_refresher(),
     )
 
 
@@ -397,10 +400,19 @@ def get_notification_service() -> NotificationService:
 
 
 @lru_cache(maxsize=1)
+def get_operational_data_refresher() -> OperationalDataRefresher:
+    return OperationalDataRefresher(
+        operational_data_collector=get_notification_service().operational_data_collector,
+        usage_segmentation_service=get_usage_segmentation_service(),
+        group_usage_service=get_group_usage_service(),
+    )
+
+@lru_cache(maxsize=1)
 def get_credit_control_service() -> CreditControlService:
     return CreditControlService(
         store=get_flow_store(),
         sub2api_client=get_sub2api_client(),
+        operational_data_refresher=get_operational_data_refresher(),
     )
 
 
@@ -609,6 +621,16 @@ def handle_credit_control_error(_: Request, exc: CreditControlError) -> JSONResp
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(detail=detail).model_dump(),
+    )
+
+
+@app.exception_handler(OperationalDataRefreshError)
+def handle_operational_data_refresh_error(
+    _: Request, exc: OperationalDataRefreshError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=502,
+        content=ErrorResponse(detail=str(exc)).model_dump(),
     )
 
 
@@ -1643,6 +1665,8 @@ def run_credit_adjustment(
     operation, amount = credit_adjustment_operation(payload.amount)
     target_scope = credit_target_scope_from_adjustment(payload)
     if payload.target.mode == "filter":
+        if not preview:
+            service.refresh_operational_data_before_mutation()
         users = service.preview_filter_target(
             usage_window=credit_usage_window(payload.target.window),
             search=payload.target.search,
@@ -1671,6 +1695,7 @@ def run_credit_adjustment(
                 operation=operation,
                 reason=payload.reason,
                 actor=session.username,
+                refresh_before_mutation=False,
             )
         )
     else:

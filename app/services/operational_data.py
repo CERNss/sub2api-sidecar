@@ -67,6 +67,71 @@ class OperationalDataCollectionResult:
         return len(self.samples)
 
 
+class OperationalDataRefreshError(Exception):
+    """Raised when a forced pre-mutation refresh cannot produce a clean snapshot."""
+
+
+@dataclass(frozen=True)
+class OperationalDataRefreshResult:
+    collection: OperationalDataCollectionResult
+    usage_segment_count: int | None = None
+    group_usage_count: int | None = None
+
+
+class OperationalDataRefresher:
+    def __init__(
+        self,
+        *,
+        operational_data_collector: Any,
+        usage_segmentation_service: Any | None = None,
+        group_usage_service: Any | None = None,
+    ) -> None:
+        self.operational_data_collector = operational_data_collector
+        self.usage_segmentation_service = usage_segmentation_service
+        self.group_usage_service = group_usage_service
+
+    def refresh_before_mutation(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> OperationalDataRefreshResult:
+        moment = now or datetime.now(timezone.utc)
+        collection = self.operational_data_collector.collect(now=moment)
+        if collection.error_message:
+            raise OperationalDataRefreshError(
+                f"Forced operational data refresh failed: {collection.error_message}"
+            )
+        usage_segment_count = None
+        if self.usage_segmentation_service is not None:
+            try:
+                usage_result = self.usage_segmentation_service.refresh(now=moment)
+            except Exception as exc:
+                raise OperationalDataRefreshError(
+                    f"Forced usage segmentation refresh failed: {exc}"
+                ) from exc
+            usage_segment_count = usage_result.user_count
+        group_usage_count = None
+        if self.group_usage_service is not None:
+            try:
+                group_result = self.group_usage_service.refresh(now=moment)
+            except Exception as exc:
+                raise OperationalDataRefreshError(
+                    f"Forced group usage refresh failed: {exc}"
+                ) from exc
+            group_usage_count = group_result.group_count
+        logger.info(
+            "Forced operational data refresh completed | samples=%s usage_segments=%s group_usage=%s",
+            collection.sampled_signal_count,
+            usage_segment_count,
+            group_usage_count,
+        )
+        return OperationalDataRefreshResult(
+            collection=collection,
+            usage_segment_count=usage_segment_count,
+            group_usage_count=group_usage_count,
+        )
+
+
 class OperationalDataCollector:
     def __init__(
         self,

@@ -1,0 +1,6 @@
+- [x] Add OpenSpec delta for pre-mutation operational-data refresh behavior.
+- [x] Implement a forced refresh coordinator for raw snapshots and derived usage views.
+- [x] Inject the coordinator into rotation, API-key automation, and credit-control services.
+- [x] Refresh before mutation execution while preserving preview/dry-run behavior.
+- [x] Add backend tests for forced refresh ordering and execution from fresh snapshots.
+- [x] Run syntax checks and targeted tests where available.

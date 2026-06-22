@@ -32,6 +32,10 @@ from app.models.rotation import (
 )
 from app.services.credit_scheduler import CreditControlScheduler
 from app.services.group_usage import GroupUsageService
+from app.services.operational_data import (
+    OperationalDataCollectionResult,
+    OperationalDataRefresher,
+)
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.services.usage_segmentation import UsageSegmentationService
 
@@ -220,6 +224,7 @@ class FakeRotationSub2API:
             },
         ]
         self.user_api_keys: dict[int, list[dict[str, object]]] = {}
+        self.usage_log_items: list[dict[str, object]] | None = None
         self.users_page_size: int | None = None
         self.api_keys_page_size: int | None = None
         self.replace_calls: list[dict[str, object]] = []
@@ -309,7 +314,10 @@ class FakeRotationSub2API:
                 page = int((params or {}).get("page") or 1)
                 page_size = int((params or {}).get("page_size") or self.users_page_size)
                 start = (page - 1) * page_size
-                items = self.users[start : start + page_size]
+                items = [
+                    self._user_response_item(user)
+                    for user in self.users[start : start + page_size]
+                ]
                 pages = (len(self.users) + page_size - 1) // page_size
                 return FakeResponse(
                     200,
@@ -325,7 +333,14 @@ class FakeRotationSub2API:
                         },
                     },
                 )
-            return FakeResponse(200, {"code": 0, "message": "success", "data": self.users})
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": [self._user_response_item(user) for user in self.users],
+                },
+            )
         if method == "POST" and path.startswith("/api/v1/admin/users/") and path.endswith("/balance"):
             user_id = int(path.split("/")[5])
             self.balance_calls.append(
@@ -629,6 +644,49 @@ class FakeRotationSub2API:
                     "data": {"total_actual_cost": 88.5, "total_requests": 10},
                 },
             )
+        if method == "GET" and path == "/api/v1/admin/usage":
+            return self._usage_logs_response(params=params)
+        if method == "GET" and path == "/api/v1/admin/dashboard/users-ranking":
+            window_days = {
+                "1d": 1,
+                "7d": 7,
+                "30d": 30,
+            }
+            start_date = str((params or {}).get("start_date") or "")
+            end_date = str((params or {}).get("end_date") or "")
+            days = None
+            try:
+                parsed_start = datetime.fromisoformat(start_date).date()
+                parsed_end = datetime.fromisoformat(end_date).date()
+                days = (parsed_end - parsed_start).days + 1
+            except ValueError:
+                days = None
+            window = next(
+                (key for key, value in window_days.items() if value == days),
+                "1d",
+            )
+            costs = {
+                101: {"1d": 2.5, "7d": 6.0, "30d": 20.0},
+                202: {"1d": 0.5, "7d": 1.2, "30d": 4.0},
+            }
+            items = [
+                {
+                    "user_id": user["id"],
+                    "email": user.get("email"),
+                    "actual_cost": costs.get(int(user["id"]), {}).get(window, 0.0),
+                    "requests": 1,
+                    "tokens": 100,
+                }
+                for user in self.users
+            ]
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"ranking": items, "total": len(items)},
+                },
+            )
         if method == "GET" and path == "/api/v1/admin/dashboard/groups":
             window_days = {
                 "1d": 1,
@@ -663,6 +721,65 @@ class FakeRotationSub2API:
                 },
             )
         return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    def _usage_logs_response(self, params=None) -> FakeResponse:
+        all_items = (
+            list(self.usage_log_items)
+            if self.usage_log_items is not None
+            else self._default_usage_log_items()
+        )
+        page = int((params or {}).get("page") or 1)
+        page_size = int((params or {}).get("page_size") or 1000)
+        start = (page - 1) * page_size
+        page_items = all_items[start : start + page_size]
+        pages = (len(all_items) + page_size - 1) // page_size if page_size else 1
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "items": page_items,
+                    "total": len(all_items),
+                    "page": page,
+                    "page_size": page_size,
+                    "pages": pages,
+                },
+            },
+        )
+
+    def _user_response_item(self, user: dict[str, object]) -> dict[str, object]:
+        current_group_id = user.get("current_group_id", user.get("group_id"))
+        current_group_name = user.get("current_group_name", user.get("group_name"))
+        group_ids = user.get("group_ids") or user.get("allowed_groups")
+        return {
+            **user,
+            "current_group_id": current_group_id,
+            "current_group_name": current_group_name,
+            "group_ids": group_ids
+            or ([current_group_id] if current_group_id not in (None, "") else []),
+        }
+
+    def _default_usage_log_items(self) -> list[dict[str, object]]:
+        costs = {101: 1.5, 202: 0.2}
+        items: list[dict[str, object]] = []
+        for user in self.users:
+            user_id = user.get("id")
+            try:
+                cost = costs.get(int(user_id), 0.0)
+            except (TypeError, ValueError):
+                cost = 0.0
+            if cost <= 0:
+                continue
+            group_id = user.get("current_group_id", user.get("group_id"))
+            items.append(
+                usage_log_item(
+                    user_id=user_id,
+                    group_id=group_id,
+                    actual_cost=cost,
+                )
+            )
+        return items
 
     def _api_keys_response(self, user_id: int, params=None) -> FakeResponse:
         items = self.user_api_keys.get(
@@ -713,6 +830,7 @@ def clear_caches() -> None:
     main.get_api_key_automation_service.cache_clear()
     main.get_provisioning_service.cache_clear()
     main.get_notification_service.cache_clear()
+    main.get_operational_data_refresher.cache_clear()
     main.get_credit_control_service.cache_clear()
     main.get_usage_segmentation_service.cache_clear()
     main.get_group_usage_service.cache_clear()
@@ -776,6 +894,27 @@ def add_available_account_for_group(
             "group_ids": [group_id],
         }
     )
+
+
+def usage_log_item(
+    *,
+    user_id: object | None = None,
+    group_id: object | None = None,
+    actual_cost: float,
+) -> dict[str, object]:
+    item: dict[str, object] = {
+        "id": f"usage-{user_id or 'group'}-{group_id or 'none'}-{actual_cost}",
+        "created_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        "total_cost": actual_cost,
+        "actual_cost": actual_cost,
+        "input_tokens": 100,
+        "output_tokens": 50,
+    }
+    if user_id is not None:
+        item["user_id"] = user_id
+    if group_id is not None:
+        item["group_id"] = group_id
+    return item
 
 
 def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
@@ -2824,6 +2963,34 @@ def test_credit_control_manual_adjustment_preview_execute_and_audit(client) -> N
     assert audit_payload["items"][0]["reason"] == "top up selected users"
 
 
+def test_credit_control_filter_execution_forces_refresh_before_resolving_targets(client) -> None:
+    backend = FakeRotationSub2API()
+    call_order: list[str] = []
+    login(client)
+
+    def tracked_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if method == "GET" and path == "/api/v1/admin/users":
+            call_order.append("list_users")
+        if method == "POST" and path.endswith("/balance"):
+            call_order.append("balance")
+        return backend.request(method, url, json=json, params=params, timeout=timeout)
+
+    payload = {
+        "amount": 5,
+        "reason": "top up filtered users",
+        "target": {"mode": "filter", "window": "1d"},
+    }
+    with patch.object(requests.Session, "request", new=tracked_request):
+        response = client.post("/api/credit-control/adjustments", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["affected_count"] == 2
+    assert call_order[0] == "list_users"
+    assert "balance" in call_order
+    assert call_order.index("list_users") < call_order.index("balance")
+
+
 def test_credit_control_manual_adjustment_partial_failure_records_audit(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
@@ -2978,6 +3145,49 @@ def test_credit_control_scheduler_runs_startup_tick_and_reports_snapshot() -> No
     assert snapshot.tick_count == 1
     assert snapshot.last_tick_started_at is not None
     assert snapshot.last_tick_error is None
+
+
+def test_operation_data_refresher_collects_and_refreshes_derived_views() -> None:
+    calls: list[str] = []
+
+    class _FakeCollector:
+        def collect(self, *, now=None):
+            calls.append("collect")
+            started_at = now or datetime.now(timezone.utc)
+            return OperationalDataCollectionResult(
+                samples=[],
+                source_statuses=[],
+                started_at=started_at,
+                finished_at=started_at,
+            )
+
+    class _FakeUsageSegmentationService:
+        def refresh(self, *, now=None):
+            calls.append("segments")
+
+            class _Result:
+                user_count = 2
+
+            return _Result()
+
+    class _FakeGroupUsageService:
+        def refresh(self, *, now=None):
+            calls.append("groups")
+
+            class _Result:
+                group_count = 4
+
+            return _Result()
+
+    result = OperationalDataRefresher(
+        operational_data_collector=_FakeCollector(),
+        usage_segmentation_service=_FakeUsageSegmentationService(),
+        group_usage_service=_FakeGroupUsageService(),
+    ).refresh_before_mutation()
+
+    assert calls == ["collect", "segments", "groups"]
+    assert result.usage_segment_count == 2
+    assert result.group_usage_count == 4
 
 
 def test_credit_control_recurring_policy_round_trips_dashboard_schedule(client) -> None:
@@ -5219,6 +5429,58 @@ def test_manual_rotation_does_not_require_dynamic_rotation_pool(client) -> None:
     assert updated_assignment.current_group_id == 22
 
 
+def test_manual_rotation_uses_refreshed_current_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    login(client)
+    now = datetime.now(timezone.utc)
+    store = main.get_flow_store()
+    store.upsert_rotation_pool_group(
+        RotationPoolGroup(
+            group_id=11,
+            group_name="rotation-low",
+            platform="openai",
+            status="active",
+            is_exclusive=True,
+            priority=0,
+        )
+    )
+    store.upsert_rotation_pool_group(
+        RotationPoolGroup(
+            group_id=22,
+            group_name="rotation-high",
+            platform="openai",
+            status="active",
+            is_exclusive=True,
+            priority=1,
+        )
+    )
+    store.upsert_user_assignment(
+        UserGroupAssignment(
+            user_id=101,
+            email="rotate@example.com",
+            current_group_id=11,
+            current_group_name="rotation-low",
+            assignment_mode=AssignmentMode.managed_pool,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/rotation/manual", json={"user_id": 101, "target_group_id": 11})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "moved"
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 22, "new_group_id": 11}
+    ]
+    updated_assignment = store.get_user_assignment(101)
+    assert updated_assignment is not None
+    assert updated_assignment.current_group_id == 11
+
+
 def test_auto_rotation_balances_usage_across_rotation_pool(
     client, monkeypatch
 ) -> None:
@@ -5304,7 +5566,71 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     assert run["moved"][0]["user_id"] == 101
 
 
-def test_auto_rotation_falls_back_to_user_usage_without_segment_record(client) -> None:
+def test_auto_rotation_execution_forces_refresh_before_using_snapshots(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    call_order: list[str] = []
+    clear_caches()
+
+    with TestClient(main.app) as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        now = datetime.now(timezone.utc)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+        def tracked_request(self, method: str, url: str, json=None, params=None, timeout=None):
+            path = urlparse(url).path
+            if method == "GET" and path == "/api/v1/admin/users":
+                call_order.append("list_users")
+            if method == "POST" and path.endswith("/replace-group"):
+                call_order.append("replace_group")
+            return backend.request(method, url, json=json, params=params, timeout=timeout)
+
+        with patch.object(requests.Session, "request", new=tracked_request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["moved"]) == 1
+    assert payload["moved"][0]["user_id"] == 101
+    assert call_order[0] == "list_users"
+    assert "replace_group" in call_order
+    assert call_order.index("list_users") < call_order.index("replace_group")
+
+
+def test_auto_rotation_refreshes_usage_segments_before_execution(client) -> None:
     backend = FakeRotationSub2API()
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
@@ -5363,7 +5689,7 @@ def test_auto_rotation_falls_back_to_user_usage_without_segment_record(client) -
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
+    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "usage_segmentation"
 
 
 def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -> None:
@@ -5430,7 +5756,7 @@ def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -
     assert len(payload["moved"]) == 1
     assert payload["moved"][0]["user_id"] == 101
     assert payload["moved"][0]["usage_value"] == 1.5
-    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "user_usage"
+    assert payload["moved"][0]["usage_snapshot"]["usage_source"] == "usage_segmentation"
     assert backend.replace_calls == [
         {"user_id": 101, "old_group_id": 22, "new_group_id": 11}
     ]
@@ -5442,6 +5768,11 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     backend.users[0]["group_name"] = "rotation-low"
     backend.users[1]["group_id"] = 11
     backend.users[1]["group_name"] = "rotation-low"
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=11, actual_cost=2.0),
+        usage_log_item(user_id=202, group_id=11, actual_cost=1.0),
+        usage_log_item(group_id=22, actual_cost=0.2),
+    ]
     add_available_account_for_group(backend, 22)
     clear_caches()
 
@@ -5547,6 +5878,11 @@ def test_auto_rotation_fails_when_target_group_missing_upstream(client) -> None:
     backend.users[0]["group_name"] = "rotation-low"
     backend.users[1]["group_id"] = 11
     backend.users[1]["group_name"] = "rotation-low"
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=11, actual_cost=1.0),
+        usage_log_item(group_id=11, actual_cost=2.0),
+        usage_log_item(group_id=99, actual_cost=0.1),
+    ]
     add_available_account_for_group(backend, 99)
     clear_caches()
 
@@ -5631,6 +5967,11 @@ def test_auto_rotation_fails_when_target_group_has_no_upstream_accounts(client) 
     backend.users[0]["group_name"] = "rotation-low"
     backend.users[1]["group_id"] = 11
     backend.users[1]["group_name"] = "rotation-low"
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=11, actual_cost=1.0),
+        usage_log_item(group_id=11, actual_cost=2.0),
+        usage_log_item(group_id=55, actual_cost=0.1),
+    ]
     backend.groups.append(
         {
             "id": 55,
@@ -5724,6 +6065,11 @@ def test_auto_rotation_fails_when_target_group_accounts_are_unschedulable(client
     backend.users[0]["group_name"] = "rotation-low"
     backend.users[1]["group_id"] = 11
     backend.users[1]["group_name"] = "rotation-low"
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=11, actual_cost=1.0),
+        usage_log_item(group_id=11, actual_cost=2.0),
+        usage_log_item(group_id=22, actual_cost=0.1),
+    ]
     clear_caches()
 
     with TestClient(main.app) as auto_client:

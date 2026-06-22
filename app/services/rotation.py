@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from email_validator import EmailNotValidError, validate_email
 
@@ -176,16 +176,22 @@ class _GroupMigrationCandidate:
     source_api_key_count: int
 
 
+class OperationalDataRefresher(Protocol):
+    def refresh_before_mutation(self) -> Any: ...
+
+
 class RotationService:
     def __init__(
         self,
         store: PostgresFlowStore,
         sub2api_client: Sub2APIClient,
         settings: Settings,
+        operational_data_refresher: OperationalDataRefresher | None = None,
     ) -> None:
         self.store = store
         self.sub2api_client = sub2api_client
         self.settings = settings
+        self.operational_data_refresher = operational_data_refresher
 
     def list_pool_candidates(self) -> list[dict[str, Any]]:
         rotation_selected = {
@@ -292,6 +298,8 @@ class RotationService:
         assignment = self.store.get_user_assignment(user_id)
         if assignment is None:
             raise RotationExecutionError("No stored assignment found for the user")
+        self._refresh_operational_data_before_mutation()
+        assignment = self._assignment_with_refreshed_current_group(assignment)
 
         target_group = self._get_upstream_group(target_group_id)
         rotation_supported, unsupported_reason = self._rotation_support(target_group)
@@ -382,6 +390,7 @@ class RotationService:
     ) -> RotationExecutionResult:
         if target_group_id in (None, ""):
             raise RotationTargetValidationError("Target group is required")
+        self._refresh_operational_data_before_mutation()
 
         direct_group_id, direct_group_name = self._get_direct_user_group(user_id)
         effective_source_group_id = source_group_id
@@ -542,6 +551,7 @@ class RotationService:
             raise RotationTargetValidationError("Target group is required")
         if self._normalize_key(source_group_id) == self._normalize_key(target_group_id):
             raise RotationTargetValidationError("Source and target groups must be different")
+        self._refresh_operational_data_before_mutation()
 
         source_group = self._get_upstream_group(source_group_id)
         target_group = self._get_upstream_group(target_group_id)
@@ -1137,6 +1147,7 @@ class RotationService:
             raise RotationTargetValidationError("API key is required")
         if target_group_id in (None, ""):
             raise RotationTargetValidationError("Target group is required")
+        self._refresh_operational_data_before_mutation()
 
         target_group = self._get_upstream_group(target_group_id)
         existing = self.store.get_user_assignment(user_id)
@@ -1198,6 +1209,8 @@ class RotationService:
             raise RotationExecutionError("Unsupported key transfer scope")
         if scope_key == "all_users" and source_user_id not in (None, ""):
             scope_key = "admin"
+        if not dry_run:
+            self._refresh_operational_data_before_mutation()
         if scope_key == "all_users":
             source_user_id = None
             source_user_key = None
@@ -1360,6 +1373,8 @@ class RotationService:
         landing_groups = self.store.list_rotation_pool_groups(RotationPoolKind.landing)
         if not pool_groups:
             raise RotationPoolEmptyError("No rotation pool groups are available")
+        if not dry_run:
+            self._refresh_operational_data_before_mutation()
 
         sync_result = self._sync_existing_user_assignments(
             pool_groups,
@@ -1765,6 +1780,7 @@ class RotationService:
             raise RotationExecutionError("Run record was already rolled back")
         if not record.moved:
             raise RotationExecutionError("Run record has no moved items to roll back")
+        self._refresh_operational_data_before_mutation()
 
         rollback_results: list[dict[str, Any]] = []
         for item in record.moved:
@@ -2119,6 +2135,42 @@ class RotationService:
         emails: set[str],
     ) -> tuple[dict[str, dict[str, Any]], set[str]]:
         return self._users_by_exact_emails(emails)
+
+    def refresh_operational_data_before_mutation(self) -> None:
+        self._refresh_operational_data_before_mutation()
+
+    def _refresh_operational_data_before_mutation(self) -> None:
+        if self.operational_data_refresher is None:
+            return
+        self.operational_data_refresher.refresh_before_mutation()
+
+    def _assignment_with_refreshed_current_group(
+        self,
+        assignment: UserGroupAssignment,
+    ) -> UserGroupAssignment:
+        direct_group_id, direct_group_name = self._get_direct_user_group(assignment.user_id)
+        if direct_group_id in (None, ""):
+            return assignment
+        if self._normalize_key(direct_group_id) == self._normalize_key(assignment.current_group_id):
+            if direct_group_name not in (None, "") and assignment.current_group_name != direct_group_name:
+                assignment.current_group_name = direct_group_name
+                assignment.updated_at = datetime.now(timezone.utc)
+                self.store.upsert_user_assignment(assignment)
+            return assignment
+        refreshed = UserGroupAssignment(
+            user_id=assignment.user_id,
+            email=assignment.email,
+            current_group_id=direct_group_id,
+            current_group_name=direct_group_name,
+            assignment_mode=assignment.assignment_mode,
+            last_rotation_at=assignment.last_rotation_at,
+            last_decision_reason="synced from forced pre-mutation refresh",
+            has_api_keys=assignment.has_api_keys,
+            created_at=assignment.created_at,
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.store.upsert_user_assignment(refreshed)
+        return refreshed
 
     def _available_groups_by_key(self) -> dict[str, dict[str, Any]]:
         groups = self.sub2api_client.list_groups(
