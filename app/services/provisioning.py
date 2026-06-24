@@ -88,6 +88,7 @@ class ProvisioningService:
                     existing_account=existing_account,
                     email=email,
                     group_id=group_id,
+                    flow_id=flow_id,
                     sub2api_client=client,
                 )
                 flow = ProvisionFlow(
@@ -263,6 +264,7 @@ class ProvisioningService:
                 api_base_url=api_base_url,
                 api_key=api_key,
                 group_id=group_id,
+                flow_id=flow_id,
                 sub2api_client=client,
             )
             self._record_event(
@@ -394,6 +396,7 @@ class ProvisioningService:
                 email=flow.email,
                 oauth_payload=exchange["exchange"],
                 group_id=flow.group_id,
+                flow_id=flow.flow_id,
                 sub2api_client=client,
             )
             if account_action == "created":
@@ -570,6 +573,7 @@ class ProvisioningService:
         email: str,
         oauth_payload: dict[str, object],
         group_id: object,
+        flow_id: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
         client = sub2api_client or self.sub2api_client
@@ -580,18 +584,18 @@ class ProvisioningService:
                 oauth_payload=oauth_payload,
                 group_id=group_id,
             )
-            client.ensure_default_scheduled_test_plan(account["id"])
+            self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "created"
 
         account_id = existing["id"]
         if not self._account_has_group(existing, group_id):
             client.bind_account_to_group(account_id, group_id)
             account = self._existing_account_payload(existing, email)
-            client.ensure_default_scheduled_test_plan(account["id"])
+            self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "bound_existing"
 
         account = self._existing_account_payload(existing, email)
-        client.ensure_default_scheduled_test_plan(account["id"])
+        self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
         return account, "already_bound"
 
     def _resolve_apikey_account(
@@ -601,6 +605,7 @@ class ProvisioningService:
         api_base_url: str,
         api_key: str,
         group_id: object,
+        flow_id: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
         client = sub2api_client or self.sub2api_client
@@ -612,7 +617,7 @@ class ProvisioningService:
                 api_key=api_key,
                 group_id=group_id,
             )
-            client.ensure_default_scheduled_test_plan(account["id"])
+            self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "created"
 
         account_id = existing["id"]
@@ -625,9 +630,9 @@ class ProvisioningService:
         )
         if not self._account_has_group(existing, group_id):
             client.bind_account_to_group(account_id, group_id)
-            client.ensure_default_scheduled_test_plan(account["id"])
+            self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "configured_and_bound"
-        client.ensure_default_scheduled_test_plan(account["id"])
+        self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
         return account, "configured_existing"
 
     def _find_apikey_account(
@@ -654,6 +659,7 @@ class ProvisioningService:
         existing_account: dict[str, object],
         email: str,
         group_id: object,
+        flow_id: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
         client = sub2api_client or self.sub2api_client
@@ -665,10 +671,32 @@ class ProvisioningService:
         account_id = existing_account["id"]
         if not self._account_has_group(existing_account, group_id):
             client.bind_account_to_group(account_id, group_id)
-            client.ensure_default_scheduled_test_plan(account["id"])
+            self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "configured_and_bound"
-        client.ensure_default_scheduled_test_plan(account["id"])
+        self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
         return account, "configured_existing"
+
+    def _ensure_default_scheduled_test_plan(
+        self,
+        flow_id: str,
+        account_id: object,
+        sub2api_client: Sub2APIClient,
+    ) -> None:
+        try:
+            sub2api_client.ensure_default_scheduled_test_plan(account_id)
+        except Exception as exc:
+            logger.warning(
+                "Default scheduled test plan setup failed after account provisioning | account_id=%s",
+                account_id,
+                exc_info=True,
+            )
+            self._record_event(
+                flow_id=flow_id,
+                event_type=ProvisionEventType.failed,
+                status=ProvisionEventStatus.failed,
+                message="Default scheduled test plan setup failed after account provisioning",
+                details={"account_id": account_id, "error": str(exc)},
+            )
 
     def _find_oauth_account(
         self,

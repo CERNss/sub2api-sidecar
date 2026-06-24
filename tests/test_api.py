@@ -2400,6 +2400,51 @@ def test_provision_apikey_start_creates_account_without_oauth(client) -> None:
     assert stored_flow.oauth_account_id == "oa-key-1"
 
 
+def test_provision_apikey_start_succeeds_when_scheduled_test_plan_setup_fails(client) -> None:
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if method == "POST" and path == "/api/v1/admin/accounts":
+            return FakeResponse(200, {"account_id": "oa-key-1", "name": json["name"]})
+        if method == "POST" and path == "/api/v1/admin/scheduled-test-plans":
+            return FakeResponse(500, {"detail": "scheduled test plan backend unavailable"})
+        return fake_sub2api_request(self, method, url, json=json, params=params, timeout=timeout)
+
+    login(client)
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.post(
+            "/provision/apikey/start",
+            json={
+                "name": "manual-key-1",
+                "api_base_url": "https://api.openai.com/v1",
+                "api_key": "sk-test-123",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["status"] == "completed"
+    assert payload["account_id"] == "oa-key-1"
+
+    stored_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
+    assert stored_flow is not None
+    assert stored_flow.status.value == "completed"
+    assert stored_flow.oauth_account_id == "oa-key-1"
+
+    events = main.get_flow_store().list_provision_events(payload["flow_id"])
+    schedule_events = [
+        event
+        for event in events
+        if event.message == "Default scheduled test plan setup failed after account provisioning"
+    ]
+    assert len(schedule_events) == 1
+    assert schedule_events[0].status.value == "failed"
+    assert "scheduled test plan backend unavailable" in (
+        schedule_events[0].details or {}
+    ).get("error", "")
+
+
 def test_provision_apikey_start_requires_auth(client) -> None:
     response = client.post(
         "/provision/apikey/start",
