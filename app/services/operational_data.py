@@ -635,12 +635,18 @@ class OperationalDataCollector:
         current_usage: dict[str, Any] | None,
         previous_usage: dict[str, Any] | None,
     ) -> None:
+        # NOTE: the raw per-request usage-log lists (SOURCE_USAGE_LOGS_CURRENT_DAY /
+        # SOURCE_USAGE_LOGS_PREVIOUS_DAY) are intentionally NOT persisted. They are the
+        # largest payloads we handle (potentially tens/hundreds of thousands of dicts per
+        # day), and no consumer reads them back from the store — every reader uses the
+        # derived USER_USAGE / GROUP_USAGE aggregates instead. Serializing them via
+        # model_dump_json() on every collect cycle doubled peak memory and bloated the
+        # operational_data_snapshots table for no benefit. Their fetch status is still
+        # reported through source_statuses; only the redundant persistence is dropped.
         snapshots = {
             SOURCE_ACCOUNTS: accounts,
             SOURCE_GROUPS: groups,
             SOURCE_USERS: users,
-            SOURCE_USAGE_LOGS_CURRENT_DAY: current_usage_logs,
-            SOURCE_USAGE_LOGS_PREVIOUS_DAY: previous_usage_logs,
             SOURCE_USER_USAGE: user_usage,
             SOURCE_GROUP_USAGE: group_usage,
             SOURCE_USER_API_KEYS: user_api_keys,

@@ -61,10 +61,15 @@ class Sub2APIClient:
         admin_api_key: str,
         provisioning_defaults: Sub2APIProvisioningDefaults,
         timeout_seconds: int = 30,
+        usage_log_max_items: int = 0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.provisioning_defaults = provisioning_defaults
         self.timeout_seconds = timeout_seconds
+        # Safety valve against unbounded memory growth when paginating usage logs.
+        # 0 means unlimited (legacy behavior); a positive value caps how many items we
+        # accumulate in memory in a single list_usage_logs call.
+        self.usage_log_max_items = max(0, int(usage_log_max_items))
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -377,6 +382,20 @@ class Sub2APIClient:
 
             page_items = [item for item in raw_items if isinstance(item, dict)]
             items.extend(page_items)
+            if self.usage_log_max_items and len(items) >= self.usage_log_max_items:
+                logger.warning(
+                    "Sub2API usage log pagination capped | path=%s page=%s "
+                    "accumulated=%s max_items=%s reported_total=%s | "
+                    "aggregates may undercount; raise SUB2API_USAGE_LOG_MAX_ITEMS or "
+                    "shorten the usage window if this is expected",
+                    self.USAGE_LIST_PATH,
+                    page,
+                    len(items),
+                    self.usage_log_max_items,
+                    total,
+                )
+                del items[self.usage_log_max_items :]
+                break
             if not page_items:
                 break
             if pages is not None and page >= pages:

@@ -46,6 +46,7 @@ CONFIG_ENV_NAMES = (
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON",
     "SUB2API_API_KEY_GROUP_SELECTION",
+    "SUB2API_USAGE_LOG_MAX_ITEMS",
     "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_IDS",
     "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_NAMES",
     "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_EMAILS",
@@ -111,6 +112,7 @@ notifications:
       - manual@example.com
 sub2api:
   request_timeout_seconds: 12
+  usage_log_max_items: 50000
   api_key_group_selection: random
   upstreams:
     - id: main
@@ -152,6 +154,7 @@ sub2api:
     assert settings.app_access_key_ttl_hours == 6
     assert settings.database_url == "postgresql://sidecar:secret@postgres:5432/sidecar"
     assert settings.request_timeout_seconds == 12
+    assert settings.sub2api_usage_log_max_items == 50000
     assert settings.api_key_group_selection == "random"
     assert settings.account_invalid_alert_whitelist.ids == ("acct-yaml",)
     assert settings.account_invalid_alert_whitelist.names == ("Manual Off",)
@@ -562,3 +565,45 @@ def test_settings_rejects_removed_auto_rotation_env(monkeypatch) -> None:
         Settings.from_env()
 
     assert "AUTO_ROTATION_USAGE_WINDOW" in str(exc_info.value)
+
+
+def test_settings_usage_log_max_items_defaults_to_100k(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+
+    settings = Settings.from_env()
+
+    assert settings.sub2api_usage_log_max_items == 100_000
+
+
+def test_settings_usage_log_max_items_env_override_allows_unlimited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("SUB2API_USAGE_LOG_MAX_ITEMS", "0")
+
+    settings = Settings.from_env()
+
+    assert settings.sub2api_usage_log_max_items == 0
+
+
+def test_settings_rejects_negative_usage_log_max_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("SUB2API_USAGE_LOG_MAX_ITEMS", "-1")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "SUB2API_USAGE_LOG_MAX_ITEMS" in str(exc_info.value)

@@ -21,6 +21,10 @@ notifications:
 
 sub2api:
   request_timeout_seconds: 30
+  # Safety cap on how many usage-log rows a single fetch accumulates in memory.
+  # 0 = unlimited (legacy). Prevents OOM when a day has a very large number of logs;
+  # a hit is logged as a warning and may make that window's aggregates undercount.
+  usage_log_max_items: 100000
   api_key_group_selection: random
   upstreams:
     - id: main

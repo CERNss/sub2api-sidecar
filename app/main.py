@@ -282,6 +282,7 @@ def get_sub2api_client(upstream_id: str | None = None) -> Sub2APIClient:
         admin_api_key=upstream.admin_api_key,
         provisioning_defaults=upstream.provisioning_defaults,
         timeout_seconds=upstream.request_timeout_seconds,
+        usage_log_max_items=settings.sub2api_usage_log_max_items,
     )
 
 

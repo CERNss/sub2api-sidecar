@@ -1284,6 +1284,89 @@ def test_sub2api_client_lists_all_user_api_keys_with_user_context() -> None:
     ]
 
 
+def _usage_log_pagination_request(total_items: int, page_size: int):
+    """Build a fake requests.Session.request that paginates /admin/usage.
+
+    Tracks how many usage pages were fetched so tests can assert the client stops
+    paginating once the in-memory cap is reached.
+    """
+
+    state = {"pages_fetched": 0}
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if path != "/api/v1/admin/usage":
+            return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+        state["pages_fetched"] += 1
+        page = int((params or {}).get("page", 1))
+        start = (page - 1) * page_size
+        items = [
+            {"id": idx, "user_id": "u1"}
+            for idx in range(start, min(start + page_size, total_items))
+        ]
+        pages = (total_items + page_size - 1) // page_size
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "items": items,
+                    "total": total_items,
+                    "page": page,
+                    "page_size": page_size,
+                    "pages": pages,
+                },
+            },
+        )
+
+    return fake_request, state
+
+
+def test_list_usage_logs_caps_accumulated_items() -> None:
+    fake_request, state = _usage_log_pagination_request(total_items=10, page_size=2)
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+        usage_log_max_items=5,
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.list_usage_logs(
+            start_date=datetime(2026, 5, 10).date(),
+            end_date=datetime(2026, 5, 10).date(),
+            timezone_name="UTC",
+            page_size=2,
+        )
+
+    # Items are truncated to exactly the cap, and pagination stops early
+    # (3 pages of 2 reach 6 >= 5, then trim to 5) rather than fetching all 5 pages.
+    assert len(result["items"]) == 5
+    assert state["pages_fetched"] == 3
+
+
+def test_list_usage_logs_unlimited_by_default() -> None:
+    fake_request, state = _usage_log_pagination_request(total_items=10, page_size=2)
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.list_usage_logs(
+            start_date=datetime(2026, 5, 10).date(),
+            end_date=datetime(2026, 5, 10).date(),
+            timezone_name="UTC",
+            page_size=2,
+        )
+
+    assert len(result["items"]) == 10
+    assert result["total"] == 10
+    assert state["pages_fetched"] == 5
+
+
 def test_sub2api_client_creates_user_api_key_without_forwarding_group_override() -> None:
     calls: list[dict[str, object]] = []
 

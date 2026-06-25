@@ -324,6 +324,7 @@ database:
 ```yaml
 sub2api:
   request_timeout_seconds: 30
+  usage_log_max_items: 100000
   api_key_group_selection: random
   upstreams:
     - id: main
@@ -335,6 +336,8 @@ sub2api:
       base_url: https://us-proxy-2.sub2api.tcgcard.jp
       admin_api_key_env: SUB2API_US_PROXY_2_ADMIN_API_KEY
 ```
+
+`usage_log_max_items`（环境变量 `SUB2API_USAGE_LOG_MAX_ITEMS`，默认 `100000`，`0` 表示不限制）限制单次拉取用量明细时在内存中累积的最大条数。运行态数据采集每个周期会把当天和前一天的全部用量明细拉进内存，量大时可能触发 OOM；该上限是防止进程被 OOM kill 的安全阀。命中上限时会打印 warning，并可能导致该时间窗的聚合数值偏低——如属预期，可调大该值或缩短用量窗口。
 
 第一个 upstream 是默认上游，也是 Sub2API 跳转携带 `token` 登录 sidecar 时唯一验证 JWT 的主站；后续 upstream 按从站处理，不参与跳转 token 登录。登录后的顶部“当前用户”区域会显示全局 Sub2API 切换器，切换目标后，用户分组编排、密钥管理和 OAuth 预配会把对应 `upstream_id` 发给后端并访问该从站。也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集会遍历所有 upstream：主站继续写入原有 source/metric key，从站写入 `upstream:<id>:` 前缀的 source/metric key，避免不同站点数据混在一起；余额管理、用量分层、自动轮换仍消费主站的兼容 key。
 

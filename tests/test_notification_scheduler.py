@@ -614,6 +614,16 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
     snapshot = main.get_flow_store().get_latest_operational_data_snapshot("accounts")
     assert snapshot is not None
     assert isinstance(snapshot.payload, list)
+    # Raw per-request usage-log lists are intentionally NOT persisted (write-only and
+    # potentially huge); their fetch status is still reported via source_statuses above.
+    assert (
+        main.get_flow_store().get_latest_operational_data_snapshot("usage_logs_current_day")
+        is None
+    )
+    assert (
+        main.get_flow_store().get_latest_operational_data_snapshot("usage_logs_previous_day")
+        is None
+    )
     usage_snapshot = main.get_flow_store().get_latest_operational_data_snapshot("user_usage")
     assert usage_snapshot is not None
     assert usage_snapshot.payload["u1"]["5h"]["total_actual_cost"] == 1.5
