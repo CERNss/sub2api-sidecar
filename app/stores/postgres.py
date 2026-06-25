@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import atexit
 import json
-import psycopg
+import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from app.models.auth import PersistedAuthSession
@@ -42,12 +46,80 @@ from app.models.rotation import (
 from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
 from app.stores.base import FlowStore
 
+logger = logging.getLogger(__name__)
+
+DEFAULT_POOL_MIN_SIZE = 1
+DEFAULT_POOL_MAX_SIZE = 10
+
+# Connection pools are shared per database URL across every PostgresFlowStore that
+# targets the same database. The app keeps a single store, but tests construct many;
+# sharing keeps the total number of physical connections bounded by max_size instead
+# of growing with the number of store instances.
+_CONNECTION_POOLS: dict[str, ConnectionPool] = {}
+_CONNECTION_POOLS_LOCK = threading.Lock()
+
+
+def _configure_connection(connection: psycopg.Connection) -> None:
+    # Disable server-side prepared statements. The payload-blob schema issues many
+    # distinct one-off queries (no hot identical-statement loops to benefit), and
+    # cached plans on long-lived pooled connections break when DDL changes a table's
+    # OID (e.g. schema resets between tests).
+    connection.prepare_threshold = None
+
+
+def _get_connection_pool(
+    database_url: str, *, min_size: int, max_size: int
+) -> ConnectionPool:
+    with _CONNECTION_POOLS_LOCK:
+        pool = _CONNECTION_POOLS.get(database_url)
+        if pool is None:
+            pool = ConnectionPool(
+                conninfo=database_url,
+                min_size=min_size,
+                max_size=max_size,
+                max_idle=300.0,
+                max_lifetime=1800.0,
+                kwargs={"row_factory": dict_row},
+                configure=_configure_connection,
+                name="sidecar-pg",
+                open=True,
+            )
+            _CONNECTION_POOLS[database_url] = pool
+        return pool
+
+
+def _close_all_connection_pools() -> None:
+    with _CONNECTION_POOLS_LOCK:
+        for pool in _CONNECTION_POOLS.values():
+            try:
+                pool.close()
+            except Exception:  # pragma: no cover - best-effort shutdown
+                logger.exception("Failed to close PostgreSQL connection pool")
+        _CONNECTION_POOLS.clear()
+
+
+# Close pools (and stop their background workers) when the interpreter exits. This
+# covers both the app process and the test runner, so pytest does not hang on the
+# pool's non-daemon maintenance threads. The lifespan handler intentionally does NOT
+# close the shared pool, otherwise tests that drive startup/shutdown via TestClient
+# would tear down a pool that later tests still reuse.
+atexit.register(_close_all_connection_pools)
+
 
 class PostgresFlowStore(FlowStore):
     """PostgreSQL-backed store for flows, rotation pool membership, assignments, and audit events."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        pool_min_size: int = DEFAULT_POOL_MIN_SIZE,
+        pool_max_size: int = DEFAULT_POOL_MAX_SIZE,
+    ) -> None:
         self.database_url = database_url
+        self._pool = _get_connection_pool(
+            database_url, min_size=pool_min_size, max_size=pool_max_size
+        )
         self._initialize_schema()
 
     def save(self, flow: ProvisionFlow) -> ProvisionFlow:
@@ -1904,8 +1976,12 @@ class PostgresFlowStore(FlowStore):
             return "", ()
         return "WHERE " + " AND ".join(clauses), tuple(params)
 
-    def _connect(self) -> psycopg.Connection:
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+    def _connect(self):
+        # Returns a context manager that checks a connection out of the shared pool and
+        # returns it on exit (committing on success, rolling back on error) — matching
+        # the previous `with psycopg.connect(...) as conn:` commit/close semantics, minus
+        # the per-call connect handshake.
+        return self._pool.connection()
 
     def _serialize_key(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=True, separators=(",", ":"))

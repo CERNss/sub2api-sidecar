@@ -9,6 +9,10 @@ database:
   port: 5432
   username: sub2api_sidecar
   name: sub2api_sidecar
+  # Max physical connections in the shared connection pool (env DATABASE_POOL_MAX_SIZE,
+  # default 10). One pool is shared per database URL for the whole process; keep this
+  # comfortably below the PostgreSQL server's max_connections.
+  pool_max_size: 10
 
 openai:
   oauth_redirect_uri: https://sub2api.tcgcard.jp/sidecar/auth/callback

@@ -19,6 +19,7 @@ CONFIG_ENV_NAMES = (
     "APP_ACCESS_KEY_TTL_HOURS",
     "POSTGRES_PASSWORD",
     "DATABASE_URL",
+    "DATABASE_POOL_MAX_SIZE",
     "POSTGRES_DB",
     "POSTGRES_USER",
     "SQLITE_DB_PATH",
@@ -607,3 +608,45 @@ def test_settings_rejects_negative_usage_log_max_items(
         Settings.from_env()
 
     assert "SUB2API_USAGE_LOG_MAX_ITEMS" in str(exc_info.value)
+
+
+def test_settings_database_pool_max_size_defaults_to_10(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+
+    settings = Settings.from_env()
+
+    assert settings.database_pool_max_size == 10
+
+
+def test_settings_database_pool_max_size_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("DATABASE_POOL_MAX_SIZE", "25")
+
+    settings = Settings.from_env()
+
+    assert settings.database_pool_max_size == 25
+
+
+def test_settings_rejects_non_positive_database_pool_max_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("DATABASE_POOL_MAX_SIZE", "0")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "DATABASE_POOL_MAX_SIZE" in str(exc_info.value)

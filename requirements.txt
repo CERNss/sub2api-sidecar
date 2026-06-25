@@ -3,6 +3,7 @@ uvicorn==0.34.2
 requests==2.33.1
 python-dotenv==1.2.2
 psycopg[binary]==3.2.13
+psycopg-pool==3.2.6
 starlette==1.0.1
 PyYAML==6.0.2
 email-validator==2.2.0

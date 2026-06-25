@@ -550,3 +550,45 @@ def test_postgres_store_persists_latest_user_usage_segments(app_env: dict[str, s
     assert record.usage_by_window["1d"] == 8.0
     assert len(records) == 1
     assert counts == {"heavy": 1}
+
+
+def test_postgres_store_shares_connection_pool_per_database_url(
+    app_env: dict[str, str],
+) -> None:
+    database_url = app_env["database_url"]
+    first_store = PostgresFlowStore(database_url)
+    second_store = PostgresFlowStore(database_url)
+
+    # Stores targeting the same database reuse one pool so the total number of
+    # physical connections stays bounded regardless of how many stores exist.
+    assert first_store._pool is second_store._pool
+
+
+def test_postgres_store_handles_concurrent_access_within_pool_bounds(
+    app_env: dict[str, str],
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    database_url = app_env["database_url"]
+    # NOTE: the pool is shared per database URL, so sizing is fixed by whichever store
+    # created it first (here, the app_env fixture). We assert against the pool's own
+    # reported ceiling rather than assuming a value.
+    store = PostgresFlowStore(database_url)
+
+    def write_and_read(index: int) -> str | None:
+        flow = build_flow()
+        flow.flow_id = f"concurrent-{index}"
+        flow.state = f"state-{index}"
+        store.save(flow)
+        reloaded = store.get_by_flow_id(f"concurrent-{index}")
+        return reloaded.flow_id if reloaded else None
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(executor.map(write_and_read, range(40)))
+
+    assert sorted(results) == sorted(f"concurrent-{index}" for index in range(40))
+
+    # The pool never opens more physical connections than its configured ceiling,
+    # even under more concurrent callers than max_size.
+    stats = store._pool.get_stats()
+    assert stats["pool_size"] <= stats["pool_max"]

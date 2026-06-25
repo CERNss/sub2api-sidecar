@@ -259,7 +259,10 @@ if UI_DIST_DIR.exists():
 @lru_cache(maxsize=1)
 def get_flow_store() -> PostgresFlowStore:
     settings = get_settings()
-    return PostgresFlowStore(database_url=settings.database_url)
+    return PostgresFlowStore(
+        database_url=settings.database_url,
+        pool_max_size=settings.database_pool_max_size,
+    )
 
 
 @lru_cache(maxsize=1)

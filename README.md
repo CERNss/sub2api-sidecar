@@ -294,10 +294,12 @@ database:
   port: 5432
   username: sub2api_sidecar
   name: sub2api_sidecar
+  pool_max_size: 10
 ```
 
 说明：
 
+- `database.pool_max_size`（环境变量 `DATABASE_POOL_MAX_SIZE`，默认 `10`）是共享数据库连接池的最大物理连接数。整个进程按 database URL 共享一个连接池,避免每次查询都新建连接;请把它设得明显低于 PostgreSQL 的 `max_connections`。
 - `SUB2API_ADMIN_API_KEY` 是调用默认 Sub2API admin API 的密钥。每个 `sub2api.upstreams[*].admin_api_key_env` 对应一个 `.env` 密钥。
 - `POSTGRES_PASSWORD` 是 PostgreSQL 密码。数据库 url、port、username、name 写在 `config.yaml` 的 `database` 段；其中 `database.url` 是主机名或 IP，不是整条 DSN。应用会自己拼接连接串，部署时不要提供 `DATABASE_URL`、`POSTGRES_DB` 或 `POSTGRES_USER`。
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。

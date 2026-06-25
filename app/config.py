@@ -159,6 +159,7 @@ class Settings:
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
     request_timeout_seconds: int = 30
+    database_pool_max_size: int = 10
     sub2api_usage_log_max_items: int = 100_000
     api_key_group_selection: str = API_KEY_GROUP_SELECTION_FIRST
     account_invalid_alert_whitelist: AccountInvalidAlertWhitelist = (
@@ -216,6 +217,14 @@ class Settings:
             ("sub2api", "request_timeout_seconds"),
             default=30,
         )
+        values["database_pool_max_size"] = _int_setting(
+            config,
+            "DATABASE_POOL_MAX_SIZE",
+            ("database", "pool_max_size"),
+            default=10,
+        )
+        if values["database_pool_max_size"] <= 0:
+            raise ConfigurationError("DATABASE_POOL_MAX_SIZE must be greater than zero")
         values["sub2api_usage_log_max_items"] = _int_setting(
             config,
             "SUB2API_USAGE_LOG_MAX_ITEMS",
