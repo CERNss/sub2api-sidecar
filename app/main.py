@@ -286,6 +286,8 @@ def get_sub2api_client(upstream_id: str | None = None) -> Sub2APIClient:
         provisioning_defaults=upstream.provisioning_defaults,
         timeout_seconds=upstream.request_timeout_seconds,
         usage_log_max_items=settings.sub2api_usage_log_max_items,
+        max_retries=settings.sub2api_request_max_retries,
+        api_keys_fetch_concurrency=settings.sub2api_api_keys_fetch_concurrency,
     )
 
 

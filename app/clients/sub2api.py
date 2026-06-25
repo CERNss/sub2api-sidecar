@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from app.config import Sub2APIProvisioningDefaults, TemporaryUnschedulableRule
 
 logger = logging.getLogger(__name__)
+
+# Only safe/idempotent reads are retried. POST endpoints (account creation, OAuth
+# code exchange, balance mutations) must never be auto-retried to avoid duplicates.
+RETRYABLE_METHODS = frozenset({"GET"})
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 DEFAULT_SCHEDULED_TEST_MODEL_ID = "gpt-5.5"
 DEFAULT_SCHEDULED_TEST_CRON_EXPRESSION = "*/5 * * * *"
@@ -62,6 +70,8 @@ class Sub2APIClient:
         provisioning_defaults: Sub2APIProvisioningDefaults,
         timeout_seconds: int = 30,
         usage_log_max_items: int = 0,
+        max_retries: int = 2,
+        api_keys_fetch_concurrency: int = 8,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.provisioning_defaults = provisioning_defaults
@@ -70,6 +80,8 @@ class Sub2APIClient:
         # 0 means unlimited (legacy behavior); a positive value caps how many items we
         # accumulate in memory in a single list_usage_logs call.
         self.usage_log_max_items = max(0, int(usage_log_max_items))
+        # Thread-pool fan-out width for list_all_user_api_keys (N+1 per-user fetch).
+        self.api_keys_fetch_concurrency = max(1, int(api_keys_fetch_concurrency))
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -78,6 +90,26 @@ class Sub2APIClient:
                 "Content-Type": "application/json",
             }
         )
+        # Bound and reuse the underlying urllib3 connection pool, and transparently
+        # retry transient upstream failures (with exponential backoff, honoring
+        # Retry-After) on idempotent reads. pool_maxsize is sized to the fan-out width
+        # so concurrent api-key fetches don't thrash the connection pool.
+        pool_size = max(10, self.api_keys_fetch_concurrency)
+        retry = Retry(
+            total=max(0, int(max_retries)),
+            backoff_factor=0.3,
+            status_forcelist=RETRYABLE_STATUS_CODES,
+            allowed_methods=RETRYABLE_METHODS,
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(
+            pool_connections=pool_size,
+            pool_maxsize=pool_size,
+            max_retries=retry,
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
     def validate_admin_jwt(self, token: str) -> dict[str, Any]:
         token = token.strip()
@@ -265,12 +297,14 @@ class Sub2APIClient:
 
     def list_all_user_api_keys(self, page_size: int = 1000) -> dict[str, Any]:
         users = self.list_users(page_size=page_size)
-        items: list[dict[str, Any]] = []
-        for user in users:
+        valid_users = [
+            user for user in users if user.get("id") not in (None, "")
+        ]
+
+        def fetch_user_keys(user: dict[str, Any]) -> list[dict[str, Any]]:
             user_id = user.get("id")
-            if user_id in (None, ""):
-                continue
             response = self.get_user_api_keys(user_id, page_size=page_size)
+            user_items: list[dict[str, Any]] = []
             for item in response["items"]:
                 key_item = dict(item)
                 key_item.setdefault("user_id", user_id)
@@ -278,7 +312,23 @@ class Sub2APIClient:
                 key_item.setdefault("owner_email", user.get("email"))
                 key_item.setdefault("owner_username", user.get("username"))
                 key_item.setdefault("owner_display_name", user.get("display_name"))
-                items.append(key_item)
+                user_items.append(key_item)
+            return user_items
+
+        # Per-user API-key fetches are an N+1 over upstream HTTP. Fan them out across a
+        # bounded thread pool (capped by the configured concurrency and the user count)
+        # to cut wall-clock latency for large tenants. ThreadPoolExecutor.map preserves
+        # input order, so the merged result is identical to the sequential version.
+        workers = min(self.api_keys_fetch_concurrency, len(valid_users))
+        if workers > 1:
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="sub2api-apikeys"
+            ) as executor:
+                per_user_items = list(executor.map(fetch_user_keys, valid_users))
+        else:
+            per_user_items = [fetch_user_keys(user) for user in valid_users]
+
+        items = [key_item for user_items in per_user_items for key_item in user_items]
         return {"items": items, "total": len(items), "users_total": len(users)}
 
     def update_user_balance(

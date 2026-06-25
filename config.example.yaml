@@ -29,6 +29,13 @@ sub2api:
   # 0 = unlimited (legacy). Prevents OOM when a day has a very large number of logs;
   # a hit is logged as a warning and may make that window's aggregates undercount.
   usage_log_max_items: 100000
+  # Auto-retry count for transient upstream failures (429/5xx) on idempotent GETs only,
+  # with exponential backoff honoring Retry-After (env SUB2API_REQUEST_MAX_RETRIES).
+  # POST endpoints are never auto-retried. 0 disables retries.
+  request_max_retries: 2
+  # Thread-pool width for fetching every user's API keys in parallel
+  # (env SUB2API_API_KEYS_FETCH_CONCURRENCY). Also sizes the HTTP connection pool.
+  api_keys_fetch_concurrency: 8
   api_key_group_selection: random
   upstreams:
     - id: main

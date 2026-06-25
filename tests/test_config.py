@@ -48,6 +48,8 @@ CONFIG_ENV_NAMES = (
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON",
     "SUB2API_API_KEY_GROUP_SELECTION",
     "SUB2API_USAGE_LOG_MAX_ITEMS",
+    "SUB2API_REQUEST_MAX_RETRIES",
+    "SUB2API_API_KEYS_FETCH_CONCURRENCY",
     "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_IDS",
     "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_NAMES",
     "NOTIFICATION_ACCOUNT_INVALID_WHITELIST_EMAILS",
@@ -650,3 +652,63 @@ def test_settings_rejects_non_positive_database_pool_max_size(
         Settings.from_env()
 
     assert "DATABASE_POOL_MAX_SIZE" in str(exc_info.value)
+
+
+def test_settings_sub2api_request_pool_knobs_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+
+    settings = Settings.from_env()
+
+    assert settings.sub2api_request_max_retries == 2
+    assert settings.sub2api_api_keys_fetch_concurrency == 8
+
+
+def test_settings_sub2api_request_pool_knobs_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("SUB2API_REQUEST_MAX_RETRIES", "0")
+    monkeypatch.setenv("SUB2API_API_KEYS_FETCH_CONCURRENCY", "16")
+
+    settings = Settings.from_env()
+
+    assert settings.sub2api_request_max_retries == 0
+    assert settings.sub2api_api_keys_fetch_concurrency == 16
+
+
+def test_settings_rejects_negative_request_max_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("SUB2API_REQUEST_MAX_RETRIES", "-1")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "SUB2API_REQUEST_MAX_RETRIES" in str(exc_info.value)
+
+
+def test_settings_rejects_non_positive_api_keys_fetch_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv("SUB2API_API_KEYS_FETCH_CONCURRENCY", "0")
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    assert "SUB2API_API_KEYS_FETCH_CONCURRENCY" in str(exc_info.value)

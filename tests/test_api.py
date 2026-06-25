@@ -1276,12 +1276,97 @@ def test_sub2api_client_lists_all_user_api_keys_with_user_context() -> None:
     assert keys_by_id["admin-key"]["owner_email"] == "admin@example.com"
     assert keys_by_id["source-key"]["user_id"] == 2
     assert keys_by_id["source-key"]["owner_email"] == "source@example.com"
-    assert [call["path"] for call in calls] == [
-        "/api/v1/admin/users",
-        "/api/v1/admin/users",
+    call_paths = [call["path"] for call in calls]
+    # User pagination happens first and in order...
+    assert call_paths[:2] == ["/api/v1/admin/users", "/api/v1/admin/users"]
+    # ...then per-user api-key fetches fan out across a thread pool, so their relative
+    # order is not guaranteed — assert membership rather than sequence.
+    assert sorted(call_paths[2:]) == [
         "/api/v1/admin/users/1/api-keys",
         "/api/v1/admin/users/2/api-keys",
     ]
+
+
+def test_list_all_user_api_keys_fans_out_across_thread_pool() -> None:
+    import threading
+
+    worker_threads: set[str] = set()
+    lock = threading.Lock()
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if path == "/api/v1/admin/users":
+            users = [{"id": idx, "email": f"u{idx}@example.com"} for idx in range(1, 6)]
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "items": users,
+                        "total": len(users),
+                        "page": 1,
+                        "page_size": 1000,
+                        "pages": 1,
+                    },
+                },
+            )
+        if path.endswith("/api-keys"):
+            with lock:
+                worker_threads.add(threading.current_thread().name)
+            user_id = path.split("/")[-2]
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "items": [{"id": f"key-{user_id}"}],
+                        "total": 1,
+                        "page": 1,
+                        "page_size": 1000,
+                        "pages": 1,
+                    },
+                },
+            )
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+        api_keys_fetch_concurrency=4,
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.list_all_user_api_keys()
+
+    assert result["total"] == 5
+    assert result["users_total"] == 5
+    # The per-user fetches ran on the bounded "sub2api-apikeys" worker pool rather than
+    # the calling thread, proving the N+1 was fanned out.
+    assert any(name.startswith("sub2api-apikeys") for name in worker_threads)
+
+
+def test_sub2api_client_configures_retrying_pooled_adapter() -> None:
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+        max_retries=3,
+        api_keys_fetch_concurrency=12,
+    )
+
+    adapter = client.session.get_adapter("https://sub2api.example.com")
+    retry = adapter.max_retries
+
+    assert retry.total == 3
+    assert 503 in retry.status_forcelist
+    assert 429 in retry.status_forcelist
+    # Only idempotent reads are retried; POSTs must never be auto-retried.
+    assert retry.allowed_methods == frozenset({"GET"})
+    # Connection pool is sized to the fan-out width so concurrent fetches don't thrash it.
+    assert adapter._pool_maxsize >= 12
 
 
 def _usage_log_pagination_request(total_items: int, page_size: int):
