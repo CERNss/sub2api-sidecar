@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable
@@ -52,6 +53,8 @@ SOURCE_USAGE_LOGS_PREVIOUS_DAY = "usage_logs_previous_day"
 SOURCE_USAGE_CURRENT_DAY = "usage_current_day"
 SOURCE_USAGE_PREVIOUS_DAY = "usage_previous_day"
 USER_USAGE_WINDOWS = ("5h", "1d", "7d", "30d")
+# Windows backed by upstream ranking endpoints (5h is aggregated from recent logs).
+USER_USAGE_RANKING_WINDOWS = ("1d", "7d", "30d")
 
 
 @dataclass(frozen=True)
@@ -167,83 +170,119 @@ class OperationalDataCollector:
         local_today = local_now.date()
         errors: list[str] = []
 
-        accounts, accounts_status = self._fetch_source(
-            SOURCE_ACCOUNTS,
-            self.client.list_openai_accounts,
-            item_count=lambda value: len(value),
-        )
-        groups, groups_status = self._fetch_source(
-            SOURCE_GROUPS,
-            lambda: self.client.list_groups(platform="openai"),
-            item_count=lambda value: len(value),
-        )
-        users, users_status = self._fetch_source(
-            SOURCE_USERS,
-            self.client.list_users,
-            item_count=lambda value: len(value),
-        )
-        current_usage_logs, current_usage_logs_status = self._fetch_source(
-            SOURCE_USAGE_LOGS_CURRENT_DAY,
-            lambda: self.client.list_usage_logs(
-                start_date=local_today,
-                end_date=local_today,
-                timezone_name=self.timezone_name,
-            ),
-            item_count=_usage_log_item_count,
-        )
         previous_day = local_today - timedelta(days=1)
-        previous_usage_logs, previous_usage_logs_status = self._fetch_source(
-            SOURCE_USAGE_LOGS_PREVIOUS_DAY,
-            lambda: self.client.list_usage_logs(
-                start_date=previous_day,
-                end_date=previous_day,
-                timezone_name=self.timezone_name,
-            ),
-            item_count=_usage_log_item_count,
-        )
-        user_usage, user_usage_status = self._fetch_source(
-            SOURCE_USER_USAGE,
-            lambda: self._fetch_user_usage(
-                users,
-                recent_logs=current_usage_logs,
-                local_now=local_now,
-            ),
-            item_count=_mapping_item_count,
-        )
-        group_usage, group_usage_status = self._fetch_source(
-            SOURCE_GROUP_USAGE,
-            lambda: self._fetch_group_usage(
-                groups,
-                recent_logs=current_usage_logs,
-                local_now=local_now,
-            ),
-            item_count=_mapping_item_count,
-        )
-        user_api_keys, user_api_keys_status = self._fetch_source(
-            SOURCE_USER_API_KEYS,
-            lambda: self._fetch_user_api_keys(users),
-            item_count=_mapping_item_count,
-        )
-        current_usage, current_usage_status = self._fetch_source(
-            SOURCE_USAGE_CURRENT_DAY,
-            lambda: self.client.get_usage_stats(
-                user_id="",
-                start_date=local_today,
-                end_date=local_today,
-                timezone_name=self.timezone_name,
-            ),
-            item_count=_usage_item_count,
-        )
-        previous_usage, previous_usage_status = self._fetch_source(
-            SOURCE_USAGE_PREVIOUS_DAY,
-            lambda: self.client.get_usage_stats(
-                user_id="",
-                start_date=previous_day,
-                end_date=previous_day,
-                timezone_name=self.timezone_name,
-            ),
-            item_count=_usage_item_count,
-        )
+
+        # Phase 1: mutually independent upstream reads, fanned out concurrently.
+        # _fetch_source never raises (failures become a "failed" status row), and the
+        # store's shared connection pool handles the concurrent status writes.
+        with ThreadPoolExecutor(
+            max_workers=7, thread_name_prefix="opdata-sources"
+        ) as executor:
+            accounts_future = executor.submit(
+                self._fetch_source,
+                SOURCE_ACCOUNTS,
+                self.client.list_openai_accounts,
+                item_count=lambda value: len(value),
+            )
+            groups_future = executor.submit(
+                self._fetch_source,
+                SOURCE_GROUPS,
+                lambda: self.client.list_groups(platform="openai"),
+                item_count=lambda value: len(value),
+            )
+            users_future = executor.submit(
+                self._fetch_source,
+                SOURCE_USERS,
+                self.client.list_users,
+                item_count=lambda value: len(value),
+            )
+            current_usage_logs_future = executor.submit(
+                self._fetch_source,
+                SOURCE_USAGE_LOGS_CURRENT_DAY,
+                lambda: self.client.list_usage_logs(
+                    start_date=local_today,
+                    end_date=local_today,
+                    timezone_name=self.timezone_name,
+                ),
+                item_count=_usage_log_item_count,
+            )
+            previous_usage_logs_future = executor.submit(
+                self._fetch_source,
+                SOURCE_USAGE_LOGS_PREVIOUS_DAY,
+                lambda: self.client.list_usage_logs(
+                    start_date=previous_day,
+                    end_date=previous_day,
+                    timezone_name=self.timezone_name,
+                ),
+                item_count=_usage_log_item_count,
+            )
+            current_usage_future = executor.submit(
+                self._fetch_source,
+                SOURCE_USAGE_CURRENT_DAY,
+                lambda: self.client.get_usage_stats(
+                    user_id="",
+                    start_date=local_today,
+                    end_date=local_today,
+                    timezone_name=self.timezone_name,
+                ),
+                item_count=_usage_item_count,
+            )
+            previous_usage_future = executor.submit(
+                self._fetch_source,
+                SOURCE_USAGE_PREVIOUS_DAY,
+                lambda: self.client.get_usage_stats(
+                    user_id="",
+                    start_date=previous_day,
+                    end_date=previous_day,
+                    timezone_name=self.timezone_name,
+                ),
+                item_count=_usage_item_count,
+            )
+            accounts, accounts_status = accounts_future.result()
+            groups, groups_status = groups_future.result()
+            users, users_status = users_future.result()
+            current_usage_logs, current_usage_logs_status = (
+                current_usage_logs_future.result()
+            )
+            previous_usage_logs, previous_usage_logs_status = (
+                previous_usage_logs_future.result()
+            )
+            current_usage, current_usage_status = current_usage_future.result()
+            previous_usage, previous_usage_status = previous_usage_future.result()
+
+        # Phase 2: aggregations that depend on phase-1 results but not on each other.
+        with ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix="opdata-derived"
+        ) as executor:
+            user_usage_future = executor.submit(
+                self._fetch_source,
+                SOURCE_USER_USAGE,
+                lambda: self._fetch_user_usage(
+                    users,
+                    recent_logs=current_usage_logs,
+                    local_now=local_now,
+                ),
+                item_count=_mapping_item_count,
+            )
+            group_usage_future = executor.submit(
+                self._fetch_source,
+                SOURCE_GROUP_USAGE,
+                lambda: self._fetch_group_usage(
+                    groups,
+                    recent_logs=current_usage_logs,
+                    local_now=local_now,
+                ),
+                item_count=_mapping_item_count,
+            )
+            user_api_keys_future = executor.submit(
+                self._fetch_source,
+                SOURCE_USER_API_KEYS,
+                lambda: self._fetch_user_api_keys(users),
+                item_count=_mapping_item_count,
+            )
+            user_usage, user_usage_status = user_usage_future.result()
+            group_usage, group_usage_status = group_usage_future.result()
+            user_api_keys, user_api_keys_status = user_api_keys_future.result()
 
         source_statuses = [
             accounts_status,
@@ -396,22 +435,27 @@ class OperationalDataCollector:
         *,
         local_now: datetime,
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        result: dict[str, dict[str, dict[str, Any]]] = {}
-        for window in ("1d", "7d", "30d"):
+        def fetch(window: str) -> tuple[str, dict[str, dict[str, Any]]]:
             start_date, end_date = _user_usage_date_range(window, local_now)
             ranking = self.client.get_user_spending_ranking(
                 start_date=start_date,
                 end_date=end_date,
                 timezone_name=self.timezone_name,
             )
-            result[window] = _ranking_usage_by_user_id(
+            return window, _ranking_usage_by_user_id(
                 ranking,
                 window=window,
                 start_date=start_date,
                 end_date=end_date,
                 local_now=local_now,
             )
-        return result
+
+        # The three ranking windows are independent upstream reads; fetch them
+        # concurrently. Errors propagate as before (the whole source fails).
+        with ThreadPoolExecutor(
+            max_workers=len(USER_USAGE_RANKING_WINDOWS), thread_name_prefix="opdata-rankings"
+        ) as executor:
+            return dict(executor.map(fetch, USER_USAGE_RANKING_WINDOWS))
 
     def _fetch_group_usage(
         self,
@@ -464,22 +508,25 @@ class OperationalDataCollector:
         *,
         local_now: datetime,
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        result: dict[str, dict[str, dict[str, Any]]] = {}
-        for window in ("1d", "7d", "30d"):
+        def fetch(window: str) -> tuple[str, dict[str, dict[str, Any]]]:
             start_date, end_date = _user_usage_date_range(window, local_now)
             group_stats = self.client.get_group_usage_stats(
                 start_date=start_date,
                 end_date=end_date,
                 timezone_name=self.timezone_name,
             )
-            result[window] = _group_usage_by_group_id(
+            return window, _group_usage_by_group_id(
                 group_stats,
                 window=window,
                 start_date=start_date,
                 end_date=end_date,
                 local_now=local_now,
             )
-        return result
+
+        with ThreadPoolExecutor(
+            max_workers=len(USER_USAGE_RANKING_WINDOWS), thread_name_prefix="opdata-rankings"
+        ) as executor:
+            return dict(executor.map(fetch, USER_USAGE_RANKING_WINDOWS))
 
     def _fetch_user_api_keys(
         self,
@@ -487,21 +534,34 @@ class OperationalDataCollector:
     ) -> dict[str, dict[str, Any]]:
         if not users:
             return {}
-        result: dict[str, dict[str, Any]] = {}
-        for user in users:
+        valid_users = [user for user in users if user.get("id") not in (None, "")]
+
+        def fetch(user: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             user_id = user.get("id")
-            if user_id in (None, ""):
-                continue
             try:
-                result[str(user_id)] = self.client.get_user_api_keys(user_id)
+                return str(user_id), self.client.get_user_api_keys(user_id)
             except Exception as exc:
                 logger.warning(
                     "Operational user API key fetch failed | user_id=%s error=%s",
                     user_id,
                     exc,
                 )
-                result[str(user_id)] = {"items": [], "total": 0, "error": str(exc)}
-        return result
+                return str(user_id), {"items": [], "total": 0, "error": str(exc)}
+
+        # Same N+1 fan-out as Sub2APIClient.list_all_user_api_keys: one upstream call
+        # per user, parallelized across a bounded pool. Clients without a configured
+        # fan-out width (e.g. test doubles) keep the sequential path. executor.map
+        # preserves input order, so the result dict is ordered as before.
+        concurrency = int(getattr(self.client, "api_keys_fetch_concurrency", 1) or 1)
+        workers = min(concurrency, len(valid_users))
+        if workers > 1:
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="opdata-apikeys"
+            ) as executor:
+                pairs = list(executor.map(fetch, valid_users))
+        else:
+            pairs = [fetch(user) for user in valid_users]
+        return dict(pairs)
 
     def _derive_samples(
         self,

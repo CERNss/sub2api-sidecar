@@ -488,7 +488,7 @@ def test_collector_registry_swallows_collector_exceptions() -> None:
 # --- Notification pipeline collector ---
 
 
-def test_operational_data_collector_collects_sources_in_order_and_persists_samples(client) -> None:
+def test_operational_data_collector_collects_all_sources_and_persists_samples(client) -> None:
     class _RecordingClient(_FakeSub2APIClient):
         def __init__(self) -> None:
             self.calls: list[str] = []
@@ -577,12 +577,20 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
 
     result = collector.collect(now=now)
 
-    assert api_client.calls == [
+    # Independent sources are fetched concurrently, so the global call order is
+    # nondeterministic. What must hold: every source is fetched exactly once with the
+    # right arguments, phase-1 reads complete before the phase-2 aggregations that
+    # depend on them, and per-source call sequences keep their order.
+    phase_one_calls = [
         "accounts",
         "groups:openai",
         "users",
         "usage_logs:None:2026-05-10:2026-05-10",
         "usage_logs:None:2026-05-09:2026-05-09",
+        "usage::2026-05-10:2026-05-10",
+        "usage::2026-05-09:2026-05-09",
+    ]
+    phase_two_calls = [
         "user_ranking:2026-05-10:2026-05-10",
         "user_ranking:2026-05-04:2026-05-10",
         "user_ranking:2026-04-11:2026-05-10",
@@ -591,9 +599,18 @@ def test_operational_data_collector_collects_sources_in_order_and_persists_sampl
         "group_usage:2026-04-11:2026-05-10",
         "user_api_keys:u1",
         "user_api_keys:u2",
-        "usage::2026-05-10:2026-05-10",
-        "usage::2026-05-09:2026-05-09",
     ]
+    assert sorted(api_client.calls) == sorted(phase_one_calls + phase_two_calls)
+    last_phase_one_index = max(api_client.calls.index(call) for call in phase_one_calls)
+    first_phase_two_index = min(api_client.calls.index(call) for call in phase_two_calls)
+    assert last_phase_one_index < first_phase_two_index
+    # The three ranking windows are fetched concurrently, so only their multiset is
+    # guaranteed (already covered by the sorted() assertion above). Per-user api-key
+    # fetches stay sequentially ordered for stub clients without a fan-out width.
+    prefix = "user_api_keys"
+    expected_sequence = [call for call in phase_two_calls if call.startswith(prefix)]
+    actual_sequence = [call for call in api_client.calls if call.startswith(prefix)]
+    assert actual_sequence == expected_sequence
     assert result.error_message is None
     assert result.sampled_signal_count > 1
     assert {status.source_key for status in result.source_statuses} == {
