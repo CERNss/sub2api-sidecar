@@ -1,5 +1,9 @@
 name: Security Scan
 
+# Ported from the org-standard security scan (customer-service-feedback-platform),
+# adapted for Python: pip-audit replaces govulncheck, and there is no private
+# module access to set up.
+
 on:
   push:
   pull_request:
@@ -18,7 +22,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -44,8 +50,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
-      - name: Check Dockerfile base image pin
+      - name: Check Dockerfile base image pins
         run: |
+          set -euo pipefail
+          grep -Eq '^FROM node:22-bookworm-slim AS frontend-builder$' Dockerfile
           grep -Eq '^FROM python:3\.12-slim-bookworm$' Dockerfile
