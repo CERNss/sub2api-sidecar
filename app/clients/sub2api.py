@@ -76,6 +76,12 @@ class Sub2APIClient:
     BIND_ACCOUNT_TO_GROUP_PATH = "/api/v1/admin/groups/{group_id}/accounts"
     LIST_SCHEDULED_TEST_PLANS_PATH = "/api/v1/admin/accounts/{account_id}/scheduled-test-plans"
     CREATE_SCHEDULED_TEST_PLAN_PATH = "/api/v1/admin/scheduled-test-plans"
+    SET_ACCOUNT_SCHEDULABLE_PATH = "/api/v1/admin/accounts/{account_id}/schedulable"
+    TEST_ACCOUNT_PATH = "/api/v1/admin/accounts/{account_id}/test"
+    LIST_PROXIES_PATH = "/api/v1/admin/proxies"
+    PROXY_PATH = "/api/v1/admin/proxies/{proxy_id}"
+    TEST_PROXY_PATH = "/api/v1/admin/proxies/{proxy_id}/test"
+    QUALITY_CHECK_PROXY_PATH = "/api/v1/admin/proxies/{proxy_id}/quality-check"
 
     def __init__(
         self,
@@ -969,6 +975,89 @@ class Sub2APIClient:
         data = self._request("POST", path, json=payload)
         return {"account_id": account_id, "group_id": group_id, "raw": data}
 
+    def list_proxies(self) -> list[dict[str, Any]]:
+        data = self._request("GET", self.LIST_PROXIES_PATH)
+        body = self._unwrap_data(data)
+        if isinstance(body, list):
+            raw_proxies = body
+        elif isinstance(body, dict) and isinstance(body.get("items"), list):
+            raw_proxies = body["items"]
+        elif isinstance(body, dict) and isinstance(body.get("proxies"), list):
+            raw_proxies = body["proxies"]
+        else:
+            raise Sub2APIError("Unable to parse proxy list from Sub2API response")
+        proxies: list[dict[str, Any]] = []
+        for item in raw_proxies:
+            if not isinstance(item, dict):
+                continue
+            proxy = dict(item)
+            proxy["id"] = self._extract_id(item, "id", "proxy_id")
+            proxy["raw"] = item
+            proxies.append(proxy)
+        return proxies
+
+    def create_proxy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = self._request("POST", self.LIST_PROXIES_PATH, json=payload)
+        body = self._unwrap_data(data)
+        return body if isinstance(body, dict) else {"raw": data}
+
+    def update_proxy(self, proxy_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        path = self.PROXY_PATH.format(proxy_id=proxy_id)
+        data = self._request("PUT", path, json=payload)
+        body = self._unwrap_data(data)
+        return body if isinstance(body, dict) else {"raw": data}
+
+    def delete_proxy(self, proxy_id: Any) -> dict[str, Any]:
+        path = self.PROXY_PATH.format(proxy_id=proxy_id)
+        data = self._request("DELETE", path)
+        return {"proxy_id": proxy_id, "raw": data}
+
+    def test_proxy(self, proxy_id: Any) -> dict[str, Any]:
+        path = self.TEST_PROXY_PATH.format(proxy_id=proxy_id)
+        data = self._request("POST", path)
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API proxy test response is not an object")
+        return body
+
+    def quality_check_proxy(self, proxy_id: Any) -> dict[str, Any]:
+        path = self.QUALITY_CHECK_PROXY_PATH.format(proxy_id=proxy_id)
+        data = self._request("POST", path)
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API proxy quality-check response is not an object")
+        return body
+
+    def set_account_schedulable(
+        self, account_id: Any, schedulable: bool
+    ) -> dict[str, Any]:
+        path = self.SET_ACCOUNT_SCHEDULABLE_PATH.format(account_id=account_id)
+        data = self._request("POST", path, json={"schedulable": bool(schedulable)})
+        return {"account_id": account_id, "schedulable": schedulable, "raw": data}
+
+    def test_account(self, account_id: Any) -> dict[str, Any]:
+        path = self.TEST_ACCOUNT_PATH.format(account_id=account_id)
+        data = self._request("POST", path)
+        body = self._unwrap_data(data)
+        return body if isinstance(body, dict) else {"raw": data}
+
+    def set_account_proxy(self, *, account: dict[str, Any], proxy_id: Any) -> dict[str, Any]:
+        raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
+        account_id = self._extract_value(raw, "id", "account_id") or self._extract_id(
+            account, "id", "account_id"
+        )
+        # The upstream account PUT merges omitted top-level fields (its own admin UI
+        # toggles status by sending only {"status": ...}), so a proxy switch sends
+        # just the proxy_id and cannot clobber unrelated account configuration.
+        payload = {
+            "proxy_id": (
+                self._coerce_numeric_id(proxy_id) if proxy_id not in (None, "") else None
+            )
+        }
+        path = self.UPDATE_OPENAI_ACCOUNT_PATH.format(account_id=account_id)
+        data = self._request("PUT", path, json=payload)
+        return {"account_id": account_id, "proxy_id": proxy_id, "raw": data}
+
     def list_scheduled_test_plans(self, account_id: Any) -> list[dict[str, Any]]:
         path = self.LIST_SCHEDULED_TEST_PLANS_PATH.format(account_id=account_id)
         data = self._request("GET", path)
@@ -1513,6 +1602,7 @@ class Sub2APIClient:
                     "platform": item.get("platform"),
                     "account_type": item.get("type") or item.get("account_type"),
                     "status": item.get("status"),
+                    "schedulable": item.get("schedulable"),
                     "concurrency": self._optional_float_value(
                         item,
                         "concurrency",
@@ -1856,6 +1946,7 @@ class Sub2APIClient:
             "availability.checked_at",
         )
 
+        availability_from_schedulable_only = False
         if is_banned:
             availability_status = "banned"
         elif needs_reauth:
@@ -1867,7 +1958,12 @@ class Sub2APIClient:
         elif rate_limited:
             availability_status = "rate_limited"
         elif schedulable is False:
+            # No underlying fault signal — the account is merely unscheduled. The
+            # account-health reconciler needs to distinguish this from a real
+            # fault, otherwise its own eviction (schedulable=false) would read
+            # back as "unavailable" and deadlock automatic rejoin.
             availability_status = "unavailable"
+            availability_from_schedulable_only = True
         elif disabled is True or enabled is False:
             availability_status = "disabled"
         elif explicit_available is False:
@@ -1904,6 +2000,7 @@ class Sub2APIClient:
 
         return {
             "availability_status": availability_status,
+            "availability_from_schedulable_only": availability_from_schedulable_only,
             "availability_reason": availability_reason,
             "is_available": is_available,
             "temporary_unschedulable": temporary_unschedulable,

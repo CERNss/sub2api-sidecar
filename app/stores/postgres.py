@@ -14,6 +14,17 @@ from pydantic import BaseModel
 
 from app.models.auth import PersistedAuthSession
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionFlow
+from app.models.account_health import (
+    AccountHealthRun,
+    AccountHealthRuntimeSettings,
+    AccountHealthState,
+)
+from app.models.proxy_health import (
+    ProxyHealthRun,
+    ProxyHealthRuntimeSettings,
+    ProxyHealthState,
+    ProxyParkedAccount,
+)
 from app.models.group_usage import GroupUsageSegmentRecord
 from app.models.credit import (
     CreditAuditOperation,
@@ -446,6 +457,276 @@ class PostgresFlowStore(FlowStore):
     ) -> ProvisioningRuntimeSettings:
         self._save_runtime_settings("provisioning", settings)
         return settings
+
+    def get_proxy_health_runtime_settings(
+        self,
+    ) -> ProxyHealthRuntimeSettings | None:
+        return self._load_runtime_settings(
+            "proxy_health",
+            ProxyHealthRuntimeSettings,
+        )
+
+    def save_proxy_health_runtime_settings(
+        self,
+        settings: ProxyHealthRuntimeSettings,
+    ) -> ProxyHealthRuntimeSettings:
+        self._save_runtime_settings("proxy_health", settings)
+        return settings
+
+    def upsert_proxy_health_state(self, state: ProxyHealthState) -> ProxyHealthState:
+        payload = state.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO proxy_health_states (
+                    proxy_id_key, health, payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(proxy_id_key) DO UPDATE SET
+                    health = excluded.health,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    state.proxy_id,
+                    state.health,
+                    payload,
+                    state.updated_at.isoformat(),
+                    state.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return state
+
+    def list_proxy_health_states(self) -> list[ProxyHealthState]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM proxy_health_states
+            ORDER BY proxy_id_key ASC
+            """,
+            (),
+            ProxyHealthState,
+        )
+
+    def delete_proxy_health_state(self, proxy_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM proxy_health_states WHERE proxy_id_key = %s",
+                (proxy_id,),
+            )
+            connection.commit()
+
+    def save_proxy_health_run(self, run: ProxyHealthRun) -> ProxyHealthRun:
+        payload = run.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO proxy_health_runs (
+                    run_id, trigger_type, status, dry_run, payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    trigger_type = excluded.trigger_type,
+                    status = excluded.status,
+                    dry_run = excluded.dry_run,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    run.run_id,
+                    run.trigger,
+                    run.status,
+                    1 if run.dry_run else 0,
+                    payload,
+                    run.created_at.isoformat(),
+                    run.created_at.isoformat(),
+                ),
+            )
+            # Bounded history: reconciler retry loops must not grow the table forever.
+            connection.execute(
+                """
+                DELETE FROM proxy_health_runs WHERE run_id NOT IN (
+                    SELECT run_id FROM proxy_health_runs
+                    ORDER BY created_at DESC, run_id DESC LIMIT 500
+                )
+                """
+            )
+            connection.commit()
+        return run
+
+    def get_proxy_health_run(self, run_id: str) -> ProxyHealthRun | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM proxy_health_runs
+            WHERE run_id = %s
+            """,
+            (run_id,),
+            ProxyHealthRun,
+        )
+
+    def list_proxy_health_runs(self, limit: int = 50) -> list[ProxyHealthRun]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM proxy_health_runs
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT %s
+            """,
+            (limit,),
+            ProxyHealthRun,
+        )
+
+    def upsert_proxy_parked_account(
+        self, parked: ProxyParkedAccount
+    ) -> ProxyParkedAccount:
+        payload = parked.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO proxy_parked_accounts (
+                    account_id_key, payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s)
+                ON CONFLICT(account_id_key) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    parked.account_id,
+                    payload,
+                    parked.parked_at.isoformat(),
+                    parked.parked_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return parked
+
+    def list_proxy_parked_accounts(self) -> list[ProxyParkedAccount]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM proxy_parked_accounts
+            ORDER BY account_id_key ASC
+            """,
+            (),
+            ProxyParkedAccount,
+        )
+
+    def delete_proxy_parked_account(self, account_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM proxy_parked_accounts WHERE account_id_key = %s",
+                (account_id,),
+            )
+            connection.commit()
+
+    def get_account_health_runtime_settings(
+        self,
+    ) -> AccountHealthRuntimeSettings | None:
+        return self._load_runtime_settings(
+            "account_health",
+            AccountHealthRuntimeSettings,
+        )
+
+    def save_account_health_runtime_settings(
+        self,
+        settings: AccountHealthRuntimeSettings,
+    ) -> AccountHealthRuntimeSettings:
+        self._save_runtime_settings("account_health", settings)
+        return settings
+
+    def upsert_account_health_state(
+        self, state: AccountHealthState
+    ) -> AccountHealthState:
+        payload = state.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO account_health_states (
+                    account_id_key, health, payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(account_id_key) DO UPDATE SET
+                    health = excluded.health,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    state.account_id,
+                    state.health,
+                    payload,
+                    state.updated_at.isoformat(),
+                    state.updated_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return state
+
+    def list_account_health_states(self) -> list[AccountHealthState]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM account_health_states
+            ORDER BY account_id_key ASC
+            """,
+            (),
+            AccountHealthState,
+        )
+
+    def delete_account_health_state(self, account_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM account_health_states WHERE account_id_key = %s",
+                (account_id,),
+            )
+            connection.commit()
+
+    def save_account_health_run(self, run: AccountHealthRun) -> AccountHealthRun:
+        payload = run.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO account_health_runs (
+                    run_id, trigger_type, payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    trigger_type = excluded.trigger_type,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    run.run_id,
+                    run.trigger,
+                    payload,
+                    run.created_at.isoformat(),
+                    run.created_at.isoformat(),
+                ),
+            )
+            # Bounded history: reconciler loops must not grow the table forever.
+            connection.execute(
+                """
+                DELETE FROM account_health_runs WHERE run_id NOT IN (
+                    SELECT run_id FROM account_health_runs
+                    ORDER BY created_at DESC, run_id DESC LIMIT 500
+                )
+                """
+            )
+            connection.commit()
+        return run
+
+    def get_account_health_run(self, run_id: str) -> AccountHealthRun | None:
+        return self._load_single_model(
+            """
+            SELECT payload FROM account_health_runs
+            WHERE run_id = %s
+            """,
+            (run_id,),
+            AccountHealthRun,
+        )
+
+    def list_account_health_runs(self, limit: int = 50) -> list[AccountHealthRun]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM account_health_runs
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT %s
+            """,
+            (limit,),
+            AccountHealthRun,
+        )
 
     def upsert_user_assignment(self, assignment: UserGroupAssignment) -> UserGroupAssignment:
         payload = assignment.model_dump_json()
@@ -1705,6 +1986,74 @@ class PostgresFlowStore(FlowStore):
                 """
                 CREATE INDEX IF NOT EXISTS idx_orchestration_runs_list
                 ON orchestration_runs(created_at DESC, run_kind, tag)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS proxy_health_states (
+                    proxy_id_key TEXT PRIMARY KEY,
+                    health TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS proxy_health_runs (
+                    run_id TEXT PRIMARY KEY,
+                    trigger_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    dry_run INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_proxy_health_runs_list
+                ON proxy_health_runs(created_at DESC, trigger_type)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS proxy_parked_accounts (
+                    account_id_key TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_health_states (
+                    account_id_key TEXT PRIMARY KEY,
+                    health TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_health_runs (
+                    run_id TEXT PRIMARY KEY,
+                    trigger_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_account_health_runs_list
+                ON account_health_runs(created_at DESC, trigger_type)
                 """
             )
             connection.execute(

@@ -20,6 +20,8 @@ from app.models.operational_data import (
     OperationalDataRuntimeSettings,
     ProvisioningRuntimeSettings,
 )
+from app.models.account_health import AccountHealthRuntimeSettings
+from app.models.proxy_health import ProxyHealthRuntimeSettings
 from app.stores.postgres import PostgresFlowStore
 
 
@@ -44,6 +46,8 @@ def clear_app_caches() -> None:
     main.get_credit_control_service.cache_clear()
     main.get_usage_segmentation_service.cache_clear()
     main.get_group_usage_service.cache_clear()
+    main.get_proxy_health_service.cache_clear()
+    main.get_account_health_service.cache_clear()
 
 
 def _write_test_config(config_path: Path) -> str:
@@ -125,6 +129,12 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     )
     store.save_provisioning_runtime_settings(
         ProvisioningRuntimeSettings()
+    )
+    store.save_proxy_health_runtime_settings(
+        ProxyHealthRuntimeSettings(enabled=False)
+    )
+    store.save_account_health_runtime_settings(
+        AccountHealthRuntimeSettings(enabled=False)
     )
     clear_app_caches()
     yield {"database_url": app_database_url, "database_name": os.getenv("TEST_POSTGRES_NAME", DEFAULT_TEST_POSTGRES_NAME)}

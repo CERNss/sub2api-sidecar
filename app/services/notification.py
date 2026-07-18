@@ -56,7 +56,7 @@ class RuleEvaluationOutcome:
     deliveries: list[DeliveryOutcome]
 
 
-SCOPED_SIGNAL_KEYS = {"user_balance_low"}
+SCOPED_SIGNAL_KEYS = {"user_balance_low", "proxy_unreachable", "account_evicted"}
 
 
 class NotificationService:

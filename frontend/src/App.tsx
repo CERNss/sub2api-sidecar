@@ -10,6 +10,7 @@ import {
   LogOut,
   FileText,
   History,
+  Network,
   Play,
   Plus,
   Settings,
@@ -118,7 +119,13 @@ type ApiTokenPayload = ApiPayload & {
 
 type FlowStatusFilter = "" | "pending_oauth" | "completed" | "failed";
 type AssignmentModeFilter = "" | "dedicated" | "managed_pool";
-type OperatorView = "orchestration" | "provision" | "keyTransfer" | "notification" | "creditControl";
+type OperatorView =
+  | "orchestration"
+  | "provision"
+  | "keyTransfer"
+  | "notification"
+  | "creditControl"
+  | "proxyManagement";
 type OrchestrationTab = "manual" | "dynamic";
 type CreditControlTab = "users" | "policies" | "runs" | "audit";
 
@@ -741,7 +748,8 @@ const operatorViewPaths: Record<OperatorView, string> = {
   provision: "/provision",
   keyTransfer: "/key-transfer",
   notification: "/notifications",
-  creditControl: "/credit-control"
+  creditControl: "/credit-control",
+  proxyManagement: "/proxy-management"
 };
 const orchestrationTabPaths: Record<OrchestrationTab, string> = {
   manual: "/orchestration/manual",
@@ -1707,6 +1715,9 @@ function viewFromPath(pathname: string): OperatorView {
   }
   if (pathname === operatorViewPaths.notification) {
     return "notification";
+  }
+  if (pathname === operatorViewPaths.proxyManagement) {
+    return "proxyManagement";
   }
   return "orchestration";
 }
@@ -2791,6 +2802,14 @@ function OperatorWorkspace() {
               <Wallet size={17} aria-hidden="true" />
               余额管理
             </button>
+            <button
+              className={activeView === "proxyManagement" ? "active" : ""}
+              type="button"
+              onClick={() => navigateView("proxyManagement")}
+            >
+              <Network size={17} aria-hidden="true" />
+              健康管控
+            </button>
           </div>
           <button className="button secondary compact" type="button" onClick={logout} disabled={logoutBusy}>
             {logoutBusy ? (
@@ -2805,6 +2824,8 @@ function OperatorWorkspace() {
 
       {activeView === "notification" ? (
         <NotificationPanel onAuthExpired={handleAuthExpired} />
+      ) : activeView === "proxyManagement" ? (
+        <ProxyManagementView onAuthExpired={handleAuthExpired} />
       ) : activeView === "creditControl" ? (
         <CreditControlView
           activeTab={activeCreditTab}
@@ -2834,6 +2855,1253 @@ function OperatorWorkspace() {
         />
       )}
     </main>
+  );
+}
+
+type ProxyHealthDetail = {
+  health?: string;
+  consecutive_failures?: number;
+  consecutive_successes?: number;
+  last_probe_error?: string | null;
+  last_probe_latency_ms?: number | null;
+  last_probe_at?: string | null;
+  last_quality_score?: number | null;
+  last_quality_grade?: string | null;
+  last_quality_summary?: string | null;
+  failing_critical_targets?: string[];
+};
+
+type ProxyItem = ApiPayload & {
+  id: unknown;
+  name?: string;
+  protocol?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  status?: string;
+  latency_ms?: number | null;
+  ip_address?: string | null;
+  country?: string | null;
+  account_count?: number | null;
+  health?: string;
+  health_detail?: ProxyHealthDetail | null;
+  alert_whitelisted?: boolean;
+};
+
+type ProxyListPayload = ApiPayload & { items: ProxyItem[]; total: number };
+
+type ProxyHealthSettings = {
+  enabled: boolean;
+  probe_interval_seconds: number;
+  quality_check_interval_seconds: number;
+  failure_threshold: number;
+  recovery_threshold: number;
+  auto_move_enabled: boolean;
+  critical_targets: string[];
+  latency_threshold_ms: number | null;
+  alert_whitelist: string[];
+};
+
+type ProxyHealthSettingsPayload = ApiPayload & { settings: ProxyHealthSettings & { updated_at?: string } };
+
+type ProxyRunMove = {
+  account_id: string;
+  account_name?: string;
+  from_proxy_id?: string | null;
+  to_proxy_id?: string | null;
+  status: string;
+  reason?: string | null;
+};
+
+type ProxyHealthRunItem = {
+  run_id: string;
+  trigger: string;
+  dry_run: boolean;
+  status: string;
+  reason?: string | null;
+  fallback_direct?: boolean;
+  moves: ProxyRunMove[];
+  moved_count: number;
+  skipped_count: number;
+  failed_count: number;
+  created_at: string;
+};
+
+type ProxyRunsPayload = ApiPayload & { items: ProxyHealthRunItem[]; total: number };
+
+const PROXY_HEALTH_LABELS: Record<string, { text: string; color: string }> = {
+  healthy: { text: "健康", color: "green" },
+  dead: { text: "已驱逐", color: "red" },
+  unknown: { text: "待探测", color: "default" }
+};
+
+const PROXY_RUN_TRIGGER_LABELS: Record<string, string> = {
+  proxy_dead: "判死驱逐",
+  proxy_recovered: "恢复回填",
+  manual: "手动均衡"
+};
+
+const PROXY_RUN_STATUS_LABELS: Record<string, { text: string; color: string }> = {
+  completed: { text: "完成", color: "green" },
+  partial_failed: { text: "部分失败", color: "orange" },
+  failed: { text: "失败", color: "red" },
+  noop: { text: "无需变更", color: "default" }
+};
+
+const emptyProxyForm = {
+  name: "",
+  protocol: "socks5",
+  host: "",
+  port: 1080,
+  username: "",
+  password: "",
+  status: "active"
+};
+
+type AccountHealthItem = ApiPayload & {
+  id: unknown;
+  name?: string;
+  status?: string;
+  schedulable?: boolean | null;
+  availability_status?: string;
+  last_error?: string | null;
+  health?: string;
+  classification?: string | null;
+  evicted?: boolean;
+  alert_whitelisted?: boolean;
+  health_detail?: {
+    consecutive_failures?: number;
+    last_availability_status?: string | null;
+  } | null;
+};
+
+type AccountHealthListPayload = ApiPayload & { items: AccountHealthItem[]; total: number };
+
+type AccountHealthSettings = {
+  enabled: boolean;
+  check_interval_seconds: number;
+  failure_threshold: number;
+  recovery_threshold: number;
+  auto_evict_enabled: boolean;
+  transient_statuses: string[];
+  persistent_statuses: string[];
+  recovery_test_interval_seconds: number;
+  alert_whitelist: string[];
+};
+
+type AccountHealthSettingsPayload = ApiPayload & {
+  settings: AccountHealthSettings & { updated_at?: string };
+};
+
+type AccountHealthRunItem = {
+  run_id: string;
+  trigger: string;
+  actions: {
+    account_id: string;
+    account_name?: string;
+    action: string;
+    classification?: string | null;
+    status: string;
+    reason?: string | null;
+  }[];
+  evicted_count: number;
+  rejoined_count: number;
+  failed_count: number;
+  created_at: string;
+};
+
+type AccountHealthRunsPayload = ApiPayload & { items: AccountHealthRunItem[]; total: number };
+
+const ACCOUNT_AVAILABILITY_LABELS: Record<string, string> = {
+  available: "正常",
+  rate_limited: "限流",
+  temporary_unschedulable: "临时不可调度",
+  needs_reauth: "需重授权",
+  needs_verify: "需验证",
+  banned: "疑似封禁",
+  unavailable: "不可用",
+  disabled: "已停用",
+  unknown: "未知"
+};
+
+function ProxyManagementView({
+  onAuthExpired
+}: {
+  onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+}) {
+  const [proxies, setProxies] = useState<ProxyItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [runs, setRuns] = useState<ProxyHealthRunItem[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [settings, setSettings] = useState<ProxyHealthSettings | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingProxyId, setEditingProxyId] = useState<string | null>(null);
+  const [proxyForm, setProxyForm] = useState({ ...emptyProxyForm });
+  const [proxySaving, setProxySaving] = useState(false);
+  const [actionBusyIds, setActionBusyIds] = useState<Set<string>>(new Set());
+
+  function markActionBusy(proxyId: string, busy: boolean) {
+    setActionBusyIds((previous) => {
+      const next = new Set(previous);
+      if (busy) {
+        next.add(proxyId);
+      } else {
+        next.delete(proxyId);
+      }
+      return next;
+    });
+  }
+  const [rebalanceBusy, setRebalanceBusy] = useState(false);
+  const [probeBusy, setProbeBusy] = useState(false);
+  const [status, setStatus] = useState<StatusState>({ message: "", tone: "idle" });
+  const [accounts, setAccounts] = useState<AccountHealthItem[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountRuns, setAccountRuns] = useState<AccountHealthRunItem[]>([]);
+  const [accountRunsLoading, setAccountRunsLoading] = useState(false);
+  const [accountSettings, setAccountSettings] = useState<AccountHealthSettings | null>(null);
+  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
+  const [accountSettingsSaving, setAccountSettingsSaving] = useState(false);
+  const [accountBusyIds, setAccountBusyIds] = useState<Set<string>>(new Set());
+
+  function markAccountBusy(accountId: string, busy: boolean) {
+    setAccountBusyIds((previous) => {
+      const next = new Set(previous);
+      if (busy) {
+        next.add(accountId);
+      } else {
+        next.delete(accountId);
+      }
+      return next;
+    });
+  }
+
+  async function loadAccounts() {
+    setAccountsLoading(true);
+    try {
+      const payload = await requestJson<AccountHealthListPayload>(
+        "/api/account-health/accounts",
+        { method: "GET" },
+        "加载账号健康列表失败"
+      );
+      setAccounts(payload.items ?? []);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setAccountsLoading(false);
+    }
+  }
+
+  async function loadAccountRuns() {
+    setAccountRunsLoading(true);
+    try {
+      const payload = await requestJson<AccountHealthRunsPayload>(
+        "/api/account-health/runs?limit=20",
+        { method: "GET" },
+        "加载账号处置记录失败"
+      );
+      setAccountRuns(payload.items ?? []);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setAccountRunsLoading(false);
+    }
+  }
+
+  async function loadAccountSettings() {
+    try {
+      const payload = await requestJson<AccountHealthSettingsPayload>(
+        "/api/account-health/settings",
+        { method: "GET" },
+        "加载账号健康设置失败"
+      );
+      setAccountSettings(payload.settings);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    }
+  }
+
+  async function saveAccountSettings() {
+    if (!accountSettings) return;
+    setAccountSettingsSaving(true);
+    try {
+      const payload = await requestJson<AccountHealthSettingsPayload>(
+        "/api/account-health/settings",
+        { method: "PUT", body: JSON.stringify(accountSettings) },
+        "保存账号健康设置失败"
+      );
+      setAccountSettings(payload.settings);
+      setAccountSettingsOpen(false);
+      setStatus({ message: "账号健康设置已保存，立即生效", tone: "success" });
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setAccountSettingsSaving(false);
+    }
+  }
+
+  async function toggleAccountEviction(account: AccountHealthItem, evict: boolean) {
+    const accountId = idValue(account.id);
+    markAccountBusy(accountId, true);
+    try {
+      await requestJson<ApiPayload>(
+        `/api/account-health/accounts/${encodeURIComponent(accountId)}/${evict ? "evict" : "rejoin"}`,
+        { method: "POST" },
+        evict ? "驱逐账号失败" : "恢复账号失败"
+      );
+      setStatus({
+        message: evict
+          ? `「${account.name}」已暂停调度（手动驱逐不会自动回归，需手动恢复）`
+          : `「${account.name}」已恢复调度（回归）`,
+        tone: "success"
+      });
+      await Promise.all([loadAccounts(), loadAccountRuns()]);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      markAccountBusy(accountId, false);
+    }
+  }
+
+  async function loadProxies() {
+    setLoading(true);
+    try {
+      const payload = await requestJson<ProxyListPayload>(
+        "/api/proxy-health/proxies",
+        { method: "GET" },
+        "加载代理列表失败"
+      );
+      setProxies(payload.items ?? []);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadRuns() {
+    setRunsLoading(true);
+    try {
+      const payload = await requestJson<ProxyRunsPayload>(
+        "/api/proxy-health/runs?limit=20",
+        { method: "GET" },
+        "加载搬迁记录失败"
+      );
+      setRuns(payload.items ?? []);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setRunsLoading(false);
+    }
+  }
+
+  async function loadSettings() {
+    try {
+      const payload = await requestJson<ProxyHealthSettingsPayload>(
+        "/api/proxy-health/settings",
+        { method: "GET" },
+        "加载探活设置失败"
+      );
+      setSettings(payload.settings);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (cancelled) return;
+      await Promise.all([
+        loadProxies(),
+        loadRuns(),
+        loadSettings(),
+        loadAccounts(),
+        loadAccountRuns(),
+        loadAccountSettings()
+      ]);
+    })();
+    const timer = window.setInterval(() => {
+      void loadProxies();
+      void loadRuns();
+      void loadAccounts();
+      void loadAccountRuns();
+    }, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function saveSettings() {
+    if (!settings) return;
+    setSettingsSaving(true);
+    try {
+      const payload = await requestJson<ProxyHealthSettingsPayload>(
+        "/api/proxy-health/settings",
+        { method: "PUT", body: JSON.stringify(settings) },
+        "保存探活设置失败"
+      );
+      setSettings(payload.settings);
+      setSettingsOpen(false);
+      setStatus({ message: "探活设置已保存，立即生效", tone: "success" });
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  function openCreateProxy() {
+    setEditingProxyId(null);
+    setProxyForm({ ...emptyProxyForm });
+    setEditorOpen(true);
+  }
+
+  function openEditProxy(proxy: ProxyItem) {
+    setEditingProxyId(idValue(proxy.id));
+    setProxyForm({
+      name: proxy.name ?? "",
+      protocol: proxy.protocol ?? "socks5",
+      host: proxy.host ?? "",
+      port: proxy.port ?? 1080,
+      username: proxy.username ?? "",
+      password: proxy.password ?? "",
+      status: proxy.status ?? "active"
+    });
+    setEditorOpen(true);
+  }
+
+  async function submitProxyForm() {
+    if (!proxyForm.name.trim() || !proxyForm.host.trim()) {
+      setStatus({ message: "名称和主机地址不能为空", tone: "error" });
+      return;
+    }
+    setProxySaving(true);
+    try {
+      // Blanked credentials go up as explicit empty strings so the upstream
+      // actually clears them (omitted fields are kept as-is by its merge PUT).
+      const body = JSON.stringify(proxyForm);
+      if (editingProxyId) {
+        await requestJson<ApiPayload>(
+          `/api/proxy-health/proxies/${encodeURIComponent(editingProxyId)}`,
+          { method: "PUT", body },
+          "更新代理失败"
+        );
+        setStatus({ message: "代理已更新", tone: "success" });
+      } else {
+        await requestJson<ApiPayload>(
+          "/api/proxy-health/proxies",
+          { method: "POST", body },
+          "新增代理失败"
+        );
+        setStatus({ message: "代理已创建", tone: "success" });
+      }
+      setEditorOpen(false);
+      await loadProxies();
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setProxySaving(false);
+    }
+  }
+
+  function confirmDeleteProxy(proxy: ProxyItem) {
+    Modal.confirm({
+      title: `删除代理「${proxy.name ?? idValue(proxy.id)}」？`,
+      content: "删除前请确认该代理上已无账号，删除后无法恢复。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await requestJson<ApiPayload>(
+            `/api/proxy-health/proxies/${encodeURIComponent(idValue(proxy.id))}`,
+            { method: "DELETE" },
+            "删除代理失败"
+          );
+          setStatus({ message: "代理已删除", tone: "success" });
+          await loadProxies();
+        } catch (error) {
+          onAuthExpired(error, setStatus);
+        }
+      }
+    });
+  }
+
+  async function testProxy(proxy: ProxyItem) {
+    const proxyId = idValue(proxy.id);
+    markActionBusy(proxyId, true);
+    try {
+      const payload = await requestJson<ApiPayload & { result?: ApiPayload }>(
+        `/api/proxy-health/proxies/${encodeURIComponent(proxyId)}/test`,
+        { method: "POST" },
+        "测试连接失败"
+      );
+      const result = (payload.result ?? {}) as Record<string, unknown>;
+      const ok = result.success === true;
+      const latency = finiteNumber(result.latency_ms);
+      setStatus({
+        message: ok
+          ? `「${proxy.name}」连接正常${latency !== null ? `，延迟 ${Math.round(latency)}ms` : ""}，出口 ${String(result.ip_address ?? "未知")}（${String(result.country ?? "未知")}）`
+          : `「${proxy.name}」连接失败：${String(result.message ?? "未知原因")}`,
+        tone: ok ? "success" : "error"
+      });
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      markActionBusy(proxyId, false);
+    }
+  }
+
+  async function qualityCheckProxy(proxy: ProxyItem) {
+    const proxyId = idValue(proxy.id);
+    markActionBusy(proxyId, true);
+    try {
+      const payload = await requestJson<ApiPayload & { result?: ApiPayload }>(
+        `/api/proxy-health/proxies/${encodeURIComponent(proxyId)}/quality-check`,
+        { method: "POST" },
+        "质量检测失败"
+      );
+      const result = (payload.result ?? {}) as Record<string, unknown>;
+      setStatus({
+        message: `「${proxy.name}」质量检测：${String(result.grade ?? "-")} 级 ${String(result.score ?? "-")} 分，${String(result.summary ?? "")}`,
+        tone: "info"
+      });
+      await loadProxies();
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      markActionBusy(proxyId, false);
+    }
+  }
+
+  async function probeAllNow() {
+    setProbeBusy(true);
+    try {
+      await requestJson<ApiPayload>(
+        "/api/proxy-health/probe",
+        { method: "POST" },
+        "批量质量检测失败"
+      );
+      setStatus({ message: "批量质量检测完成", tone: "success" });
+      await Promise.all([loadProxies(), loadRuns()]);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setProbeBusy(false);
+    }
+  }
+
+  async function runRebalance(dryRun: boolean) {
+    setRebalanceBusy(true);
+    try {
+      const payload = await requestJson<ApiPayload & { run?: ProxyHealthRunItem }>(
+        "/api/proxy-health/rebalance",
+        { method: "POST", body: JSON.stringify({ dry_run: dryRun }) },
+        "均衡执行失败"
+      );
+      const run = payload.run;
+      if (run) {
+        const summary =
+          run.status === "noop"
+            ? "当前分布已经均衡，无需变更"
+            : dryRun
+              ? `预演完成：计划移动 ${run.moves.length} 个账号`
+              : `均衡完成：移动 ${run.moved_count} 个，失败 ${run.failed_count} 个`;
+        setStatus({ message: summary, tone: run.failed_count ? "error" : "success" });
+      }
+      await Promise.all([loadProxies(), loadRuns()]);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setRebalanceBusy(false);
+    }
+  }
+
+  const proxyColumns = [
+    {
+      title: "名称",
+      key: "name",
+      render: (_: unknown, proxy: ProxyItem) => (
+        <div>
+          <strong>{proxy.name ?? idValue(proxy.id)}</strong>
+          <div>
+            <Tag>{proxy.protocol ?? "socks5"}</Tag>
+            <Typography.Text type="secondary">
+              {proxy.host}:{proxy.port}
+            </Typography.Text>
+          </div>
+        </div>
+      )
+    },
+    {
+      title: "出口",
+      key: "exit",
+      render: (_: unknown, proxy: ProxyItem) => (
+        <div>
+          <div>{proxy.ip_address ?? "-"}</div>
+          <Typography.Text type="secondary">{proxy.country ?? ""}</Typography.Text>
+        </div>
+      )
+    },
+    {
+      title: "延迟",
+      key: "latency",
+      render: (_: unknown, proxy: ProxyItem) => {
+        const probeLatency = finiteNumber(proxy.health_detail?.last_probe_latency_ms);
+        const listLatency = finiteNumber(proxy.latency_ms);
+        const latency = probeLatency ?? listLatency;
+        return latency !== null ? `${Math.round(latency)}ms` : "-";
+      }
+    },
+    {
+      title: "质量",
+      key: "quality",
+      render: (_: unknown, proxy: ProxyItem) => {
+        const grade = proxy.health_detail?.last_quality_grade;
+        const score = finiteNumber(proxy.health_detail?.last_quality_score);
+        if (!grade && score === null) return "-";
+        return (
+          <Tooltip title={proxy.health_detail?.last_quality_summary ?? ""}>
+            <Tag color={grade === "A" ? "green" : grade === "B" ? "blue" : "orange"}>
+              {grade ?? "-"} {score !== null ? `${Math.round(score)}分` : ""}
+            </Tag>
+          </Tooltip>
+        );
+      }
+    },
+    {
+      title: "账号数",
+      key: "accounts",
+      render: (_: unknown, proxy: ProxyItem) => finiteNumber(proxy.account_count) ?? 0
+    },
+    {
+      title: "健康",
+      key: "health",
+      render: (_: unknown, proxy: ProxyItem) => {
+        const label = PROXY_HEALTH_LABELS[proxy.health ?? "unknown"] ?? PROXY_HEALTH_LABELS.unknown;
+        const detail = proxy.health_detail;
+        const failingTargets = detail?.failing_critical_targets ?? [];
+        const tooltip = [
+          detail?.last_probe_error ? `最近错误：${detail.last_probe_error}` : "",
+          failingTargets.length ? `关键目标不通：${failingTargets.join("、")}` : "",
+          detail?.consecutive_failures ? `连续失败 ${detail.consecutive_failures} 次` : ""
+        ]
+          .filter(Boolean)
+          .join("；");
+        return (
+          <Tooltip title={tooltip}>
+            <span>
+              <Tag color={label.color}>{label.text}</Tag>
+              {proxy.alert_whitelisted ? <Tag>免告警</Tag> : null}
+            </span>
+          </Tooltip>
+        );
+      }
+    },
+    {
+      title: "操作",
+      key: "actions",
+      render: (_: unknown, proxy: ProxyItem) => {
+        const proxyId = idValue(proxy.id);
+        const busy = actionBusyIds.has(proxyId);
+        return (
+          <Space wrap>
+            <AntButton size="small" icon={<ApiOutlined />} loading={busy} onClick={() => void testProxy(proxy)}>
+              测试连接
+            </AntButton>
+            <AntButton size="small" icon={<SyncOutlined />} loading={busy} onClick={() => void qualityCheckProxy(proxy)}>
+              质量检测
+            </AntButton>
+            <AntButton size="small" onClick={() => openEditProxy(proxy)}>
+              编辑
+            </AntButton>
+            <AntButton size="small" danger onClick={() => confirmDeleteProxy(proxy)}>
+              删除
+            </AntButton>
+          </Space>
+        );
+      }
+    }
+  ];
+
+  const runColumns = [
+    {
+      title: "时间",
+      key: "created_at",
+      render: (_: unknown, run: ProxyHealthRunItem) => new Date(run.created_at).toLocaleString()
+    },
+    {
+      title: "触发",
+      key: "trigger",
+      render: (_: unknown, run: ProxyHealthRunItem) => (
+        <span>
+          {PROXY_RUN_TRIGGER_LABELS[run.trigger] ?? run.trigger}
+          {run.dry_run ? <Tag style={{ marginLeft: 6 }}>预演</Tag> : null}
+          {run.fallback_direct ? (
+            <Tag color="orange" style={{ marginLeft: 6 }}>
+              回落直连
+            </Tag>
+          ) : null}
+        </span>
+      )
+    },
+    {
+      title: "状态",
+      key: "status",
+      render: (_: unknown, run: ProxyHealthRunItem) => {
+        const label = PROXY_RUN_STATUS_LABELS[run.status] ?? { text: run.status, color: "default" };
+        return (
+          <Tooltip title={run.reason ?? ""}>
+            <Tag color={label.color}>{label.text}</Tag>
+          </Tooltip>
+        );
+      }
+    },
+    {
+      title: "结果",
+      key: "counts",
+      render: (_: unknown, run: ProxyHealthRunItem) =>
+        run.status === "noop"
+          ? "-"
+          : `移动 ${run.moved_count} / 跳过 ${run.skipped_count} / 失败 ${run.failed_count}`
+    }
+  ];
+
+  return (
+    <section className="operator-stack proxy-management">
+      <div className="panel">
+        <div className="proxy-toolbar">
+          <div>
+            <p className="eyebrow">代理管理</p>
+            <h2>出口代理与账号分配</h2>
+            <Typography.Text type="secondary">
+              定时探活比上游更严格：连通、延迟、关键目标（OpenAI）全部达标才算健康；判死自动驱逐账号，恢复后自动回填。
+            </Typography.Text>
+          </div>
+          <Space wrap>
+            <AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadProxies()}>
+              刷新
+            </AntButton>
+            <AntButton icon={<Plus size={14} aria-hidden="true" />} type="primary" onClick={openCreateProxy}>
+              新增代理
+            </AntButton>
+            <AntButton icon={<SyncOutlined />} loading={probeBusy} onClick={() => void probeAllNow()}>
+              批量质量检测
+            </AntButton>
+            <AntButton loading={rebalanceBusy} onClick={() => void runRebalance(true)}>
+              预演均衡
+            </AntButton>
+            <AntButton type="primary" loading={rebalanceBusy} onClick={() => void runRebalance(false)}>
+              立即均衡
+            </AntButton>
+            <AntButton icon={<Settings size={14} aria-hidden="true" />} onClick={() => setSettingsOpen(true)}>
+              探活设置
+            </AntButton>
+          </Space>
+        </div>
+        {status.tone !== "idle" && status.message ? (
+          <Alert
+            style={{ marginTop: 12 }}
+            type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
+            message={status.message}
+            showIcon
+          />
+        ) : null}
+        <Table
+          style={{ marginTop: 16 }}
+          rowKey={(proxy) => idValue(proxy.id)}
+          columns={proxyColumns}
+          dataSource={proxies}
+          loading={loading}
+          pagination={false}
+          locale={{ emptyText: <Empty description="还没有配置代理" /> }}
+        />
+      </div>
+
+      <div className="panel">
+        <div className="proxy-toolbar">
+          <div>
+            <p className="eyebrow">搬迁记录</p>
+            <h2>驱逐与均衡历史</h2>
+          </div>
+          <AntButton icon={<ReloadOutlined />} loading={runsLoading} onClick={() => void loadRuns()}>
+            刷新
+          </AntButton>
+        </div>
+        <Table
+          style={{ marginTop: 16 }}
+          rowKey={(run) => run.run_id}
+          columns={runColumns}
+          dataSource={runs}
+          loading={runsLoading}
+          pagination={false}
+          expandable={{
+            rowExpandable: (run) => run.moves.length > 0,
+            expandedRowRender: (run) => (
+              <List
+                size="small"
+                dataSource={run.moves}
+                renderItem={(move) => (
+                  <List.Item>
+                    <Typography.Text>
+                      {move.account_name || move.account_id}：{move.from_proxy_id ?? "直连"} → {move.to_proxy_id ?? "直连"}
+                    </Typography.Text>
+                    <Tag
+                      color={
+                        move.status === "moved"
+                          ? "green"
+                          : move.status === "failed"
+                            ? "red"
+                            : move.status === "planned"
+                              ? "blue"
+                              : "default"
+                      }
+                    >
+                      {move.status === "moved"
+                        ? "已移动"
+                        : move.status === "failed"
+                          ? `失败${move.reason ? `：${move.reason}` : ""}`
+                          : move.status === "planned"
+                            ? "计划中"
+                            : "跳过"}
+                    </Tag>
+                  </List.Item>
+                )}
+              />
+            )
+          }}
+          locale={{ emptyText: <Empty description="暂无搬迁记录" /> }}
+        />
+      </div>
+
+      <div className="panel">
+        <div className="proxy-toolbar">
+          <div>
+            <p className="eyebrow">账号健康</p>
+            <h2>账号打标 · 驱逐 · 回归</h2>
+            <Typography.Text type="secondary">
+              异常账号连续超阈值即暂停调度（驱逐）；限流类恢复后自动回归，需人工处理的（重授权/封禁）修复并探测恢复后才回归。上游手动停用的账号不受管控。
+            </Typography.Text>
+          </div>
+          <Space wrap>
+            <AntButton icon={<ReloadOutlined />} loading={accountsLoading} onClick={() => void loadAccounts()}>
+              刷新
+            </AntButton>
+            <AntButton icon={<Settings size={14} aria-hidden="true" />} onClick={() => setAccountSettingsOpen(true)}>
+              健康设置
+            </AntButton>
+          </Space>
+        </div>
+        {accountSettings && !accountSettings.enabled ? (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="warning"
+            message="账号健康巡检当前已关闭，状态和告警不会更新。"
+            showIcon
+          />
+        ) : null}
+        <Table
+          style={{ marginTop: 16 }}
+          rowKey={(account) => idValue(account.id)}
+          columns={[
+            {
+              title: "账号",
+              key: "name",
+              render: (_: unknown, account: AccountHealthItem) => (
+                <strong>{account.name ?? idValue(account.id)}</strong>
+              )
+            },
+            {
+              title: "上游状态",
+              key: "availability",
+              render: (_: unknown, account: AccountHealthItem) => {
+                const key = account.availability_status ?? "unknown";
+                const text = ACCOUNT_AVAILABILITY_LABELS[key] ?? key;
+                const tone =
+                  key === "available" ? "green" : key === "unknown" ? "default" : "orange";
+                return (
+                  <Tooltip title={account.last_error ?? ""}>
+                    <Tag color={tone}>{text}</Tag>
+                  </Tooltip>
+                );
+              }
+            },
+            {
+              title: "判定",
+              key: "health",
+              render: (_: unknown, account: AccountHealthItem) => {
+                const failures = account.health_detail?.consecutive_failures ?? 0;
+                if (account.health === "bad") {
+                  return (
+                    <Tag color="red">
+                      异常{account.classification === "persistent" ? "（需人工）" : "（临时）"}
+                    </Tag>
+                  );
+                }
+                if (account.health === "healthy") {
+                  return <Tag color="green">健康</Tag>;
+                }
+                return <Tag>{failures > 0 ? `观察中（${failures} 次异常）` : "待巡检"}</Tag>;
+              }
+            },
+            {
+              title: "调度",
+              key: "evicted",
+              render: (_: unknown, account: AccountHealthItem) => (
+                <span>
+                  {account.evicted ? (
+                    <Tag color="red">已驱逐（暂停调度）</Tag>
+                  ) : account.schedulable === false ? (
+                    <Tag color="orange">上游已暂停</Tag>
+                  ) : (
+                    <Tag color="green">在池内</Tag>
+                  )}
+                  {account.alert_whitelisted ? <Tag>免告警</Tag> : null}
+                </span>
+              )
+            },
+            {
+              title: "操作",
+              key: "actions",
+              render: (_: unknown, account: AccountHealthItem) => {
+                const accountId = idValue(account.id);
+                const busy = accountBusyIds.has(accountId);
+                return account.evicted ? (
+                  <AntButton
+                    size="small"
+                    loading={busy}
+                    onClick={() => void toggleAccountEviction(account, false)}
+                  >
+                    恢复回归
+                  </AntButton>
+                ) : (
+                  <AntButton
+                    size="small"
+                    danger
+                    loading={busy}
+                    disabled={account.schedulable === false}
+                    onClick={() => void toggleAccountEviction(account, true)}
+                  >
+                    立即驱逐
+                  </AntButton>
+                );
+              }
+            }
+          ]}
+          dataSource={accounts}
+          loading={accountsLoading}
+          pagination={false}
+          locale={{ emptyText: <Empty description="暂无账号" /> }}
+        />
+        <div className="proxy-toolbar" style={{ marginTop: 24 }}>
+          <div>
+            <p className="eyebrow">处置记录</p>
+            <h2>驱逐与回归历史</h2>
+          </div>
+          <AntButton icon={<ReloadOutlined />} loading={accountRunsLoading} onClick={() => void loadAccountRuns()}>
+            刷新
+          </AntButton>
+        </div>
+        <Table
+          style={{ marginTop: 16 }}
+          rowKey={(run) => run.run_id}
+          columns={[
+            {
+              title: "时间",
+              key: "created_at",
+              render: (_: unknown, run: AccountHealthRunItem) =>
+                new Date(run.created_at).toLocaleString()
+            },
+            {
+              title: "触发",
+              key: "trigger",
+              render: (_: unknown, run: AccountHealthRunItem) =>
+                run.trigger === "manual" ? "手动" : "自动巡检"
+            },
+            {
+              title: "结果",
+              key: "counts",
+              render: (_: unknown, run: AccountHealthRunItem) =>
+                `驱逐 ${run.evicted_count} / 回归 ${run.rejoined_count} / 失败 ${run.failed_count}`
+            }
+          ]}
+          dataSource={accountRuns}
+          loading={accountRunsLoading}
+          pagination={false}
+          expandable={{
+            rowExpandable: (run) => run.actions.length > 0,
+            expandedRowRender: (run) => (
+              <List
+                size="small"
+                dataSource={run.actions}
+                renderItem={(action) => (
+                  <List.Item>
+                    <Typography.Text>
+                      {action.account_name || action.account_id}：
+                      {action.action === "evict" ? "驱逐（暂停调度）" : "回归（恢复调度）"}
+                      {action.classification === "persistent" ? "，需人工处理类" : ""}
+                    </Typography.Text>
+                    <Tag color={action.status === "done" ? "green" : "red"}>
+                      {action.status === "done" ? "成功" : `失败${action.reason ? `：${action.reason}` : ""}`}
+                    </Tag>
+                  </List.Item>
+                )}
+              />
+            )
+          }}
+          locale={{ emptyText: <Empty description="暂无处置记录" /> }}
+        />
+      </div>
+
+      <Modal
+        title="账号健康设置"
+        open={accountSettingsOpen}
+        onCancel={() => setAccountSettingsOpen(false)}
+        onOk={() => void saveAccountSettings()}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={accountSettingsSaving}
+      >
+        {accountSettings ? (
+          <Space direction="vertical" style={{ width: "100%" }} size="middle">
+            <div className="proxy-settings-row">
+              <Typography.Text>启用账号健康巡检</Typography.Text>
+              <Switch
+                checked={accountSettings.enabled}
+                onChange={(checked) => setAccountSettings({ ...accountSettings, enabled: checked })}
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>巡检间隔（秒）</Typography.Text>
+              <InputNumber
+                min={5}
+                value={accountSettings.check_interval_seconds}
+                onChange={(value) =>
+                  setAccountSettings({
+                    ...accountSettings,
+                    check_interval_seconds: Number(value ?? 60)
+                  })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>连续异常判定次数</Typography.Text>
+              <InputNumber
+                min={1}
+                value={accountSettings.failure_threshold}
+                onChange={(value) =>
+                  setAccountSettings({ ...accountSettings, failure_threshold: Number(value ?? 3) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>连续正常回归次数</Typography.Text>
+              <InputNumber
+                min={1}
+                value={accountSettings.recovery_threshold}
+                onChange={(value) =>
+                  setAccountSettings({ ...accountSettings, recovery_threshold: Number(value ?? 3) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>自动驱逐 / 自动回归</Typography.Text>
+              <Switch
+                checked={accountSettings.auto_evict_enabled}
+                onChange={(checked) =>
+                  setAccountSettings({ ...accountSettings, auto_evict_enabled: checked })
+                }
+              />
+            </div>
+            <div>
+              <Typography.Text>告警白名单（驱逐这些账号时不发告警）</Typography.Text>
+              <Select
+                mode="tags"
+                style={{ width: "100%", marginTop: 4 }}
+                placeholder="按账号选择"
+                value={accountSettings.alert_whitelist}
+                onChange={(values) =>
+                  setAccountSettings({ ...accountSettings, alert_whitelist: values })
+                }
+                options={accounts.map((account) => ({
+                  value: idValue(account.id),
+                  label: `${account.name ?? idValue(account.id)}`
+                }))}
+              />
+            </div>
+          </Space>
+        ) : (
+          <Spin />
+        )}
+      </Modal>
+
+      <Modal
+        title={editingProxyId ? "编辑代理" : "新增代理"}
+        open={editorOpen}
+        onCancel={() => setEditorOpen(false)}
+        onOk={() => void submitProxyForm()}
+        okText={editingProxyId ? "保存" : "创建"}
+        cancelText="取消"
+        confirmLoading={proxySaving}
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size="middle">
+          <div>
+            <Typography.Text>名称</Typography.Text>
+            <Input
+              value={proxyForm.name}
+              onChange={(event) => setProxyForm({ ...proxyForm, name: event.target.value })}
+              placeholder="例如 us-node-1"
+            />
+          </div>
+          <Space style={{ width: "100%" }}>
+            <div>
+              <Typography.Text>协议</Typography.Text>
+              <Select
+                value={proxyForm.protocol}
+                style={{ width: 120 }}
+                onChange={(value) => setProxyForm({ ...proxyForm, protocol: value })}
+                options={[
+                  { value: "socks5", label: "socks5" },
+                  { value: "http", label: "http" },
+                  { value: "https", label: "https" }
+                ]}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <Typography.Text>主机</Typography.Text>
+              <Input
+                value={proxyForm.host}
+                onChange={(event) => setProxyForm({ ...proxyForm, host: event.target.value })}
+                placeholder="1.2.3.4 或域名"
+              />
+            </div>
+            <div>
+              <Typography.Text>端口</Typography.Text>
+              <InputNumber
+                min={1}
+                max={65535}
+                value={proxyForm.port}
+                onChange={(value) => setProxyForm({ ...proxyForm, port: Number(value ?? 1080) })}
+              />
+            </div>
+          </Space>
+          <Space style={{ width: "100%" }}>
+            <div>
+              <Typography.Text>用户名（可选）</Typography.Text>
+              <Input
+                value={proxyForm.username}
+                onChange={(event) => setProxyForm({ ...proxyForm, username: event.target.value })}
+              />
+            </div>
+            <div>
+              <Typography.Text>密码（可选）</Typography.Text>
+              <Input.Password
+                value={proxyForm.password}
+                onChange={(event) => setProxyForm({ ...proxyForm, password: event.target.value })}
+              />
+            </div>
+          </Space>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="探活设置"
+        open={settingsOpen}
+        onCancel={() => setSettingsOpen(false)}
+        onOk={() => void saveSettings()}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={settingsSaving}
+      >
+        {settings ? (
+          <Space direction="vertical" style={{ width: "100%" }} size="middle">
+            <div className="proxy-settings-row">
+              <Typography.Text>启用定时探活</Typography.Text>
+              <Switch
+                checked={settings.enabled}
+                onChange={(checked) => setSettings({ ...settings, enabled: checked })}
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>探活间隔（秒）</Typography.Text>
+              <InputNumber
+                min={5}
+                value={settings.probe_interval_seconds}
+                onChange={(value) =>
+                  setSettings({ ...settings, probe_interval_seconds: Number(value ?? 60) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>质量检测间隔（秒）</Typography.Text>
+              <InputNumber
+                min={30}
+                value={settings.quality_check_interval_seconds}
+                onChange={(value) =>
+                  setSettings({ ...settings, quality_check_interval_seconds: Number(value ?? 300) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>连续失败判死次数</Typography.Text>
+              <InputNumber
+                min={1}
+                value={settings.failure_threshold}
+                onChange={(value) => setSettings({ ...settings, failure_threshold: Number(value ?? 3) })}
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>连续成功判活次数</Typography.Text>
+              <InputNumber
+                min={1}
+                value={settings.recovery_threshold}
+                onChange={(value) => setSettings({ ...settings, recovery_threshold: Number(value ?? 3) })}
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>延迟阈值（毫秒，超过判失败）</Typography.Text>
+              <InputNumber
+                min={1}
+                value={settings.latency_threshold_ms ?? undefined}
+                onChange={(value) =>
+                  setSettings({ ...settings, latency_threshold_ms: value === null ? null : Number(value) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>判死自动驱逐 / 恢复自动回填</Typography.Text>
+              <Switch
+                checked={settings.auto_move_enabled}
+                onChange={(checked) => setSettings({ ...settings, auto_move_enabled: checked })}
+              />
+            </div>
+            <div>
+              <Typography.Text>告警白名单（这些代理判死不发告警，仍会探活和搬家）</Typography.Text>
+              <Select
+                mode="tags"
+                style={{ width: "100%", marginTop: 4 }}
+                placeholder="按名称或 ID 选择要忽略告警的代理"
+                value={settings.alert_whitelist}
+                onChange={(values) => setSettings({ ...settings, alert_whitelist: values })}
+                options={proxies.map((proxy) => ({
+                  // Store proxy IDs, not names: names are not unique upstream and
+                  // renaming a proxy would silently un-whitelist it.
+                  value: idValue(proxy.id),
+                  label: `${proxy.name ?? idValue(proxy.id)}（${proxy.host}:${proxy.port}）`
+                }))}
+              />
+            </div>
+          </Space>
+        ) : (
+          <Spin />
+        )}
+      </Modal>
+    </section>
   );
 }
 

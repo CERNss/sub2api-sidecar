@@ -955,3 +955,188 @@ class NotificationDeliveriesEnvelope(BaseModel):
 class ErrorResponse(BaseModel):
     success: bool = False
     detail: str = Field(..., description="Human readable error message")
+
+
+class ProxyHealthRuntimeSettingsRequest(BaseModel):
+    enabled: bool = True
+    probe_interval_seconds: int = Field(default=60, ge=5)
+    quality_check_interval_seconds: int = Field(default=300, ge=30)
+    failure_threshold: int = Field(default=3, ge=1)
+    recovery_threshold: int = Field(default=3, ge=1)
+    auto_move_enabled: bool = True
+    critical_targets: list[str] = Field(default_factory=lambda: ["openai"])
+    latency_threshold_ms: int | None = Field(default=10_000, ge=1)
+    alert_whitelist: list[str] = Field(default_factory=list)
+
+
+class ProxyHealthRuntimeSettingsResponse(BaseModel):
+    enabled: bool
+    probe_interval_seconds: int
+    quality_check_interval_seconds: int
+    failure_threshold: int
+    recovery_threshold: int
+    auto_move_enabled: bool
+    critical_targets: list[str]
+    latency_threshold_ms: int | None
+    alert_whitelist: list[str]
+    updated_at: datetime
+
+
+class ProxyHealthRuntimeSettingsEnvelope(BaseModel):
+    success: bool = True
+    settings: ProxyHealthRuntimeSettingsResponse
+
+
+class ProxyHealthSchedulerStatusResponse(BaseModel):
+    enabled: bool
+    running: bool
+    cadence_seconds: int
+    tick_count: int
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
+    last_tick_error: str | None = None
+    last_probe_count: int = 0
+    last_dead_count: int = 0
+
+
+class ProxyListEnvelope(BaseModel):
+    success: bool = True
+    items: list[dict[str, Any]]
+    total: int
+
+
+class ProxyActionEnvelope(BaseModel):
+    success: bool = True
+    result: dict[str, Any]
+
+
+class ProxyAccountMoveResponse(BaseModel):
+    account_id: str
+    account_name: str = ""
+    from_proxy_id: str | None = None
+    to_proxy_id: str | None = None
+    status: str
+    reason: str | None = None
+
+
+class ProxyHealthRunResponse(BaseModel):
+    run_id: str
+    trigger: str
+    dry_run: bool
+    status: str
+    reason: str | None = None
+    fallback_direct: bool = False
+    dead_proxy_ids: list[str]
+    eligible_proxy_ids: list[str]
+    moves: list[ProxyAccountMoveResponse]
+    moved_count: int
+    skipped_count: int
+    failed_count: int
+    created_at: datetime
+
+
+class ProxyHealthRunsEnvelope(BaseModel):
+    success: bool = True
+    items: list[ProxyHealthRunResponse]
+    total: int
+
+
+class ProxyHealthRunEnvelope(BaseModel):
+    success: bool = True
+    run: ProxyHealthRunResponse
+
+
+class ProxyUpsertRequest(BaseModel):
+    name: str
+    protocol: str = "socks5"
+    host: str
+    port: int = Field(ge=1, le=65535)
+    username: str = ""
+    password: str = ""
+    status: str = "active"
+
+
+class ProxyRebalanceRequest(BaseModel):
+    dry_run: bool = False
+
+
+class AccountHealthRuntimeSettingsRequest(BaseModel):
+    enabled: bool = True
+    check_interval_seconds: int = Field(default=60, ge=5)
+    failure_threshold: int = Field(default=3, ge=1)
+    recovery_threshold: int = Field(default=3, ge=1)
+    auto_evict_enabled: bool = True
+    transient_statuses: list[str] = Field(
+        default_factory=lambda: ["rate_limited", "temporary_unschedulable"]
+    )
+    persistent_statuses: list[str] = Field(
+        default_factory=lambda: ["needs_reauth", "needs_verify", "banned", "unavailable"]
+    )
+    recovery_test_interval_seconds: int = Field(default=300, ge=30)
+    alert_whitelist: list[str] = Field(default_factory=list)
+
+
+class AccountHealthRuntimeSettingsResponse(BaseModel):
+    enabled: bool
+    check_interval_seconds: int
+    failure_threshold: int
+    recovery_threshold: int
+    auto_evict_enabled: bool
+    transient_statuses: list[str]
+    persistent_statuses: list[str]
+    recovery_test_interval_seconds: int
+    alert_whitelist: list[str]
+    updated_at: datetime
+
+
+class AccountHealthRuntimeSettingsEnvelope(BaseModel):
+    success: bool = True
+    settings: AccountHealthRuntimeSettingsResponse
+
+
+class AccountHealthSchedulerStatusResponse(BaseModel):
+    enabled: bool
+    running: bool
+    cadence_seconds: int
+    tick_count: int
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
+    last_tick_error: str | None = None
+    last_checked_count: int = 0
+    last_evicted_total: int = 0
+
+
+class AccountHealthListEnvelope(BaseModel):
+    success: bool = True
+    items: list[dict[str, Any]]
+    total: int
+
+
+class AccountHealthActionResponse(BaseModel):
+    account_id: str
+    account_name: str = ""
+    action: str
+    classification: str | None = None
+    status: str
+    reason: str | None = None
+
+
+class AccountHealthRunResponse(BaseModel):
+    run_id: str
+    trigger: str
+    actions: list[AccountHealthActionResponse]
+    evicted_count: int
+    rejoined_count: int
+    failed_count: int
+    created_at: datetime
+
+
+class AccountHealthRunsEnvelope(BaseModel):
+    success: bool = True
+    items: list[AccountHealthRunResponse]
+    total: int
+
+
+class AccountHealthRunEnvelope(BaseModel):
+    success: bool = True
+    run: AccountHealthRunResponse
