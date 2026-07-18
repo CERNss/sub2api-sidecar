@@ -259,7 +259,10 @@ if UI_DIST_DIR.exists():
 @lru_cache(maxsize=1)
 def get_flow_store() -> PostgresFlowStore:
     settings = get_settings()
-    return PostgresFlowStore(database_url=settings.database_url)
+    return PostgresFlowStore(
+        database_url=settings.database_url,
+        pool_max_size=settings.database_pool_max_size,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -282,6 +285,10 @@ def get_sub2api_client(upstream_id: str | None = None) -> Sub2APIClient:
         admin_api_key=upstream.admin_api_key,
         provisioning_defaults=upstream.provisioning_defaults,
         timeout_seconds=upstream.request_timeout_seconds,
+        usage_log_max_items=settings.sub2api_usage_log_max_items,
+        max_retries=settings.sub2api_request_max_retries,
+        api_keys_fetch_concurrency=settings.sub2api_api_keys_fetch_concurrency,
+        page_fetch_concurrency=settings.sub2api_page_fetch_concurrency,
     )
 
 

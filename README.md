@@ -294,10 +294,12 @@ database:
   port: 5432
   username: sub2api_sidecar
   name: sub2api_sidecar
+  pool_max_size: 10
 ```
 
 说明：
 
+- `database.pool_max_size`（环境变量 `DATABASE_POOL_MAX_SIZE`，默认 `10`）是共享数据库连接池的最大物理连接数。整个进程按 database URL 共享一个连接池,避免每次查询都新建连接;请把它设得明显低于 PostgreSQL 的 `max_connections`。
 - `SUB2API_ADMIN_API_KEY` 是调用默认 Sub2API admin API 的密钥。每个 `sub2api.upstreams[*].admin_api_key_env` 对应一个 `.env` 密钥。
 - `POSTGRES_PASSWORD` 是 PostgreSQL 密码。数据库 url、port、username、name 写在 `config.yaml` 的 `database` 段；其中 `database.url` 是主机名或 IP，不是整条 DSN。应用会自己拼接连接串，部署时不要提供 `DATABASE_URL`、`POSTGRES_DB` 或 `POSTGRES_USER`。
 - `APP_AUTH_PASSWORD` 是本服务管理员登录密码，建议在 `.env` 中固定配置；如果留空或删除，服务会在每次启动时生成一个临时密码并打印到日志中。
@@ -324,6 +326,9 @@ database:
 ```yaml
 sub2api:
   request_timeout_seconds: 30
+  usage_log_max_items: 100000
+  request_max_retries: 2
+  api_keys_fetch_concurrency: 8
   api_key_group_selection: random
   upstreams:
     - id: main
@@ -335,6 +340,12 @@ sub2api:
       base_url: https://us-proxy-2.sub2api.tcgcard.jp
       admin_api_key_env: SUB2API_US_PROXY_2_ADMIN_API_KEY
 ```
+
+`usage_log_max_items`（环境变量 `SUB2API_USAGE_LOG_MAX_ITEMS`，默认 `100000`，`0` 表示不限制）限制单次拉取用量明细时在内存中累积的最大条数。运行态数据采集每个周期会把当天和前一天的全部用量明细拉进内存，量大时可能触发 OOM；该上限是防止进程被 OOM kill 的安全阀。命中上限时会打印 warning，并可能导致该时间窗的聚合数值偏低——如属预期，可调大该值或缩短用量窗口。
+
+`request_max_retries`（环境变量 `SUB2API_REQUEST_MAX_RETRIES`，默认 `2`，`0` 关闭）只对幂等的 GET 读请求做自动重试,采用指数退避并遵循上游的 `Retry-After`,触发条件是 429/500/502/503/504。账号创建、OAuth code 交换、余额变更等 POST 接口**永不**自动重试,避免重复副作用。
+
+`api_keys_fetch_concurrency`（环境变量 `SUB2API_API_KEYS_FETCH_CONCURRENCY`，默认 `8`）是拉取“全部用户 API key”时逐用户请求的线程池并发度,用于消除 N+1 的串行等待;同时它也决定底层 HTTP 连接池大小(`pool_maxsize`)。结果顺序与串行版本一致。
 
 第一个 upstream 是默认上游，也是 Sub2API 跳转携带 `token` 登录 sidecar 时唯一验证 JWT 的主站；后续 upstream 按从站处理，不参与跳转 token 登录。登录后的顶部“当前用户”区域会显示全局 Sub2API 切换器，切换目标后，用户分组编排、密钥管理和 OAuth 预配会把对应 `upstream_id` 发给后端并访问该从站。也可以通过 `GET /api/upstreams` 读取可选上游，响应只包含 `id/name/base_url/is_default`，不会返回 admin key。运行态数据采集会遍历所有 upstream：主站继续写入原有 source/metric key，从站写入 `upstream:<id>:` 前缀的 source/metric key，避免不同站点数据混在一起；余额管理、用量分层、自动轮换仍消费主站的兼容 key。
 

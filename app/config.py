@@ -159,6 +159,11 @@ class Settings:
     app_auth_password: str | None = None
     app_access_key_ttl_hours: int = 12
     request_timeout_seconds: int = 30
+    database_pool_max_size: int = 10
+    sub2api_usage_log_max_items: int = 100_000
+    sub2api_request_max_retries: int = 2
+    sub2api_api_keys_fetch_concurrency: int = 8
+    sub2api_page_fetch_concurrency: int = 8
     api_key_group_selection: str = API_KEY_GROUP_SELECTION_FIRST
     account_invalid_alert_whitelist: AccountInvalidAlertWhitelist = (
         AccountInvalidAlertWhitelist()
@@ -215,6 +220,54 @@ class Settings:
             ("sub2api", "request_timeout_seconds"),
             default=30,
         )
+        values["database_pool_max_size"] = _int_setting(
+            config,
+            "DATABASE_POOL_MAX_SIZE",
+            ("database", "pool_max_size"),
+            default=10,
+        )
+        if values["database_pool_max_size"] <= 0:
+            raise ConfigurationError("DATABASE_POOL_MAX_SIZE must be greater than zero")
+        values["sub2api_usage_log_max_items"] = _int_setting(
+            config,
+            "SUB2API_USAGE_LOG_MAX_ITEMS",
+            ("sub2api", "usage_log_max_items"),
+            default=100_000,
+        )
+        if values["sub2api_usage_log_max_items"] < 0:
+            raise ConfigurationError(
+                "SUB2API_USAGE_LOG_MAX_ITEMS must be zero (unlimited) or greater"
+            )
+        values["sub2api_request_max_retries"] = _int_setting(
+            config,
+            "SUB2API_REQUEST_MAX_RETRIES",
+            ("sub2api", "request_max_retries"),
+            default=2,
+        )
+        if values["sub2api_request_max_retries"] < 0:
+            raise ConfigurationError(
+                "SUB2API_REQUEST_MAX_RETRIES must be zero or greater"
+            )
+        values["sub2api_api_keys_fetch_concurrency"] = _int_setting(
+            config,
+            "SUB2API_API_KEYS_FETCH_CONCURRENCY",
+            ("sub2api", "api_keys_fetch_concurrency"),
+            default=8,
+        )
+        if values["sub2api_api_keys_fetch_concurrency"] <= 0:
+            raise ConfigurationError(
+                "SUB2API_API_KEYS_FETCH_CONCURRENCY must be greater than zero"
+            )
+        values["sub2api_page_fetch_concurrency"] = _int_setting(
+            config,
+            "SUB2API_PAGE_FETCH_CONCURRENCY",
+            ("sub2api", "page_fetch_concurrency"),
+            default=8,
+        )
+        if values["sub2api_page_fetch_concurrency"] <= 0:
+            raise ConfigurationError(
+                "SUB2API_PAGE_FETCH_CONCURRENCY must be greater than zero"
+            )
         values["api_key_group_selection"] = _api_key_group_selection_setting(config)
         values["account_invalid_alert_whitelist"] = _account_invalid_alert_whitelist_setting(
             config
