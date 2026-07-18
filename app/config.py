@@ -163,6 +163,7 @@ class Settings:
     sub2api_usage_log_max_items: int = 100_000
     sub2api_request_max_retries: int = 2
     sub2api_api_keys_fetch_concurrency: int = 8
+    sub2api_page_fetch_concurrency: int = 8
     api_key_group_selection: str = API_KEY_GROUP_SELECTION_FIRST
     account_invalid_alert_whitelist: AccountInvalidAlertWhitelist = (
         AccountInvalidAlertWhitelist()
@@ -256,6 +257,16 @@ class Settings:
         if values["sub2api_api_keys_fetch_concurrency"] <= 0:
             raise ConfigurationError(
                 "SUB2API_API_KEYS_FETCH_CONCURRENCY must be greater than zero"
+            )
+        values["sub2api_page_fetch_concurrency"] = _int_setting(
+            config,
+            "SUB2API_PAGE_FETCH_CONCURRENCY",
+            ("sub2api", "page_fetch_concurrency"),
+            default=8,
+        )
+        if values["sub2api_page_fetch_concurrency"] <= 0:
+            raise ConfigurationError(
+                "SUB2API_PAGE_FETCH_CONCURRENCY must be greater than zero"
             )
         values["api_key_group_selection"] = _api_key_group_selection_setting(config)
         values["account_invalid_alert_whitelist"] = _account_invalid_alert_whitelist_setting(

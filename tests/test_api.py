@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, unquote, urlparse
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -1369,41 +1371,52 @@ def test_sub2api_client_configures_retrying_pooled_adapter() -> None:
     assert adapter._pool_maxsize >= 12
 
 
-def _usage_log_pagination_request(total_items: int, page_size: int):
+def _usage_log_pagination_request(
+    total_items: int, page_size: int, metadata: str = "full"
+):
     """Build a fake requests.Session.request that paginates /admin/usage.
 
     Tracks how many usage pages were fetched so tests can assert the client stops
-    paginating once the in-memory cap is reached.
+    paginating once the in-memory cap is reached. The counter is lock-protected
+    because the client fetches page waves from a thread pool.
+
+    metadata modes: "full" reports the real total/pages; "none" omits them;
+    "progressive" mimics the real upstream, which only reports
+    total=page*page_size+1 / pages=page+1 as a "has more" hint while more data
+    exists (the real total appears only on the final page).
     """
 
     state = {"pages_fetched": 0}
+    state_lock = threading.Lock()
 
     def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
         path = urlparse(url).path
         if path != "/api/v1/admin/usage":
             return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
-        state["pages_fetched"] += 1
+        with state_lock:
+            state["pages_fetched"] += 1
         page = int((params or {}).get("page", 1))
         start = (page - 1) * page_size
         items = [
             {"id": idx, "user_id": "u1"}
             for idx in range(start, min(start + page_size, total_items))
         ]
-        pages = (total_items + page_size - 1) // page_size
-        return FakeResponse(
-            200,
-            {
-                "code": 0,
-                "message": "success",
-                "data": {
-                    "items": items,
-                    "total": total_items,
-                    "page": page,
-                    "page_size": page_size,
-                    "pages": pages,
-                },
-            },
-        )
+        data: dict[str, object] = {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+        }
+        if metadata == "full":
+            data["total"] = total_items
+            data["pages"] = (total_items + page_size - 1) // page_size
+        elif metadata == "progressive":
+            if start + page_size < total_items:
+                data["total"] = page * page_size + 1
+                data["pages"] = page + 1
+            else:
+                data["total"] = total_items
+                data["pages"] = page
+        return FakeResponse(200, {"code": 0, "message": "success", "data": data})
 
     return fake_request, state
 
@@ -1449,7 +1462,263 @@ def test_list_usage_logs_unlimited_by_default() -> None:
 
     assert len(result["items"]) == 10
     assert result["total"] == 10
-    assert state["pages_fetched"] == 5
+    # Page metadata is never trusted for the stop decision: the client requests a
+    # full wave of page_fetch_concurrency (8) pages concurrently and discards the
+    # empty ones past the end. Bounded waste, in exchange for surviving upstreams
+    # whose total/pages fields are lower-bound hints rather than real counts.
+    assert state["pages_fetched"] == 8
+    # Pages are fetched from a thread pool in waves; the merged order must still
+    # match the upstream sort (page order preserved).
+    assert [item["id"] for item in result["items"]] == list(range(10))
+
+
+def test_list_usage_logs_crawls_without_page_metadata() -> None:
+    fake_request, state = _usage_log_pagination_request(
+        total_items=10, page_size=2, metadata="none"
+    )
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.list_usage_logs(
+            start_date=datetime(2026, 5, 10).date(),
+            end_date=datetime(2026, 5, 10).date(),
+            timezone_name="UTC",
+            page_size=2,
+        )
+
+    assert [item["id"] for item in result["items"]] == list(range(10))
+    assert result["total"] == 10
+    # One full wave of 8 concurrent page requests; pages 6-8 come back empty.
+    assert state["pages_fetched"] == 8
+
+
+def test_list_usage_logs_ignores_lying_progressive_page_metadata() -> None:
+    # Regression test for the production upstream that reports total=N*page_size+1 /
+    # pages=N+1 while more data exists: trusting page-1 metadata would truncate the
+    # crawl to 2 pages and silently drop most of the data.
+    fake_request, state = _usage_log_pagination_request(
+        total_items=9, page_size=2, metadata="progressive"
+    )
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.list_usage_logs(
+            start_date=datetime(2026, 5, 10).date(),
+            end_date=datetime(2026, 5, 10).date(),
+            timezone_name="UTC",
+            page_size=2,
+        )
+
+    # The final (short) page both ends the crawl and carries the real total.
+    assert [item["id"] for item in result["items"]] == list(range(9))
+    assert result["total"] == 9
+    # One full wave of 8 concurrent page requests; the short page 5 ends the crawl
+    # and pages 6-8 are discarded.
+    assert state["pages_fetched"] == 8
+
+
+def _timezone_clear_of_midnight_grace() -> str:
+    # The past-day cache skips the first minutes after local midnight; pick a fixed
+    # zone where local time is safely mid-day so these tests are never in that window.
+    for offset in range(-12, 13):
+        name = f"Etc/GMT{offset:+d}"
+        if 1 <= datetime.now(ZoneInfo(name)).hour <= 22:
+            return name
+    return "UTC"
+
+
+def test_list_usage_logs_caches_immutable_past_day_window() -> None:
+    fake_request, state = _usage_log_pagination_request(total_items=10, page_size=2)
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+    tz = _timezone_clear_of_midnight_grace()
+    past_day = datetime.now(ZoneInfo(tz)).date() - timedelta(days=1)
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        first = client.list_usage_logs(
+            start_date=past_day, end_date=past_day, timezone_name=tz, page_size=2
+        )
+        fetched_once = state["pages_fetched"]
+        # Caller-side mutation of the returned list must not corrupt the cache.
+        first["items"].clear()
+        second = client.list_usage_logs(
+            start_date=past_day, end_date=past_day, timezone_name=tz, page_size=2
+        )
+
+    assert fetched_once > 0
+    assert state["pages_fetched"] == fetched_once
+    assert [item["id"] for item in second["items"]] == list(range(10))
+    assert second["total"] == 10
+
+
+def test_list_usage_logs_today_stays_live_and_filtered_windows_refetch() -> None:
+    fake_request, state = _usage_log_pagination_request(total_items=2, page_size=2)
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+    tz = _timezone_clear_of_midnight_grace()
+    today = datetime.now(ZoneInfo(tz)).date()
+    past_day = today - timedelta(days=1)
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.list_usage_logs(
+            start_date=today, end_date=today, timezone_name=tz, page_size=2
+        )
+        after_today_first = state["pages_fetched"]
+        today_second = client.list_usage_logs(
+            start_date=today, end_date=today, timezone_name=tz, page_size=2
+        )
+        after_today_second = state["pages_fetched"]
+        client.list_usage_logs(
+            user_id="u1",
+            start_date=past_day,
+            end_date=past_day,
+            timezone_name=tz,
+            page_size=2,
+        )
+        after_filtered_first = state["pages_fetched"]
+        client.list_usage_logs(
+            user_id="u1",
+            start_date=past_day,
+            end_date=past_day,
+            timezone_name=tz,
+            page_size=2,
+        )
+        after_filtered_second = state["pages_fetched"]
+
+    today_second_pages = after_today_second - after_today_first
+    filtered_first_pages = after_filtered_first - after_today_second
+    filtered_second_pages = after_filtered_second - after_filtered_first
+
+    # Today's window must stay live: every call revalidates against upstream (the
+    # incremental watermark check is at least one request), never serving frozen data.
+    assert today_second_pages >= 1
+    assert [item["id"] for item in today_second["items"]] == [0, 1]
+    # User-filtered windows are never cached and refetch in full each time.
+    assert filtered_second_pages == filtered_first_pages
+    assert filtered_first_pages > 0
+
+
+def _live_usage_log_request(initial_ids: list[int], page_size: int):
+    """Fake /admin/usage backed by a mutable newest-first id list (append-only feed).
+
+    Prepend ids to state["ids"] to simulate new logs arriving. Metadata mimics the
+    real upstream's progressive lie: total/pages only admit one page beyond the
+    current one until the final page.
+    """
+
+    state = {"ids": list(initial_ids), "pages_fetched": 0}
+    state_lock = threading.Lock()
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if path != "/api/v1/admin/usage":
+            return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+        with state_lock:
+            state["pages_fetched"] += 1
+            ids = list(state["ids"])
+        page = int((params or {}).get("page", 1))
+        start = (page - 1) * page_size
+        chunk = ids[start : start + page_size]
+        items = [{"id": value, "user_id": "u1"} for value in chunk]
+        if start + page_size < len(ids):
+            total, pages = page * page_size + 1, page + 1
+        else:
+            total, pages = len(ids), page
+        return FakeResponse(
+            200,
+            {
+                "code": 0,
+                "data": {
+                    "items": items,
+                    "total": total,
+                    "pages": pages,
+                    "page": page,
+                    "page_size": page_size,
+                },
+            },
+        )
+
+    return fake_request, state
+
+
+def test_list_usage_logs_current_day_incremental_fetch() -> None:
+    fake_request, state = _live_usage_log_request(
+        initial_ids=list(range(30, 20, -1)), page_size=4
+    )
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+    tz = _timezone_clear_of_midnight_grace()
+    today = datetime.now(ZoneInfo(tz)).date()
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        first = client.list_usage_logs(
+            start_date=today, end_date=today, timezone_name=tz, page_size=4
+        )
+        after_cold = state["pages_fetched"]
+
+        second = client.list_usage_logs(
+            start_date=today, end_date=today, timezone_name=tz, page_size=4
+        )
+        after_no_change = state["pages_fetched"]
+
+        state["ids"][:0] = [33, 32, 31]
+        third = client.list_usage_logs(
+            start_date=today, end_date=today, timezone_name=tz, page_size=4
+        )
+        after_growth = state["pages_fetched"]
+
+    assert [item["id"] for item in first["items"]] == list(range(30, 20, -1))
+    # No new data: the watermark sits at the top of page 1, one request total.
+    assert [item["id"] for item in second["items"]] == list(range(30, 20, -1))
+    assert after_no_change - after_cold == 1
+    # Three new rows: still a single page 1 fetch, spliced ahead of the cache.
+    assert [item["id"] for item in third["items"]] == list(range(33, 20, -1))
+    assert after_growth - after_no_change == 1
+
+
+def test_list_usage_logs_current_day_falls_back_when_watermark_not_found() -> None:
+    fake_request, state = _live_usage_log_request(
+        initial_ids=list(range(30, 20, -1)), page_size=4
+    )
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+    tz = _timezone_clear_of_midnight_grace()
+    today = datetime.now(ZoneInfo(tz)).date()
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.list_usage_logs(
+            start_date=today, end_date=today, timezone_name=tz, page_size=4
+        )
+        # The entire feed is replaced (not append-only): the cached watermark is gone
+        # and more than CURRENT_DAY_INCREMENTAL_MAX_PAGES of data hides it.
+        state["ids"] = list(range(100, 79, -1))
+        result = client.list_usage_logs(
+            start_date=today, end_date=today, timezone_name=tz, page_size=4
+        )
+
+    # The incremental attempt gives up and the full wave crawl returns the truth.
+    assert [item["id"] for item in result["items"]] == list(range(100, 79, -1))
+    assert result["total"] == 21
 
 
 def test_sub2api_client_creates_user_api_key_without_forwarding_group_override() -> None:

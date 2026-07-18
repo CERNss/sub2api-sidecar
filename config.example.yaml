@@ -36,6 +36,9 @@ sub2api:
   # Thread-pool width for fetching every user's API keys in parallel
   # (env SUB2API_API_KEYS_FETCH_CONCURRENCY). Also sizes the HTTP connection pool.
   api_keys_fetch_concurrency: 8
+  # Thread-pool width for fetching the remaining pages of paginated usage-log reads
+  # in parallel once page 1 reveals the page count (env SUB2API_PAGE_FETCH_CONCURRENCY).
+  page_fetch_concurrency: 8
   api_key_group_selection: random
   upstreams:
     - id: main

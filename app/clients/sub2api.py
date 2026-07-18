@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,6 +24,18 @@ RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 DEFAULT_SCHEDULED_TEST_MODEL_ID = "gpt-5.5"
 DEFAULT_SCHEDULED_TEST_CRON_EXPRESSION = "*/5 * * * *"
 DEFAULT_SCHEDULED_TEST_MAX_RESULTS = 100
+
+# Usage logs are append-only, so a fully-elapsed day never changes and its (large,
+# slow) crawl can be served from memory. Skip caching in the first minutes after
+# local midnight so late upstream writes to the just-closed day are not frozen out.
+PAST_DAY_USAGE_CACHE_MIDNIGHT_GRACE = timedelta(minutes=15)
+
+# For the current (open) day, new usage logs are prepended to the created_at-desc
+# listing, so a fetch only needs to crawl until it meets the newest already-cached
+# row (the watermark). If the watermark is not met within this many pages, the
+# incremental path gives up and a full wave crawl rebuilds the cache — a bounded,
+# deterministic worst case.
+CURRENT_DAY_INCREMENTAL_MAX_PAGES = 3
 
 
 class Sub2APIError(Exception):
@@ -72,6 +86,7 @@ class Sub2APIClient:
         usage_log_max_items: int = 0,
         max_retries: int = 2,
         api_keys_fetch_concurrency: int = 8,
+        page_fetch_concurrency: int = 8,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.provisioning_defaults = provisioning_defaults
@@ -82,6 +97,17 @@ class Sub2APIClient:
         self.usage_log_max_items = max(0, int(usage_log_max_items))
         # Thread-pool fan-out width for list_all_user_api_keys (N+1 per-user fetch).
         self.api_keys_fetch_concurrency = max(1, int(api_keys_fetch_concurrency))
+        # Thread-pool fan-out width for fetching the remaining pages of a paginated
+        # read once page 1 reveals the page count (list_usage_logs).
+        self.page_fetch_concurrency = max(1, int(page_fetch_concurrency))
+        # Single-entry cache for immutable past-day usage-log crawls (see
+        # list_usage_logs). Bounded to one day so memory stays ~one day's log volume.
+        self._usage_log_cache: dict[tuple[str, str, int], dict[str, Any]] = {}
+        # Single-entry incremental cache for the open current-day window: items in
+        # created_at-desc order plus the set of already-seen ids. Rolls over (and is
+        # discarded) when the local date changes.
+        self._current_day_usage_cache: dict[str, Any] | None = None
+        self._usage_log_cache_lock = threading.Lock()
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -92,9 +118,11 @@ class Sub2APIClient:
         )
         # Bound and reuse the underlying urllib3 connection pool, and transparently
         # retry transient upstream failures (with exponential backoff, honoring
-        # Retry-After) on idempotent reads. pool_maxsize is sized to the fan-out width
-        # so concurrent api-key fetches don't thrash the connection pool.
-        pool_size = max(10, self.api_keys_fetch_concurrency)
+        # Retry-After) on idempotent reads. pool_maxsize must absorb the worst
+        # concurrent burst: an operational-data collection can run two paginated
+        # usage-log fetches at once (current + previous day) alongside the per-user
+        # api-key fan-out.
+        pool_size = max(10, self.api_keys_fetch_concurrency + 2 * self.page_fetch_concurrency)
         retry = Retry(
             total=max(0, int(max_retries)),
             backoff_factor=0.3,
@@ -404,62 +432,314 @@ class Sub2APIClient:
         }
         if user_id not in (None, ""):
             params["user_id"] = user_id
-        items: list[dict[str, Any]] = []
-        page = 1
-        total: int | None = None
-        pages: int | None = None
-        last_raw: dict[str, Any] | None = None
-        while True:
-            data = self._request(
+
+        # Serve immutable past-day windows from the in-memory cache: they dominate
+        # collection wall time (tens of thousands of rows re-crawled every cycle)
+        # and cannot change once the day has closed.
+        cache_key: tuple[str, str, int] | None = None
+        if self._is_immutable_usage_window(
+            user_id=user_id,
+            start_date=start_date,
+            end_date=end_date,
+            timezone_name=timezone_name,
+        ):
+            cache_key = (start_date.isoformat(), timezone_name, page_size)
+            with self._usage_log_cache_lock:
+                cached = self._usage_log_cache.get(cache_key)
+            if cached is not None:
+                logger.info(
+                    "Sub2API usage log cache hit | date=%s items=%s",
+                    start_date.isoformat(),
+                    len(cached["items"]),
+                )
+                return self._copy_usage_log_result(cached)
+
+        def fetch_page(page: int) -> dict[str, Any]:
+            return self._request(
                 "GET",
                 self.USAGE_LIST_PATH,
                 params={**params, "page": page},
             )
-            last_raw = data
-            body = self._unwrap_data(data)
-            if isinstance(body, dict):
-                raw_items = body.get("items", [])
-                if not isinstance(raw_items, list):
-                    raise Sub2APIError("Sub2API usage list items response is not a list")
-                if isinstance(body.get("total"), int):
-                    total = body["total"]
-                if isinstance(body.get("pages"), int):
-                    pages = body["pages"]
-            elif isinstance(body, list):
-                raw_items = body
-            else:
-                raise Sub2APIError("Sub2API usage list response is not an object")
 
-            page_items = [item for item in raw_items if isinstance(item, dict)]
-            items.extend(page_items)
-            if self.usage_log_max_items and len(items) >= self.usage_log_max_items:
-                logger.warning(
-                    "Sub2API usage log pagination capped | path=%s page=%s "
-                    "accumulated=%s max_items=%s reported_total=%s | "
-                    "aggregates may undercount; raise SUB2API_USAGE_LOG_MAX_ITEMS or "
-                    "shorten the usage window if this is expected",
-                    self.USAGE_LIST_PATH,
-                    page,
-                    len(items),
-                    self.usage_log_max_items,
-                    total,
+        # Open current-day window: try the incremental watermark crawl against the
+        # cached items first; fall back to a full wave crawl when it cannot apply.
+        current_day_key: tuple[str, str, int] | None = None
+        if self._is_current_day_window(
+            user_id=user_id,
+            start_date=start_date,
+            end_date=end_date,
+            timezone_name=timezone_name,
+        ):
+            current_day_key = (start_date.isoformat(), timezone_name, page_size)
+            with self._usage_log_cache_lock:
+                entry = self._current_day_usage_cache
+                cached_entry = (
+                    entry if entry is not None and entry["key"] == current_day_key else None
                 )
-                del items[self.usage_log_max_items :]
-                break
-            if not page_items:
-                break
-            if pages is not None and page >= pages:
-                break
-            if total is not None and len(items) >= total:
-                break
-            page += 1
+            if cached_entry is not None:
+                incremental = self._incremental_current_day_crawl(
+                    fetch_page, cached_entry, page_size
+                )
+                if incremental is not None:
+                    items, total, last_raw, pages_fetched = incremental
+                    return self._finish_usage_log_result(
+                        items=items,
+                        total=total,
+                        last_raw=last_raw,
+                        pages_fetched=pages_fetched,
+                        page_size=page_size,
+                        past_day_key=None,
+                        current_day_key=current_day_key,
+                    )
 
-        return {
+        items, total, last_raw, pages_fetched = self._crawl_usage_pages(
+            fetch_page, page_size
+        )
+        return self._finish_usage_log_result(
+            items=items,
+            total=total,
+            last_raw=last_raw,
+            pages_fetched=pages_fetched,
+            page_size=page_size,
+            past_day_key=cache_key,
+            current_day_key=current_day_key,
+        )
+
+    def _crawl_usage_pages(
+        self,
+        fetch_page: Any,
+        page_size: int,
+    ) -> tuple[list[dict[str, Any]], int | None, dict[str, Any], int]:
+        # The upstream's total/pages fields can be progressive lower bounds rather than
+        # real totals (observed in production: page N reports total=N*page_size+1 and
+        # pages=N+1 while much more data exists), so page metadata must never decide
+        # when to stop. Pages are fetched in concurrent waves of page_fetch_concurrency
+        # and the crawl ends at the first short/empty page — the only reliable
+        # end-of-data signal. Waves preserve page order, so the merged result matches
+        # the sequential crawl.
+        items: list[dict[str, Any]] = []
+        total: int | None = None
+        last_raw: dict[str, Any] = {}
+        pages_fetched = 0
+        max_pages: int | None = None
+        if self.usage_log_max_items:
+            max_pages = -(-self.usage_log_max_items // page_size)
+
+        width = self.page_fetch_concurrency
+        executor = (
+            ThreadPoolExecutor(max_workers=width, thread_name_prefix="sub2api-usage-pages")
+            if width > 1
+            else None
+        )
+        try:
+            next_page = 1
+            crawling = True
+            while crawling:
+                wave_last = next_page + width - 1
+                if max_pages is not None:
+                    wave_last = min(wave_last, max_pages)
+                if wave_last < next_page:
+                    break
+                wave = list(range(next_page, wave_last + 1))
+                if executor is not None and len(wave) > 1:
+                    payloads = list(executor.map(fetch_page, wave))
+                else:
+                    payloads = [fetch_page(page) for page in wave]
+                for payload in payloads:
+                    page_items, page_total, _ = self._parse_usage_page(payload)
+                    last_raw = payload
+                    pages_fetched += 1
+                    items.extend(page_items)
+                    if page_total is not None:
+                        total = page_total
+                    if len(page_items) < page_size:
+                        # End of data. Discard any later pages already fetched in this
+                        # wave: beyond-the-end behavior is upstream-specific and must
+                        # not be appended.
+                        crawling = False
+                        break
+                    if self.usage_log_max_items and len(items) >= self.usage_log_max_items:
+                        crawling = False
+                        break
+                else:
+                    next_page = wave_last + 1
+                    if max_pages is not None and next_page > max_pages:
+                        break
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False)
+
+        return items, total, last_raw, pages_fetched
+
+    def _incremental_current_day_crawl(
+        self,
+        fetch_page: Any,
+        entry: dict[str, Any],
+        page_size: int,
+    ) -> tuple[list[dict[str, Any]], int | None, dict[str, Any], int] | None:
+        cached_items: list[dict[str, Any]] = entry["items"]
+        cached_ids: set[Any] = entry["ids"]
+        watermark = cached_items[0].get("id") if cached_items else None
+        if watermark is None:
+            return None
+
+        collected: list[dict[str, Any]] = []
+        last_raw: dict[str, Any] = {}
+        for page in range(1, CURRENT_DAY_INCREMENTAL_MAX_PAGES + 1):
+            payload = fetch_page(page)
+            page_items, _, _ = self._parse_usage_page(payload)
+            last_raw = payload
+            for index, item in enumerate(page_items):
+                if item.get("id") == watermark:
+                    # Splice: everything above the watermark is new. The id-set filter
+                    # guards against boundary reshuffles of identical created_at rows.
+                    fresh = [
+                        candidate
+                        for candidate in collected + page_items[:index]
+                        if candidate.get("id") not in cached_ids
+                    ]
+                    merged = fresh + cached_items
+                    logger.info(
+                        "Sub2API current-day usage incremental fetch | pages=%s new=%s cached=%s",
+                        page,
+                        len(fresh),
+                        len(cached_items),
+                    )
+                    return merged, None, last_raw, page
+            collected.extend(page_items)
+            if len(page_items) < page_size:
+                # Reached the end of the listing without meeting the watermark: what
+                # we collected IS the complete current data set.
+                return collected, None, last_raw, page
+        return None
+
+    def _finish_usage_log_result(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        total: int | None,
+        last_raw: dict[str, Any],
+        pages_fetched: int,
+        page_size: int,
+        past_day_key: tuple[str, str, int] | None,
+        current_day_key: tuple[str, str, int] | None,
+    ) -> dict[str, Any]:
+        if self.usage_log_max_items and len(items) >= self.usage_log_max_items:
+            logger.warning(
+                "Sub2API usage log pagination capped | path=%s pages_fetched=%s "
+                "accumulated=%s max_items=%s reported_total=%s | "
+                "aggregates may undercount; raise SUB2API_USAGE_LOG_MAX_ITEMS or "
+                "shorten the usage window if this is expected",
+                self.USAGE_LIST_PATH,
+                pages_fetched,
+                len(items),
+                self.usage_log_max_items,
+                total,
+            )
+            del items[self.usage_log_max_items :]
+
+        result = {
             "items": items,
             "total": total if total is not None else len(items),
             "page_size": page_size,
             "raw": last_raw or {},
         }
+        if past_day_key is not None:
+            with self._usage_log_cache_lock:
+                # Replacing the whole dict bounds the cache to one entry: the day
+                # rollover evicts the previous day automatically.
+                self._usage_log_cache = {past_day_key: result}
+            logger.info(
+                "Sub2API usage log cache stored | date=%s items=%s",
+                past_day_key[0],
+                len(items),
+            )
+            return self._copy_usage_log_result(result)
+        if current_day_key is not None:
+            with self._usage_log_cache_lock:
+                self._current_day_usage_cache = {
+                    "key": current_day_key,
+                    "items": items,
+                    "ids": {
+                        item.get("id") for item in items if item.get("id") is not None
+                    },
+                }
+            return self._copy_usage_log_result(result)
+        return result
+
+    def _is_immutable_usage_window(
+        self,
+        *,
+        user_id: Any | None,
+        start_date: date,
+        end_date: date,
+        timezone_name: str,
+    ) -> bool:
+        if user_id not in (None, ""):
+            return False
+        if start_date != end_date:
+            return False
+        try:
+            now_local = datetime.now(ZoneInfo(timezone_name))
+        except Exception:
+            return False
+        if end_date >= now_local.date():
+            return False
+        if end_date == now_local.date() - timedelta(days=1):
+            midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            if now_local - midnight < PAST_DAY_USAGE_CACHE_MIDNIGHT_GRACE:
+                return False
+        return True
+
+    def _is_current_day_window(
+        self,
+        *,
+        user_id: Any | None,
+        start_date: date,
+        end_date: date,
+        timezone_name: str,
+    ) -> bool:
+        if user_id not in (None, ""):
+            return False
+        if start_date != end_date:
+            return False
+        try:
+            now_local = datetime.now(ZoneInfo(timezone_name))
+        except Exception:
+            return False
+        return end_date == now_local.date()
+
+    @staticmethod
+    def _copy_usage_log_result(result: dict[str, Any]) -> dict[str, Any]:
+        # Shallow-copy the items list so caller-side list mutations cannot corrupt
+        # the cache. The item dicts themselves are shared and treated as read-only
+        # by every consumer in this repo.
+        return {
+            "items": list(result["items"]),
+            "total": result["total"],
+            "page_size": result["page_size"],
+            "raw": result["raw"],
+        }
+
+    def _parse_usage_page(
+        self, data: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], int | None, int | None]:
+        body = self._unwrap_data(data)
+        total: int | None = None
+        pages: int | None = None
+        if isinstance(body, dict):
+            raw_items = body.get("items", [])
+            if not isinstance(raw_items, list):
+                raise Sub2APIError("Sub2API usage list items response is not a list")
+            if isinstance(body.get("total"), int):
+                total = body["total"]
+            if isinstance(body.get("pages"), int):
+                pages = body["pages"]
+        elif isinstance(body, list):
+            raw_items = body
+        else:
+            raise Sub2APIError("Sub2API usage list response is not an object")
+        return [item for item in raw_items if isinstance(item, dict)], total, pages
 
     def get_user_spending_ranking(
         self,
