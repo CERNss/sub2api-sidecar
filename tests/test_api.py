@@ -7261,3 +7261,162 @@ def test_auto_rotation_skips_ambiguous_and_outside_pool_current_upstream_users(
     assert payload["moved"] == []
     assert payload["skipped"] == []
     assert backend.replace_calls == []
+
+
+def test_proxy_health_settings_roundtrip(client) -> None:
+    login(client)
+
+    response = client.get("/api/proxy-health/settings")
+    assert response.status_code == 200
+    settings = response.json()["settings"]
+    assert settings["probe_interval_seconds"] == 60
+    assert settings["critical_targets"] == ["openai"]
+
+    update = {
+        "enabled": True,
+        "probe_interval_seconds": 30,
+        "quality_check_interval_seconds": 600,
+        "failure_threshold": 5,
+        "recovery_threshold": 2,
+        "auto_move_enabled": False,
+        "critical_targets": ["openai", "anthropic"],
+        "latency_threshold_ms": 8000,
+    }
+    response = client.put("/api/proxy-health/settings", json=update)
+    assert response.status_code == 200
+
+    response = client.get("/api/proxy-health/settings")
+    settings = response.json()["settings"]
+    assert settings["probe_interval_seconds"] == 30
+    assert settings["failure_threshold"] == 5
+    assert settings["auto_move_enabled"] is False
+    assert settings["critical_targets"] == ["openai", "anthropic"]
+    assert settings["latency_threshold_ms"] == 8000
+
+
+def test_proxy_health_proxies_lists_upstream_with_health(client) -> None:
+    login(client)
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if path == "/api/v1/admin/proxies" and method == "GET":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "id": 7,
+                                "name": "us-node",
+                                "protocol": "socks5",
+                                "host": "1.2.3.4",
+                                "port": 1080,
+                                "status": "active",
+                                "latency_ms": 90,
+                            }
+                        ]
+                    },
+                },
+            )
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.get("/api/proxy-health/proxies")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["id"] == 7
+    assert item["health"] == "unknown"
+
+
+def test_proxy_health_requires_auth(client) -> None:
+    response = client.get("/api/proxy-health/proxies")
+    assert response.status_code == 401
+
+
+def _proxy_admin_fake_request(state: dict):
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if path == "/api/v1/admin/proxies" and method == "GET":
+            return FakeResponse(200, {"code": 0, "data": {"items": state["proxies"]}})
+        if path == "/api/v1/admin/proxies" and method == "POST":
+            state["created"] = json
+            return FakeResponse(200, {"code": 0, "data": {"id": 9, **(json or {})}})
+        if path == "/api/v1/admin/proxies/9" and method == "PUT":
+            state["updated"] = json
+            return FakeResponse(200, {"code": 0, "data": {"id": 9, **(json or {})}})
+        if path == "/api/v1/admin/proxies/9" and method == "DELETE":
+            state["deleted"] = True
+            return FakeResponse(200, {"code": 0, "data": {}})
+        if path == "/api/v1/admin/accounts" and method == "GET":
+            return FakeResponse(200, {"code": 0, "data": {"items": []}})
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    return fake_request
+
+
+def test_proxy_health_proxy_crud_endpoints(client) -> None:
+    login(client)
+    state: dict = {"proxies": []}
+
+    with patch.object(requests.Session, "request", new=_proxy_admin_fake_request(state)):
+        response = client.post(
+            "/api/proxy-health/proxies",
+            json={"name": "n1", "host": "1.2.3.4", "port": 1080},
+        )
+        assert response.status_code == 200
+        assert response.json()["result"]["id"] == 9
+        # Blanked credentials must be forwarded as explicit empty strings, not
+        # dropped, so the upstream merge PUT can actually clear them.
+        assert state["created"]["username"] == ""
+        assert state["created"]["password"] == ""
+
+        response = client.put(
+            "/api/proxy-health/proxies/9",
+            json={"name": "n1", "host": "1.2.3.4", "port": 1081, "username": ""},
+        )
+        assert response.status_code == 200
+        assert state["updated"]["port"] == 1081
+        assert state["updated"]["username"] == ""
+
+        response = client.delete("/api/proxy-health/proxies/9")
+        assert response.status_code == 200
+        assert state.get("deleted") is True
+
+
+def test_proxy_health_manual_rebalance_and_runs_endpoints(client) -> None:
+    login(client)
+    state: dict = {"proxies": []}
+
+    with patch.object(requests.Session, "request", new=_proxy_admin_fake_request(state)):
+        response = client.post("/api/proxy-health/rebalance", json={"dry_run": False})
+    assert response.status_code == 200
+    run = response.json()["run"]
+    assert run["status"] == "noop"
+    assert run["trigger"] == "manual"
+
+    response = client.get("/api/proxy-health/runs")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] >= 1
+    assert payload["items"][0]["run_id"] == run["run_id"]
+
+    response = client.get(f"/api/proxy-health/runs/{run['run_id']}")
+    assert response.status_code == 200
+    assert response.json()["run"]["run_id"] == run["run_id"]
+
+    response = client.get("/api/proxy-health/runs/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_proxy_health_scheduler_status_endpoint(client) -> None:
+    login(client)
+    response = client.get("/api/proxy-health/scheduler")
+    assert response.status_code == 200
+    payload = response.json()
+    # conftest pre-disables the proxy-health runtime settings for tests.
+    assert payload["enabled"] is False
+    assert "cadence_seconds" in payload and "tick_count" in payload

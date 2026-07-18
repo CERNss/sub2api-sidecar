@@ -43,6 +43,35 @@ from app.models.operational_data import (
     OperationalDataRuntimeSettings,
     ProvisioningRuntimeSettings,
 )
+from app.models.account_health import AccountHealthRun, AccountHealthRuntimeSettings
+from app.models.proxy_health import ProxyHealthRun, ProxyHealthRuntimeSettings
+from app.models.schemas import (
+    AccountHealthActionResponse,
+    AccountHealthListEnvelope,
+    AccountHealthRunEnvelope,
+    AccountHealthRunResponse,
+    AccountHealthRunsEnvelope,
+    AccountHealthRuntimeSettingsEnvelope,
+    AccountHealthRuntimeSettingsRequest,
+    AccountHealthRuntimeSettingsResponse,
+    AccountHealthSchedulerStatusResponse,
+    ProxyAccountMoveResponse,
+    ProxyActionEnvelope,
+    ProxyHealthRunEnvelope,
+    ProxyHealthRunResponse,
+    ProxyHealthRunsEnvelope,
+    ProxyHealthRuntimeSettingsEnvelope,
+    ProxyHealthRuntimeSettingsRequest,
+    ProxyHealthRuntimeSettingsResponse,
+    ProxyHealthSchedulerStatusResponse,
+    ProxyListEnvelope,
+    ProxyRebalanceRequest,
+    ProxyUpsertRequest,
+)
+from app.services.account_health import AccountHealthService
+from app.services.account_health_scheduler import AccountHealthScheduler
+from app.services.proxy_health import ProxyHealthService
+from app.services.proxy_health_scheduler import ProxyHealthScheduler
 from app.models.rotation import AutoRotationUsageWindow, RotationPoolGroup, RotationPoolKind
 from app.models.schemas import (
     AutoRotationConfigEnvelope,
@@ -236,9 +265,27 @@ async def lifespan(app_instance: FastAPI):
     )
     app_instance.state.credit_control_scheduler = credit_scheduler
     credit_scheduler.start()
+    proxy_health_scheduler = ProxyHealthScheduler(
+        proxy_health_service=get_proxy_health_service(),
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_proxy_health_runtime_settings().enabled,
+        cadence_provider=lambda: get_proxy_health_runtime_settings().probe_interval_seconds,
+    )
+    app_instance.state.proxy_health_scheduler = proxy_health_scheduler
+    proxy_health_scheduler.start()
+    account_health_scheduler = AccountHealthScheduler(
+        account_health_service=get_account_health_service(),
+        cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
+        enabled_provider=lambda: get_account_health_runtime_settings().enabled,
+        cadence_provider=lambda: get_account_health_runtime_settings().check_interval_seconds,
+    )
+    app_instance.state.account_health_scheduler = account_health_scheduler
+    account_health_scheduler.start()
     try:
         yield
     finally:
+        account_health_scheduler.stop()
+        proxy_health_scheduler.stop()
         rotation_scheduler.stop()
         notification_scheduler.stop()
         credit_scheduler.stop()
@@ -581,6 +628,170 @@ def provisioning_runtime_settings_response(
     )
 
 
+def get_proxy_health_runtime_settings() -> ProxyHealthRuntimeSettings:
+    stored = get_flow_store().get_proxy_health_runtime_settings()
+    if stored is not None:
+        return stored
+    return ProxyHealthRuntimeSettings()
+
+
+def save_proxy_health_runtime_settings(
+    payload: ProxyHealthRuntimeSettingsRequest,
+) -> ProxyHealthRuntimeSettings:
+    existing = get_flow_store().get_proxy_health_runtime_settings()
+    now = datetime.now(timezone.utc)
+    settings = ProxyHealthRuntimeSettings(
+        enabled=payload.enabled,
+        probe_interval_seconds=payload.probe_interval_seconds,
+        quality_check_interval_seconds=payload.quality_check_interval_seconds,
+        failure_threshold=payload.failure_threshold,
+        recovery_threshold=payload.recovery_threshold,
+        auto_move_enabled=payload.auto_move_enabled,
+        critical_targets=payload.critical_targets,
+        latency_threshold_ms=payload.latency_threshold_ms,
+        alert_whitelist=payload.alert_whitelist,
+        created_at=existing.created_at if existing else now,
+        updated_at=now,
+    )
+    return get_flow_store().save_proxy_health_runtime_settings(settings)
+
+
+def proxy_health_runtime_settings_response(
+    settings: ProxyHealthRuntimeSettings | None = None,
+) -> ProxyHealthRuntimeSettingsEnvelope:
+    settings = settings if settings is not None else get_proxy_health_runtime_settings()
+    return ProxyHealthRuntimeSettingsEnvelope(
+        settings=ProxyHealthRuntimeSettingsResponse(
+            enabled=settings.enabled,
+            probe_interval_seconds=settings.probe_interval_seconds,
+            quality_check_interval_seconds=settings.quality_check_interval_seconds,
+            failure_threshold=settings.failure_threshold,
+            recovery_threshold=settings.recovery_threshold,
+            auto_move_enabled=settings.auto_move_enabled,
+            critical_targets=settings.critical_targets,
+            latency_threshold_ms=settings.latency_threshold_ms,
+            alert_whitelist=settings.alert_whitelist,
+            updated_at=settings.updated_at,
+        )
+    )
+
+
+def proxy_health_run_response(run: ProxyHealthRun) -> ProxyHealthRunResponse:
+    return ProxyHealthRunResponse(
+        run_id=run.run_id,
+        trigger=run.trigger,
+        dry_run=run.dry_run,
+        status=run.status,
+        reason=run.reason,
+        fallback_direct=run.fallback_direct,
+        dead_proxy_ids=run.dead_proxy_ids,
+        eligible_proxy_ids=run.eligible_proxy_ids,
+        moves=[
+            ProxyAccountMoveResponse(
+                account_id=move.account_id,
+                account_name=move.account_name,
+                from_proxy_id=move.from_proxy_id,
+                to_proxy_id=move.to_proxy_id,
+                status=move.status,
+                reason=move.reason,
+            )
+            for move in run.moves
+        ],
+        moved_count=run.moved_count,
+        skipped_count=run.skipped_count,
+        failed_count=run.failed_count,
+        created_at=run.created_at,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_proxy_health_service() -> ProxyHealthService:
+    return ProxyHealthService(
+        client=get_sub2api_client(),
+        store=get_flow_store(),
+        settings_provider=get_proxy_health_runtime_settings,
+    )
+
+
+def get_account_health_runtime_settings() -> AccountHealthRuntimeSettings:
+    stored = get_flow_store().get_account_health_runtime_settings()
+    if stored is not None:
+        return stored
+    return AccountHealthRuntimeSettings()
+
+
+def save_account_health_runtime_settings(
+    payload: AccountHealthRuntimeSettingsRequest,
+) -> AccountHealthRuntimeSettings:
+    existing = get_flow_store().get_account_health_runtime_settings()
+    now = datetime.now(timezone.utc)
+    settings = AccountHealthRuntimeSettings(
+        enabled=payload.enabled,
+        check_interval_seconds=payload.check_interval_seconds,
+        failure_threshold=payload.failure_threshold,
+        recovery_threshold=payload.recovery_threshold,
+        auto_evict_enabled=payload.auto_evict_enabled,
+        transient_statuses=payload.transient_statuses,
+        persistent_statuses=payload.persistent_statuses,
+        recovery_test_interval_seconds=payload.recovery_test_interval_seconds,
+        alert_whitelist=payload.alert_whitelist,
+        created_at=existing.created_at if existing else now,
+        updated_at=now,
+    )
+    return get_flow_store().save_account_health_runtime_settings(settings)
+
+
+def account_health_runtime_settings_response(
+    settings: AccountHealthRuntimeSettings | None = None,
+) -> AccountHealthRuntimeSettingsEnvelope:
+    settings = settings if settings is not None else get_account_health_runtime_settings()
+    return AccountHealthRuntimeSettingsEnvelope(
+        settings=AccountHealthRuntimeSettingsResponse(
+            enabled=settings.enabled,
+            check_interval_seconds=settings.check_interval_seconds,
+            failure_threshold=settings.failure_threshold,
+            recovery_threshold=settings.recovery_threshold,
+            auto_evict_enabled=settings.auto_evict_enabled,
+            transient_statuses=settings.transient_statuses,
+            persistent_statuses=settings.persistent_statuses,
+            recovery_test_interval_seconds=settings.recovery_test_interval_seconds,
+            alert_whitelist=settings.alert_whitelist,
+            updated_at=settings.updated_at,
+        )
+    )
+
+
+def account_health_run_response(run: AccountHealthRun) -> AccountHealthRunResponse:
+    return AccountHealthRunResponse(
+        run_id=run.run_id,
+        trigger=run.trigger,
+        actions=[
+            AccountHealthActionResponse(
+                account_id=action.account_id,
+                account_name=action.account_name,
+                action=action.action,
+                classification=action.classification,
+                status=action.status,
+                reason=action.reason,
+            )
+            for action in run.actions
+        ],
+        evicted_count=run.evicted_count,
+        rejoined_count=run.rejoined_count,
+        failed_count=run.failed_count,
+        created_at=run.created_at,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_account_health_service() -> AccountHealthService:
+    return AccountHealthService(
+        client=get_sub2api_client(),
+        store=get_flow_store(),
+        settings_provider=get_account_health_runtime_settings,
+    )
+
+
 @app.exception_handler(RequestValidationError)
 def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
     return JSONResponse(
@@ -755,6 +966,7 @@ def safe_operator_next_path(value: str | None) -> str:
         "/credit-control/policies",
         "/credit-control/runs",
         "/credit-control/audit",
+        "/proxy-management",
     }:
         return logical_value
     return "/"
@@ -901,6 +1113,7 @@ def index(request: Request) -> Response:
 @app.get("/credit-control/policies", response_class=HTMLResponse)
 @app.get("/credit-control/runs", response_class=HTMLResponse)
 @app.get("/credit-control/audit", response_class=HTMLResponse)
+@app.get("/proxy-management", response_class=HTMLResponse)
 def operator_view(request: Request) -> Response:
     session = get_optional_auth_session(request)
     if not session:
@@ -1843,6 +2056,305 @@ def credit_control_scheduler_status(
     else:
         response = CreditControlSchedulerStatusResponse(**scheduler.snapshot().__dict__)
     return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/api/proxy-health/settings")
+def proxy_health_settings_get(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content=proxy_health_runtime_settings_response().model_dump(mode="json"),
+    )
+
+
+@app.put("/api/proxy-health/settings")
+def proxy_health_settings_put(
+    payload: ProxyHealthRuntimeSettingsRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    settings = save_proxy_health_runtime_settings(payload)
+    return JSONResponse(
+        status_code=200,
+        content=proxy_health_runtime_settings_response(settings).model_dump(mode="json"),
+    )
+
+
+@app.get("/api/proxy-health/scheduler")
+def proxy_health_scheduler_status(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    scheduler = getattr(app.state, "proxy_health_scheduler", None)
+    if scheduler is None:
+        runtime_settings = get_proxy_health_runtime_settings()
+        response = ProxyHealthSchedulerStatusResponse(
+            enabled=runtime_settings.enabled,
+            running=False,
+            cadence_seconds=runtime_settings.probe_interval_seconds,
+            tick_count=0,
+        )
+    else:
+        response = ProxyHealthSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/api/proxy-health/proxies")
+def proxy_health_list_proxies(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    items = get_proxy_health_service().list_proxies_with_health()
+    envelope = ProxyListEnvelope(items=items, total=len(items))
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+
+@app.post("/api/proxy-health/proxies")
+def proxy_health_create_proxy(
+    payload: ProxyUpsertRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_sub2api_client().create_proxy(payload.model_dump())
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=result).model_dump(mode="json"),
+    )
+
+
+@app.put("/api/proxy-health/proxies/{proxy_id}")
+def proxy_health_update_proxy(
+    proxy_id: str,
+    payload: ProxyUpsertRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    # Full model dump on purpose: blanked username/password must reach the
+    # upstream as explicit empty strings so credentials can actually be cleared
+    # (the upstream PUT merges omitted fields, so dropping them would keep the
+    # old values forever).
+    result = get_sub2api_client().update_proxy(proxy_id, payload.model_dump())
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=result).model_dump(mode="json"),
+    )
+
+
+@app.delete("/api/proxy-health/proxies/{proxy_id}")
+def proxy_health_delete_proxy(
+    proxy_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_sub2api_client().delete_proxy(proxy_id)
+    # Clears the health state AND emits a value-0 sample so a firing
+    # proxy_unreachable alert for this proxy recovers instead of repeating
+    # forever (the probe-tick cleanup can no longer see this proxy).
+    get_proxy_health_service().clear_proxy_state(str(proxy_id))
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=result).model_dump(mode="json"),
+    )
+
+
+@app.post("/api/proxy-health/proxies/{proxy_id}/test")
+def proxy_health_test_proxy(
+    proxy_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_sub2api_client().test_proxy(proxy_id)
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=result).model_dump(mode="json"),
+    )
+
+
+@app.post("/api/proxy-health/proxies/{proxy_id}/quality-check")
+def proxy_health_quality_check_proxy(
+    proxy_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_sub2api_client().quality_check_proxy(proxy_id)
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=result).model_dump(mode="json"),
+    )
+
+
+@app.post("/api/proxy-health/probe")
+def proxy_health_probe_now(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_proxy_health_service().try_probe_once(force_quality=True)
+    if result is None:
+        raise HTTPException(status_code=409, detail="探活正在进行中，请稍后重试")
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=result.model_dump(mode="json")).model_dump(
+            mode="json"
+        ),
+    )
+
+
+@app.post("/api/proxy-health/rebalance")
+def proxy_health_rebalance(
+    payload: ProxyRebalanceRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    run = get_proxy_health_service().try_rebalance(
+        trigger="manual", dry_run=payload.dry_run
+    )
+    if run is None:
+        raise HTTPException(status_code=409, detail="探活或均衡正在进行中，请稍后重试")
+    return JSONResponse(
+        status_code=200,
+        content=ProxyHealthRunEnvelope(run=proxy_health_run_response(run)).model_dump(
+            mode="json"
+        ),
+    )
+
+
+@app.get("/api/proxy-health/runs")
+def proxy_health_runs(
+    limit: int = 50,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    runs = get_flow_store().list_proxy_health_runs(limit=max(1, min(limit, 200)))
+    envelope = ProxyHealthRunsEnvelope(
+        items=[proxy_health_run_response(run) for run in runs], total=len(runs)
+    )
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+
+@app.get("/api/proxy-health/runs/{run_id}")
+def proxy_health_run_detail(
+    run_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    run = get_flow_store().get_proxy_health_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Proxy health run not found")
+    return JSONResponse(
+        status_code=200,
+        content=ProxyHealthRunEnvelope(run=proxy_health_run_response(run)).model_dump(
+            mode="json"
+        ),
+    )
+
+
+@app.get("/api/account-health/settings")
+def account_health_settings_get(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content=account_health_runtime_settings_response().model_dump(mode="json"),
+    )
+
+
+@app.put("/api/account-health/settings")
+def account_health_settings_put(
+    payload: AccountHealthRuntimeSettingsRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    settings = save_account_health_runtime_settings(payload)
+    return JSONResponse(
+        status_code=200,
+        content=account_health_runtime_settings_response(settings).model_dump(
+            mode="json"
+        ),
+    )
+
+
+@app.get("/api/account-health/scheduler")
+def account_health_scheduler_status(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    scheduler = getattr(app.state, "account_health_scheduler", None)
+    if scheduler is None:
+        runtime_settings = get_account_health_runtime_settings()
+        response = AccountHealthSchedulerStatusResponse(
+            enabled=runtime_settings.enabled,
+            running=False,
+            cadence_seconds=runtime_settings.check_interval_seconds,
+            tick_count=0,
+        )
+    else:
+        response = AccountHealthSchedulerStatusResponse(**scheduler.snapshot().__dict__)
+    return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+
+
+@app.get("/api/account-health/accounts")
+def account_health_list_accounts(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    items = get_account_health_service().list_accounts_with_health()
+    envelope = AccountHealthListEnvelope(items=items, total=len(items))
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+
+@app.post("/api/account-health/reconcile")
+def account_health_reconcile_now(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    result = get_account_health_service().reconcile_once(trigger="manual")
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=result.model_dump(mode="json")).model_dump(
+            mode="json"
+        ),
+    )
+
+
+@app.post("/api/account-health/accounts/{account_id}/evict")
+def account_health_evict(
+    account_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    action = get_account_health_service().evict_account(account_id)
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=action.model_dump(mode="json")).model_dump(
+            mode="json"
+        ),
+    )
+
+
+@app.post("/api/account-health/accounts/{account_id}/rejoin")
+def account_health_rejoin(
+    account_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    action = get_account_health_service().rejoin_account(account_id)
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(result=action.model_dump(mode="json")).model_dump(
+            mode="json"
+        ),
+    )
+
+
+@app.get("/api/account-health/runs")
+def account_health_runs(
+    limit: int = 50,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    runs = get_flow_store().list_account_health_runs(limit=max(1, min(limit, 200)))
+    envelope = AccountHealthRunsEnvelope(
+        items=[account_health_run_response(run) for run in runs], total=len(runs)
+    )
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+
+@app.get("/api/account-health/runs/{run_id}")
+def account_health_run_detail(
+    run_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    run = get_flow_store().get_account_health_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Account health run not found")
+    return JSONResponse(
+        status_code=200,
+        content=AccountHealthRunEnvelope(run=account_health_run_response(run)).model_dump(
+            mode="json"
+        ),
+    )
 
 
 @app.get("/api/usage-segmentation/users")

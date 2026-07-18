@@ -22,7 +22,8 @@ const devSpaRoutes = new Set([
   "/dynamic",
   "/dashboard",
   "/provision",
-  "/notifications"
+  "/notifications",
+  "/proxy-management"
 ]);
 
 function devSpaRouteFallback(): Plugin {

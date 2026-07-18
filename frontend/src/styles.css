@@ -1072,6 +1072,7 @@ pre {
 }
 
 .credit-aggregate-card {
+  min-width: 0;
   min-height: 70px;
   border: 1px solid #dbe5f0;
   border-radius: 8px;
@@ -1092,6 +1093,10 @@ pre {
   color: #0f172a;
   font-size: 20px;
   line-height: 1.2;
+  /* Aggregate sums can exceed the tile width (e.g. 10,000,176,297.36): wrap
+     inside the card instead of overflowing it. */
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
 }
 
 .credit-aggregate-balance {
@@ -4676,4 +4681,32 @@ pre {
   .button {
     width: 100%;
   }
+}
+
+/* ---- proxy management ---- */
+.proxy-management .panel {
+  min-width: 0;
+  padding: 18px;
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.proxy-management .proxy-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.proxy-management .proxy-toolbar h2 {
+  margin: 2px 0 6px;
+}
+
+.proxy-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
