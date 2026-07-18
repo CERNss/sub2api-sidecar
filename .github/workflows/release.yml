@@ -1,14 +1,25 @@
 name: Release
 
-# Crossed DAG with explicit stages:
-# init -> validate -> build -> package -> publish
+# Single-job release pipeline, ported from the org-standard CI/CD
+# (customer-service-feedback-platform) and adapted for this repo:
 #
-# One release chain always uses the same runner target selected in `init`.
-# BUILD_RUNNER accepts: "macos" | "linux"
-# BUILD_RUNNER_MACOS_LABELS / BUILD_RUNNER_LINUX_LABELS accept either:
-# - JSON arrays, e.g. ["self-hosted","macOS","ARM64"]
-# - single label strings, e.g. ubuntu-latest
-# - comma-separated labels, e.g. self-hosted,macOS,ARM64
+# The whole release runs on one runner and keeps all intermediate files in the
+# same workspace: validate -> package release assets -> build & push Docker
+# image -> create GitHub Release -> notify the GitOps panel (if configured),
+# which can auto-deploy the new image via opsagent.
+#
+# Repo-specific adaptations vs the standard:
+# - runs-on ubuntu-latest: this personal repo has no org runner group; the only
+#   registered self-hosted runner (a Mac mini) is usually offline and left every
+#   release queued forever.
+# - Registry is DockerHub (<namespace>/<repo>) via DOCKERHUB_USERNAME /
+#   DOCKERHUB_TOKEN instead of the JHS registry.
+# - Validation runs pytest against a PostgreSQL service container; the frontend
+#   is typechecked and built inside the multi-stage Dockerfile.
+# - No native binaries; release assets are the source bundle + VERSION.
+#
+# Image tags: the release version (X.Y.Z), the release commit short SHA, and
+# `latest` unless PUBLISH_LATEST_TAG=false.
 
 on:
   push:
@@ -20,144 +31,53 @@ on:
         description: 'Tag to release (e.g., v1.0.0)'
         required: true
         type: string
-      runner:
-        description: 'Runner target (blank = use BUILD_RUNNER var/secret; default macos)'
-        required: false
-        type: choice
-        options:
-          - ''
-          - macos
-          - linux
-        default: ''
       platforms:
-        description: 'Docker platforms (blank = use DOCKER_PLATFORMS var; default linux/amd64,linux/arm64)'
+        description: 'Docker platforms (blank = use DOCKER_PLATFORMS var; default linux/amd64)'
         required: false
         type: string
         default: ''
 
 env:
-  PYTHON_VERSION: ${{ vars.PYTHON_VERSION || secrets.PYTHON_VERSION || '3.12' }}
   PUBLISH_LATEST_TAG: ${{ vars.PUBLISH_LATEST_TAG || secrets.PUBLISH_LATEST_TAG || 'true' }}
-  VALIDATION_IMAGE: ${{ vars.VALIDATION_IMAGE || secrets.VALIDATION_IMAGE || 'cernss/git-action-python-cicd-validate' }}
-  BUILD_IMAGE: ${{ vars.BUILD_IMAGE || secrets.BUILD_IMAGE || 'cernss/git-action-python-cicd-build' }}
-  FRONTEND_BUILD_IMAGE: ${{ vars.FRONTEND_BUILD_IMAGE || secrets.FRONTEND_BUILD_IMAGE || 'node:22-bookworm-slim' }}
-  PACKAGE_RUNTIME_IMAGE: ${{ vars.PACKAGE_RUNTIME_IMAGE || secrets.PACKAGE_RUNTIME_IMAGE }}
-  NEXUS_URL: ${{ vars.NEXUS_URL || secrets.NEXUS_URL }}
-  NEXUS_REPOSITORY: ${{ vars.NEXUS_REPOSITORY || secrets.NEXUS_REPOSITORY }}
-  NEXUS_ARTIFACT_PREFIX: ${{ vars.NEXUS_ARTIFACT_PREFIX || secrets.NEXUS_ARTIFACT_PREFIX }}
-  NEXUS_USERNAME: ${{ vars.NEXUS_USERNAME || secrets.NEXUS_USERNAME }}
-  NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD || vars.NEXUS_PASSWORD }}
+  PYTHON_VERSION: ${{ vars.PYTHON_VERSION || secrets.PYTHON_VERSION || '3.12' }}
 
 permissions:
   contents: write
-  packages: write
 
 concurrency:
-  group: release-${{ github.ref }}-${{ inputs.tag || github.ref_name }}
+  group: release-${{ github.ref }}-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  init:
+  release:
     runs-on: ubuntu-latest
-    outputs:
-      runner: ${{ steps.runner.outputs.runner }}
-      runs_on: ${{ steps.runner.outputs.runs_on }}
-      platforms: ${{ steps.platforms.outputs.platforms }}
-      storage_backend: ${{ steps.storage.outputs.storage_backend }}
-      nexus_build_output_url: ${{ steps.storage.outputs.nexus_build_output_url }}
-      nexus_version_url: ${{ steps.storage.outputs.nexus_version_url }}
-      nexus_source_bundle_url: ${{ steps.storage.outputs.nexus_source_bundle_url }}
-      nexus_release_notes_url: ${{ steps.storage.outputs.nexus_release_notes_url }}
-      image_name: ${{ steps.meta.outputs.image_name }}
-      bundle_name: ${{ steps.meta.outputs.bundle_name }}
-      ghcr_registry: ${{ steps.meta.outputs.ghcr_registry }}
-      ghcr_repository: ${{ steps.meta.outputs.ghcr_repository }}
-      ghcr_username: ${{ steps.meta.outputs.ghcr_username }}
-      dockerhub_repository: ${{ steps.meta.outputs.dockerhub_repository }}
-      dockerhub_username: ${{ steps.meta.outputs.dockerhub_username }}
-      release_ref: ${{ steps.release.outputs.release_ref }}
-      release_tag: ${{ steps.release.outputs.release_tag }}
-      release_version: ${{ steps.release.outputs.release_version }}
-    steps:
-      - name: Resolve runner
-        id: runner
-        shell: bash
+    services:
+      postgres:
+        image: postgres:17-alpine
         env:
-          INPUT_RUNNER: ${{ inputs.runner }}
-          VAR_RUNNER: ${{ vars.BUILD_RUNNER || secrets.BUILD_RUNNER }}
-          MACOS_LABELS: ${{ vars.BUILD_RUNNER_MACOS_LABELS || secrets.BUILD_RUNNER_MACOS_LABELS }}
-          LINUX_LABELS: ${{ vars.BUILD_RUNNER_LINUX_LABELS || secrets.BUILD_RUNNER_LINUX_LABELS }}
-        run: |
-          set -euo pipefail
-
-          to_json_runs_on() {
-            local raw="$1"
-            local fallback="$2"
-            local trimmed=""
-
-            if [ -z "$raw" ]; then
-              printf '%s\n' "$fallback"
-              return
-            fi
-
-            trimmed="$(printf '%s' "$raw" | xargs)"
-
-            if [[ "$trimmed" == \[* ]] || [[ "$trimmed" == \"*\" ]]; then
-              printf '%s\n' "$trimmed"
-              return
-            fi
-
-            if [[ "$trimmed" != *,* ]]; then
-              printf '"%s"\n' "${trimmed//\"/\\\"}"
-              return
-            fi
-
-            local json="["
-            local first=1
-            IFS=',' read -r -a parts <<< "$trimmed"
-            for part in "${parts[@]}"; do
-              part="$(echo "$part" | xargs)"
-              if [ -z "$part" ]; then
-                continue
-              fi
-              if [ "$first" -eq 0 ]; then
-                json+=","
-              fi
-              json+="\"${part//\"/\\\"}\""
-              first=0
-            done
-
-            if [ "$first" -eq 1 ]; then
-              printf '%s\n' "$fallback"
-              return
-            fi
-
-            json+="]"
-            printf '%s\n' "$json"
-          }
-
-          RUNNER="${INPUT_RUNNER:-}"
-          if [ -z "$RUNNER" ]; then
-            RUNNER="${VAR_RUNNER:-}"
-          fi
-          if [ "$RUNNER" != "macos" ] && [ "$RUNNER" != "linux" ]; then
-            RUNNER="macos"
-          fi
-
-          if [ "$RUNNER" = "macos" ]; then
-            LABELS="$(to_json_runs_on "${MACOS_LABELS:-}" '["self-hosted","macOS","ARM64"]')"
-          else
-            LABELS="$(to_json_runs_on "${LINUX_LABELS:-}" '"ubuntu-latest"')"
-          fi
-
-          echo "runner=${RUNNER}" >> "$GITHUB_OUTPUT"
-          echo "runs_on=${LABELS}" >> "$GITHUB_OUTPUT"
-
+          POSTGRES_DB: sub2api_sidecar_test
+          POSTGRES_USER: sub2api_sidecar
+          POSTGRES_PASSWORD: sub2api_sidecar_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U sub2api_sidecar -d sub2api_sidecar_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
+      # GitOps panel webhook: when PANEL_URL / PANEL_WEBHOOK_TOKEN are configured
+      # the panel receives pipeline events and (on success) can auto-deploy the
+      # image via opsagent. Unconfigured -> steps skip with a notice.
+      PANEL_URL: ${{ secrets.PANEL_URL || vars.PANEL_URL }}
+      PANEL_WEBHOOK_TOKEN: ${{ secrets.PANEL_WEBHOOK_TOKEN }}
+    steps:
       - name: Resolve release context
         id: release
         shell: bash
         env:
-          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
 
@@ -181,17 +101,20 @@ jobs:
               ;;
           esac
 
-          echo "release_ref=${TAG_NAME}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
-          echo "release_version=${TAG_NAME#v}" >> "$GITHUB_OUTPUT"
+          {
+            echo "release_ref=${TAG_NAME}"
+            echo "release_tag=${TAG_NAME}"
+            echo "release_version=${TAG_NAME#v}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout release ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.release.outputs.release_ref }}
           fetch-depth: 0
 
       - name: Require release tag on main
+        id: commit
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
@@ -208,17 +131,19 @@ jobs:
 
           if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
             echo "Release tag ${RELEASE_TAG} points to ${TAG_COMMIT}, which is not contained in origin/main."
-            echo "Merge develop into main first, then create the release tag from main."
+            echo "Merge into main first, then create the release tag from main."
             exit 1
           fi
 
           echo "Release tag ${RELEASE_TAG} is contained in origin/main."
+          echo "release_commit=${TAG_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${TAG_COMMIT:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve Docker platforms
         id: platforms
         shell: bash
         env:
-          INPUT_PLATFORMS: ${{ inputs.platforms }}
+          INPUT_PLATFORMS: ${{ github.event.inputs.platforms }}
           VAR_PLATFORMS: ${{ vars.DOCKER_PLATFORMS || secrets.DOCKER_PLATFORMS }}
         run: |
           set -euo pipefail
@@ -228,84 +153,19 @@ jobs:
             PLATFORMS="${VAR_PLATFORMS:-}"
           fi
           if [ -z "${PLATFORMS}" ]; then
-            PLATFORMS="linux/amd64,linux/arm64"
+            PLATFORMS="linux/amd64"
           fi
 
           echo "platforms=${PLATFORMS}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve stage storage
-        id: storage
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-
-          trim_single_line() {
-            printf '%s' "$1" | tr -d '\r\n'
-          }
-
-          STORAGE_BACKEND="github-artifact"
-          BUILD_OUTPUT_URL=""
-          VERSION_URL=""
-          SOURCE_BUNDLE_URL=""
-          RELEASE_NOTES_URL=""
-          NEXUS_URL_CLEAN="$(trim_single_line "${NEXUS_URL:-}")"
-          NEXUS_REPOSITORY_CLEAN="$(trim_single_line "${NEXUS_REPOSITORY:-}")"
-          NEXUS_USERNAME_CLEAN="$(trim_single_line "${NEXUS_USERNAME:-}")"
-          NEXUS_PASSWORD_CLEAN="$(trim_single_line "${NEXUS_PASSWORD:-}")"
-          NEXUS_ARTIFACT_PREFIX_CLEAN="$(trim_single_line "${NEXUS_ARTIFACT_PREFIX:-}")"
-
-          if [ -n "${NEXUS_URL_CLEAN}" ] && [ -n "${NEXUS_REPOSITORY_CLEAN}" ] && [ -n "${NEXUS_USERNAME_CLEAN}" ] && [ -n "${NEXUS_PASSWORD_CLEAN}" ]; then
-            STORAGE_BACKEND="nexus"
-
-            if [ -n "${NEXUS_ARTIFACT_PREFIX_CLEAN}" ]; then
-              PREFIX="${NEXUS_ARTIFACT_PREFIX_CLEAN}"
-            else
-              REPO_PATH="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
-              PREFIX="infra/${REPO_PATH}/release"
-            fi
-
-            PREFIX="${PREFIX%/}/${RELEASE_TAG}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
-            BASE_URL="${NEXUS_URL_CLEAN%/}/repository/${NEXUS_REPOSITORY_CLEAN}/${PREFIX}"
-            BUILD_OUTPUT_URL="${BASE_URL}/build-output.tar.gz"
-            VERSION_URL="${BASE_URL}/version-file.tar.gz"
-            SOURCE_BUNDLE_URL="${BASE_URL}/source-bundle.tar.gz"
-            RELEASE_NOTES_URL="${BASE_URL}/release-notes.md"
-          fi
-
-          {
-            echo "storage_backend=${STORAGE_BACKEND}"
-            echo "nexus_build_output_url<<EOF"
-            printf '%s\n' "${BUILD_OUTPUT_URL}"
-            echo "EOF"
-            echo "nexus_version_url<<EOF"
-            printf '%s\n' "${VERSION_URL}"
-            echo "EOF"
-            echo "nexus_source_bundle_url<<EOF"
-            printf '%s\n' "${SOURCE_BUNDLE_URL}"
-            echo "EOF"
-            echo "nexus_release_notes_url<<EOF"
-            printf '%s\n' "${RELEASE_NOTES_URL}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve image metadata
         id: meta
         shell: bash
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
-          RAW_IMAGE_NAME: ${{ vars.IMAGE_NAME || secrets.IMAGE_NAME }}
+          RAW_IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE || secrets.DOCKERHUB_IMAGE }}
+          RAW_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || secrets.DOCKERHUB_NAMESPACE }}
           DEFAULT_IMAGE_NAME: ${{ github.event.repository.name }}
-          RAW_GHCR_IMAGE: ${{ vars.GHCR_IMAGE || secrets.GHCR_IMAGE }}
-          RAW_GHCR_NAMESPACE: ${{ vars.GHCR_NAMESPACE || secrets.GHCR_NAMESPACE }}
-          DEFAULT_GHCR_NAMESPACE: ${{ github.repository_owner }}
-          RAW_GHCR_USERNAME: ${{ secrets.GHCR_USERNAME || vars.GHCR_USERNAME }}
-          DEFAULT_GHCR_USERNAME: ${{ github.repository_owner }}
-          RAW_DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || secrets.DOCKERHUB_IMAGE }}
-          RAW_DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || secrets.DOCKERHUB_NAMESPACE }}
-          RAW_DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
-          RAW_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -317,499 +177,91 @@ jobs:
           IMAGE_NAME="$(lower "$IMAGE_NAME")"
           BUNDLE_NAME="${IMAGE_NAME}-${RELEASE_VERSION}.tar.gz"
 
-          GHCR_USERNAME="${RAW_GHCR_USERNAME:-$DEFAULT_GHCR_USERNAME}"
-          if [ -n "${RAW_GHCR_IMAGE:-}" ]; then
-            GHCR_REPOSITORY="$(lower "$RAW_GHCR_IMAGE")"
-            case "$GHCR_REPOSITORY" in
-              ghcr.io/*) ;;
-              *) GHCR_REPOSITORY="ghcr.io/${GHCR_REPOSITORY}" ;;
-            esac
-          else
-            GHCR_NAMESPACE="${RAW_GHCR_NAMESPACE:-$DEFAULT_GHCR_NAMESPACE}"
-            GHCR_NAMESPACE="$(lower "$GHCR_NAMESPACE")"
-            GHCR_REPOSITORY="ghcr.io/${GHCR_NAMESPACE}/${IMAGE_NAME}"
-          fi
-          GHCR_REGISTRY="${GHCR_REPOSITORY%%/*}"
-
-          DOCKERHUB_USERNAME="${RAW_DOCKERHUB_USERNAME:-}"
-          if [ -n "${RAW_DOCKERHUB_IMAGE:-}" ]; then
-            DOCKERHUB_REPOSITORY="${RAW_DOCKERHUB_IMAGE#docker.io/}"
-            DOCKERHUB_REPOSITORY="$(lower "$DOCKERHUB_REPOSITORY")"
-          else
-            DOCKERHUB_NAMESPACE="${RAW_DOCKERHUB_NAMESPACE:-$DOCKERHUB_USERNAME}"
-            if [ -n "$DOCKERHUB_NAMESPACE" ]; then
-              DOCKERHUB_NAMESPACE="$(lower "$DOCKERHUB_NAMESPACE")"
-              DOCKERHUB_REPOSITORY="${DOCKERHUB_NAMESPACE}/${IMAGE_NAME}"
-            else
-              DOCKERHUB_REPOSITORY="skip"
-            fi
-          fi
-
-          if [ "$DOCKERHUB_REPOSITORY" != "skip" ] && { [ -z "$DOCKERHUB_USERNAME" ] || [ -z "${RAW_DOCKERHUB_TOKEN:-}" ]; }; then
-            echo "DockerHub credentials incomplete; skip DockerHub publish."
-            DOCKERHUB_REPOSITORY="skip"
-          fi
-
-          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
-          echo "bundle_name=${BUNDLE_NAME}" >> "$GITHUB_OUTPUT"
-          echo "ghcr_registry=${GHCR_REGISTRY}" >> "$GITHUB_OUTPUT"
-          echo "ghcr_repository=${GHCR_REPOSITORY}" >> "$GITHUB_OUTPUT"
-          echo "ghcr_username=${GHCR_USERNAME}" >> "$GITHUB_OUTPUT"
-          echo "dockerhub_repository=${DOCKERHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
-          echo "dockerhub_username=${DOCKERHUB_USERNAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Validate DockerHub credentials
-        if: ${{ steps.meta.outputs.dockerhub_repository != 'skip' }}
-        uses: docker/login-action@v3
-        with:
-          registry: docker.io
-          username: ${{ steps.meta.outputs.dockerhub_username }}
-          password: ${{ secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
-
-      - name: Validate GitHub Container Registry credentials
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ steps.meta.outputs.ghcr_registry }}
-          username: ${{ steps.meta.outputs.ghcr_username }}
-          password: ${{ secrets.GHCR_TOKEN || vars.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
-
-  validate:
-    needs: [init]
-    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.init.outputs.release_ref }}
-
-      - name: Verify Docker for validation
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! docker info >/dev/null 2>&1; then
-            echo "Docker is required for validate stage on this runner."
+          NAMESPACE="${RAW_NAMESPACE:-${DOCKERHUB_USERNAME:-}}"
+          NAMESPACE="$(lower "$NAMESPACE")"
+          if [ -z "${NAMESPACE}" ]; then
+            echo "DOCKERHUB_NAMESPACE or DOCKERHUB_USERNAME is required."
             exit 1
           fi
-
-      - name: Validate in Python container
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          IMAGE="${VALIDATION_IMAGE}"
-          POSTGRES_IMAGE="postgres:17-alpine"
-          VALIDATION_NETWORK="sub2api-sidecar-validate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          POSTGRES_CONTAINER="sub2api-sidecar-validate-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-          cleanup_validation() {
-            docker rm -f "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
-            docker network rm "${VALIDATION_NETWORK}" >/dev/null 2>&1 || true
-          }
-
-          trap cleanup_validation EXIT
-
-          docker pull "${IMAGE}"
-          docker pull "${POSTGRES_IMAGE}"
-          docker network create "${VALIDATION_NETWORK}"
-
-          docker run -d \
-            --name "${POSTGRES_CONTAINER}" \
-            --network "${VALIDATION_NETWORK}" \
-            -e POSTGRES_DB=sub2api_sidecar_test \
-            -e POSTGRES_USER=sub2api_sidecar \
-            -e POSTGRES_PASSWORD=sub2api_sidecar_test \
-            "${POSTGRES_IMAGE}"
-
-          for attempt in $(seq 1 30); do
-            if docker exec "${POSTGRES_CONTAINER}" pg_isready -U sub2api_sidecar -d sub2api_sidecar_test >/dev/null 2>&1; then
-              break
-            fi
-            if [ "${attempt}" -eq 30 ]; then
-              docker logs "${POSTGRES_CONTAINER}" || true
-              echo "PostgreSQL did not become ready for validation."
-              exit 1
-            fi
-            sleep 1
-          done
-
-          docker run --rm \
-            -u "$(id -u):$(id -g)" \
-            --network "${VALIDATION_NETWORK}" \
-            -e HOME=/tmp/python-home \
-            -e PIP_CACHE_DIR=/tmp/pip-cache \
-            -e TEST_POSTGRES_URL="${POSTGRES_CONTAINER}" \
-            -e TEST_POSTGRES_PORT=5432 \
-            -e TEST_POSTGRES_USERNAME=sub2api_sidecar \
-            -e TEST_POSTGRES_NAME=sub2api_sidecar_test \
-            -e TEST_POSTGRES_PASSWORD=sub2api_sidecar_test \
-            -v "${PWD}:/work" \
-            -w /work \
-            "${IMAGE}" \
-            bash -lc '
-              set -euo pipefail
-
-              cleanup() {
-                find app tests -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
-                rm -rf .pytest_cache
-              }
-
-              trap cleanup EXIT
-
-              python3 -m pip install --user --upgrade pip
-              python3 -m pip install --user -r requirements.txt -r requirements-dev.txt
-              python3 -m compileall app tests
-              python3 -m pytest
-            '
-
-  build_linux:
-    if: ${{ needs.init.outputs.runner == 'linux' }}
-    needs: [init, validate]
-    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.init.outputs.release_ref }}
-
-      - name: Build Python release bundle in CI image
-        env:
-          BUILD_IMAGE_NAME: ${{ env.BUILD_IMAGE }}
-          FRONTEND_BUILD_IMAGE_NAME: ${{ env.FRONTEND_BUILD_IMAGE }}
-          IMAGE_NAME: ${{ needs.init.outputs.image_name }}
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
-          PLATFORMS: ${{ needs.init.outputs.platforms }}
-        run: |
-          set -euo pipefail
-
-          cleanup_frontend_build() {
-            rm -rf frontend/node_modules frontend/tsconfig.tsbuildinfo
-          }
-
-          trap cleanup_frontend_build EXIT
-
-          rm -rf app/static/ui frontend/node_modules frontend/tsconfig.tsbuildinfo
-          mkdir -p .release-build/payload
-          docker pull "${FRONTEND_BUILD_IMAGE_NAME}"
-          docker pull "${BUILD_IMAGE_NAME}"
-
-          docker run --rm \
-            -u "$(id -u):$(id -g)" \
-            -e HOME=/tmp/npm-home \
-            -v "${PWD}:/work" \
-            -w /work/frontend \
-            "${FRONTEND_BUILD_IMAGE_NAME}" \
-            bash -lc '
-              set -euo pipefail
-              npm ci
-              npm run build
-            '
-
-          test -f app/static/ui/index.html
-
-          docker run --rm \
-            -u "$(id -u):$(id -g)" \
-            -e IMAGE_NAME="${IMAGE_NAME}" \
-            -e RELEASE_VERSION="${RELEASE_VERSION}" \
-            -e PLATFORMS="${PLATFORMS}" \
-            -v "${PWD}:/work" \
-            -w /work \
-            "${BUILD_IMAGE_NAME}" \
-            bash -lc '
-              set -euo pipefail
-
-              rm -rf .release-build/work .release-build/payload
-              mkdir -p \
-                .release-build/work/release \
-                .release-build/payload
-
-              cp -R app .release-build/work/release/app
-              cp requirements.txt config.example.yaml README.md .release-build/work/release/
-              printf "%s\n" "${RELEASE_VERSION}" > .release-build/work/release/VERSION
-
-              tar -czf .release-build/payload/release-bundle.tar.gz -C .release-build/work/release .
-
-              {
-                echo "artifact_mode=release-bundle"
-                echo "release_bundle=release-bundle.tar.gz"
-                echo "platforms=${PLATFORMS}"
-              } > .release-build/payload/build-output.env
-
-              tar -czf .release-build/build-output.tar.gz -C .release-build/payload .
-            '
-
-      - name: Upload build output to Nexus
-        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
-        shell: bash
-        env:
-          NEXUS_UPLOAD_URL: ${{ needs.init.outputs.nexus_build_output_url }}
-        run: |
-          set -euo pipefail
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            --upload-file .release-build/build-output.tar.gz \
-            "${NEXUS_UPLOAD_URL}"
-
-      - name: Upload build output artifact
-        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: build-output
-          path: .release-build/build-output.tar.gz
-          retention-days: 1
-
-  build_macos:
-    if: ${{ needs.init.outputs.runner == 'macos' }}
-    needs: [init, validate]
-    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.init.outputs.release_ref }}
-
-      - name: Verify Docker on macOS runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! docker info >/dev/null 2>&1; then
-            echo "Docker Desktop is not running on this macOS runner."
-            exit 1
-          fi
-
-      - name: Build Python release bundle in CI image
-        env:
-          BUILD_IMAGE_NAME: ${{ env.BUILD_IMAGE }}
-          FRONTEND_BUILD_IMAGE_NAME: ${{ env.FRONTEND_BUILD_IMAGE }}
-          IMAGE_NAME: ${{ needs.init.outputs.image_name }}
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
-          PLATFORMS: ${{ needs.init.outputs.platforms }}
-        run: |
-          set -euo pipefail
-
-          cleanup_frontend_build() {
-            rm -rf frontend/node_modules frontend/tsconfig.tsbuildinfo
-          }
-
-          trap cleanup_frontend_build EXIT
-
-          rm -rf app/static/ui frontend/node_modules frontend/tsconfig.tsbuildinfo
-          mkdir -p .release-build/payload
-          docker pull "${FRONTEND_BUILD_IMAGE_NAME}"
-          docker pull "${BUILD_IMAGE_NAME}"
-
-          docker run --rm \
-            -u "$(id -u):$(id -g)" \
-            -e HOME=/tmp/npm-home \
-            -v "${PWD}:/work" \
-            -w /work/frontend \
-            "${FRONTEND_BUILD_IMAGE_NAME}" \
-            bash -lc '
-              set -euo pipefail
-              npm ci
-              npm run build
-            '
-
-          test -f app/static/ui/index.html
-
-          docker run --rm \
-            -u "$(id -u):$(id -g)" \
-            -e IMAGE_NAME="${IMAGE_NAME}" \
-            -e RELEASE_VERSION="${RELEASE_VERSION}" \
-            -e PLATFORMS="${PLATFORMS}" \
-            -v "${PWD}:/work" \
-            -w /work \
-            "${BUILD_IMAGE_NAME}" \
-            bash -lc '
-              set -euo pipefail
-
-              rm -rf .release-build/work .release-build/payload
-              mkdir -p \
-                .release-build/work/release \
-                .release-build/payload
-
-              cp -R app .release-build/work/release/app
-              cp requirements.txt config.example.yaml README.md .release-build/work/release/
-              printf "%s\n" "${RELEASE_VERSION}" > .release-build/work/release/VERSION
-
-              tar -czf .release-build/payload/release-bundle.tar.gz -C .release-build/work/release .
-
-              {
-                echo "artifact_mode=release-bundle"
-                echo "release_bundle=release-bundle.tar.gz"
-                echo "platforms=${PLATFORMS}"
-              } > .release-build/payload/build-output.env
-
-              tar -czf .release-build/build-output.tar.gz -C .release-build/payload .
-            '
-
-      - name: Upload build output to Nexus
-        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
-        shell: bash
-        env:
-          NEXUS_UPLOAD_URL: ${{ needs.init.outputs.nexus_build_output_url }}
-        run: |
-          set -euo pipefail
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            --upload-file .release-build/build-output.tar.gz \
-            "${NEXUS_UPLOAD_URL}"
-
-      - name: Upload build output artifact
-        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: build-output
-          path: .release-build/build-output.tar.gz
-          retention-days: 1
-
-  package:
-    if: ${{ always() && (needs.build_linux.result == 'success' || needs.build_macos.result == 'success') }}
-    needs: [init, build_linux, build_macos]
-    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.init.outputs.release_ref }}
-
-      - name: Create package workspace
-        run: |
-          mkdir -p \
-            .release-package/version \
-            .release-package/build \
-            .release-package/release \
-            .release-package/package-context \
-            .release-package/package-output
-
-      - name: Download build output from Nexus
-        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
-        shell: bash
-        env:
-          NEXUS_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_build_output_url }}
-        run: |
-          set -euo pipefail
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-package/build-output.tar.gz \
-            "${NEXUS_DOWNLOAD_URL}"
-
-      - name: Download build output artifact
-        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
-        uses: actions/download-artifact@v8
-        with:
-          name: build-output
-          path: .release-package
-
-      - name: Extract build output
-        run: tar -xzf .release-package/build-output.tar.gz -C .release-package/build
-
-      - name: Package runtime image
-        shell: bash
-        env:
-          IMAGE_NAME: ${{ needs.init.outputs.image_name }}
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
-          PLATFORMS: ${{ needs.init.outputs.platforms }}
-          RUNTIME_IMAGE: ${{ env.PACKAGE_RUNTIME_IMAGE }}
-        run: |
-          set -euo pipefail
-
-          . .release-package/build/build-output.env
-
-          if [ "${artifact_mode:-}" != "release-bundle" ]; then
-            echo "Package stage requires build artifact_mode=release-bundle, got: ${artifact_mode:-unset}"
-            exit 1
-          fi
-
-          if [ -z "${release_bundle:-}" ] || [ ! -f ".release-package/build/${release_bundle}" ]; then
-            echo "Build stage did not provide release_bundle archive."
-            exit 1
-          fi
-
-          RUNTIME_IMAGE="${RUNTIME_IMAGE:-python:${PYTHON_VERSION}-slim-bookworm}"
-
-          rm -rf .release-package/release .release-package/package-context .release-package/package-output
-          mkdir -p \
-            .release-package/release \
-            .release-package/package-context/release \
-            .release-package/package-output
-
-          tar -xzf ".release-package/build/${release_bundle}" -C .release-package/release
-          cp -R .release-package/release/. .release-package/package-context/release/
-
-          cat > .release-package/package-context/Dockerfile <<'DOCKERFILE'
-          ARG RUNTIME_IMAGE=python:3.12-slim-bookworm
-          FROM ${RUNTIME_IMAGE}
-
-          ENV PYTHONDONTWRITEBYTECODE=1 \
-              PYTHONUNBUFFERED=1
-
-          WORKDIR /app
-
-          COPY release/requirements.txt ./
-          RUN python3 -m pip install --no-cache-dir --upgrade pip \
-              && python3 -m pip install --no-cache-dir -r requirements.txt
-
-          COPY release/app ./app
-          COPY release/config.example.yaml ./config.example.yaml
-          COPY release/README.md ./README.md
-          COPY release/VERSION ./VERSION
-
-          RUN mkdir -p /app/data
-
-          EXPOSE 8000
-          CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-          DOCKERFILE
-
-          tar -czf .release-package/package-output/docker-context.tar.gz -C .release-package/package-context .
+          REPOSITORY="${NAMESPACE}/${IMAGE_NAME}"
 
           {
-            echo "artifact_mode=docker-context"
-            echo "docker_context=docker-context.tar.gz"
-            echo "release_bundle=${release_bundle}"
-            echo "runtime_image=${RUNTIME_IMAGE}"
-            echo "platforms=${PLATFORMS}"
-          } > .release-package/package-output/build-output.env
+            echo "image_name=${IMAGE_NAME}"
+            echo "bundle_name=${BUNDLE_NAME}"
+            echo "repository=${REPOSITORY}"
+          } >> "$GITHUB_OUTPUT"
 
-          tar -czf .release-package/build-output.tar.gz -C .release-package/package-output .
-
-      - name: Pack VERSION artifact
+      - name: Notify GitOps panel (pipeline running)
+        shell: bash
         env:
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+          PIPELINE_ID: ${{ github.run_id }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
-          printf '%s\n' "${RELEASE_VERSION}" > .release-package/version/VERSION
-          tar -czf .release-package/version-file.tar.gz -C .release-package/version VERSION
+          set -euo pipefail
 
-      - name: Pack source bundle
+          if [ -z "${PANEL_URL:-}" ] || [ -z "${PANEL_WEBHOOK_TOKEN:-}" ]; then
+            echo "::notice::PANEL_URL / PANEL_WEBHOOK_TOKEN not configured; skipping panel notify."
+            exit 0
+          fi
+
+          BODY="$(jq -cn \
+            --arg pid "${PIPELINE_ID}" \
+            --arg ref "${RELEASE_TAG}" \
+            --arg cref "${GITHUB_REPOSITORY}" \
+            '{status: "running", stage: "build", pipeline_id: $pid, ref: $ref, ci_ref: $cref}')"
+
+          curl -fsS -m 15 -X POST "${PANEL_URL%/}/api/v1/webhook/cicd/${PANEL_WEBHOOK_TOKEN}" \
+            -H 'Content-Type: application/json' --data "${BODY}" \
+            || echo "::warning::panel running notify failed (continuing)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Validate backend
         env:
-          IMAGE_NAME: ${{ needs.init.outputs.image_name }}
-          BUNDLE_NAME: ${{ needs.init.outputs.bundle_name }}
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
+          TEST_POSTGRES_URL: 127.0.0.1
+          TEST_POSTGRES_PORT: "55432"
+          TEST_POSTGRES_USERNAME: sub2api_sidecar
+          TEST_POSTGRES_NAME: sub2api_sidecar_test
+          TEST_POSTGRES_PASSWORD: sub2api_sidecar_test
         run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt -r requirements-dev.txt
+          python3 -m compileall app tests
+          pytest
+
+      - name: Package release assets
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ steps.meta.outputs.image_name }}
+          BUNDLE_NAME: ${{ steps.meta.outputs.bundle_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          SHORT_SHA: ${{ steps.commit.outputs.short_sha }}
+          PLATFORMS: ${{ steps.platforms.outputs.platforms }}
+          REPOSITORY: ${{ steps.meta.outputs.repository }}
+        run: |
+          set -euo pipefail
+
+          rm -rf .release-artifacts
+          mkdir -p .release-artifacts/version
+
+          printf '%s\n' "${RELEASE_VERSION}" > .release-artifacts/version/VERSION
+
           git archive \
             --format=tar.gz \
             --prefix="${IMAGE_NAME}-${RELEASE_VERSION}/" \
-            --output=".release-package/${BUNDLE_NAME}" \
+            --output=".release-artifacts/${BUNDLE_NAME}" \
             HEAD
-          cp ".release-package/${BUNDLE_NAME}" .release-package/source-bundle.tar.gz
-
-      - name: Compose release notes
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
-          PLATFORMS: ${{ needs.init.outputs.platforms }}
-          GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
-          DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
-          STORAGE_BACKEND: ${{ needs.init.outputs.storage_backend }}
-          NEXUS_BUILD_OUTPUT_URL: ${{ needs.init.outputs.nexus_build_output_url }}
-          NEXUS_VERSION_URL: ${{ needs.init.outputs.nexus_version_url }}
-          NEXUS_SOURCE_BUNDLE_URL: ${{ needs.init.outputs.nexus_source_bundle_url }}
-        run: |
-          set -euo pipefail
 
           TAG_MESSAGE="$(git tag -l --format='%(contents:body)' "${RELEASE_TAG}" || true)"
-          . .release-package/package-output/build-output.env
 
           {
             echo "# ${RELEASE_TAG}"
@@ -823,360 +275,100 @@ jobs:
             echo "## Docker images"
             echo
             echo "Platforms: ${PLATFORMS}"
-            echo "Package artifact mode: ${artifact_mode}"
-            echo "Runtime image: ${runtime_image}"
+            echo "Release commit: ${SHORT_SHA}"
             echo
-            echo "- ${GHCR_REPOSITORY}:${RELEASE_TAG}"
-            echo "- ${GHCR_REPOSITORY}:${RELEASE_VERSION}"
+            echo "- ${REPOSITORY}:${RELEASE_VERSION}"
+            echo "- ${REPOSITORY}:${SHORT_SHA}"
             if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-              echo "- ${GHCR_REPOSITORY}:latest"
+              echo "- ${REPOSITORY}:latest"
             fi
-            if [ "${DOCKERHUB_REPOSITORY}" != "skip" ]; then
-              echo "- ${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
-              echo "- ${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
-              if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-                echo "- ${DOCKERHUB_REPOSITORY}:latest"
-              fi
-            fi
-            if [ "${STORAGE_BACKEND}" = "nexus" ]; then
-              echo
-              echo "## Staged artifacts"
-              echo
-              echo "- Package output: ${NEXUS_BUILD_OUTPUT_URL}"
-              echo "- VERSION: ${NEXUS_VERSION_URL}"
-              echo "- Source bundle: ${NEXUS_SOURCE_BUNDLE_URL}"
-            fi
-          } > .release-package/release-notes.md
-
-      - name: Upload package artifacts to Nexus
-        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
-        shell: bash
-        env:
-          NEXUS_BUILD_OUTPUT_UPLOAD_URL: ${{ needs.init.outputs.nexus_build_output_url }}
-          NEXUS_VERSION_UPLOAD_URL: ${{ needs.init.outputs.nexus_version_url }}
-          NEXUS_SOURCE_UPLOAD_URL: ${{ needs.init.outputs.nexus_source_bundle_url }}
-          NEXUS_NOTES_UPLOAD_URL: ${{ needs.init.outputs.nexus_release_notes_url }}
-        run: |
-          set -euo pipefail
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            --upload-file .release-package/build-output.tar.gz \
-            "${NEXUS_BUILD_OUTPUT_UPLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            --upload-file .release-package/version-file.tar.gz \
-            "${NEXUS_VERSION_UPLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            --upload-file .release-package/source-bundle.tar.gz \
-            "${NEXUS_SOURCE_UPLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            --upload-file .release-package/release-notes.md \
-            "${NEXUS_NOTES_UPLOAD_URL}"
-
-      - name: Upload package artifact
-        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-package
-          path: .release-package
-          retention-days: 1
-
-  publish_linux:
-    if: ${{ always() && needs.init.outputs.runner == 'linux' && needs.package.result == 'success' }}
-    needs: [init, package]
-    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.init.outputs.release_ref }}
-
-      - name: Create publish workspace
-        run: mkdir -p .release-artifacts/version .release-artifacts/build
-
-      - name: Download package artifacts from Nexus
-        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
-        shell: bash
-        env:
-          NEXUS_BUILD_OUTPUT_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_build_output_url }}
-          NEXUS_VERSION_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_version_url }}
-          NEXUS_SOURCE_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_source_bundle_url }}
-          NEXUS_NOTES_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_release_notes_url }}
-        run: |
-          set -euo pipefail
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/build-output.tar.gz \
-            "${NEXUS_BUILD_OUTPUT_DOWNLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/version-file.tar.gz \
-            "${NEXUS_VERSION_DOWNLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/source-bundle.tar.gz \
-            "${NEXUS_SOURCE_DOWNLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/release-notes.md \
-            "${NEXUS_NOTES_DOWNLOAD_URL}"
-
-      - name: Download package artifact
-        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
-        uses: actions/download-artifact@v8
-        with:
-          name: release-package
-          path: .release-artifacts
-
-      - name: Prepare staged files
-        run: |
-          tar -xzf .release-artifacts/build-output.tar.gz -C .release-artifacts/build
-          tar -xzf .release-artifacts/version-file.tar.gz -C .release-artifacts/version
-          cp .release-artifacts/source-bundle.tar.gz ".release-artifacts/${{ needs.init.outputs.bundle_name }}"
-
-      - name: Verify Docker for publish
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! docker info >/dev/null 2>&1; then
-            echo "Docker is required for publish stage on this runner."
-            exit 1
-          fi
+          } > .release-artifacts/release-notes.md
 
       - name: Set up QEMU
         if: ${{ runner.os == 'Linux' }}
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to DockerHub
-        if: ${{ needs.init.outputs.dockerhub_repository != 'skip' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
-          registry: docker.io
-          username: ${{ needs.init.outputs.dockerhub_username }}
-          password: ${{ secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ needs.init.outputs.ghcr_registry }}
-          username: ${{ needs.init.outputs.ghcr_username }}
-          password: ${{ secrets.GHCR_TOKEN || vars.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Build and push packaged image
+      - name: Compute image tags
+        id: tags
         shell: bash
         env:
-          RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
-          PLATFORMS: ${{ needs.init.outputs.platforms }}
-          GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
-          DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
+          REPOSITORY: ${{ steps.meta.outputs.repository }}
+          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+          SHORT_SHA: ${{ steps.commit.outputs.short_sha }}
         run: |
           set -euo pipefail
 
-          . .release-artifacts/build/build-output.env
-
-          if [ "${artifact_mode:-}" != "docker-context" ]; then
-            echo "Publish stage requires package artifact_mode=docker-context, got: ${artifact_mode:-unset}"
-            exit 1
-          fi
-
-          DOCKER_CONTEXT="${docker_context:-docker-context.tar.gz}"
-          if [ ! -f ".release-artifacts/build/${DOCKER_CONTEXT}" ]; then
-            echo "Packaged Docker context is missing: .release-artifacts/build/${DOCKER_CONTEXT}"
-            exit 1
-          fi
-
-          BUILD_PLATFORMS="${platforms:-${PLATFORMS:-}}"
-          if [ -z "${BUILD_PLATFORMS}" ]; then
-            echo "Docker platforms are required for publish."
-            exit 1
-          fi
-
-          rm -rf .release-artifacts/docker-context
-          mkdir -p .release-artifacts/docker-context
-          tar -xzf ".release-artifacts/build/${DOCKER_CONTEXT}" -C .release-artifacts/docker-context
-
-          TAG_ARGS=(
-            --tag "${GHCR_REPOSITORY}:${RELEASE_TAG}"
-            --tag "${GHCR_REPOSITORY}:${RELEASE_VERSION}"
-          )
+          TAGS="${REPOSITORY}:${RELEASE_VERSION},${REPOSITORY}:${SHORT_SHA}"
           if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-            TAG_ARGS+=(--tag "${GHCR_REPOSITORY}:latest")
+            TAGS="${TAGS},${REPOSITORY}:latest"
           fi
 
-          if [ "${DOCKERHUB_REPOSITORY}" != "skip" ]; then
-            TAG_ARGS+=(
-              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
-              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
-            )
-            if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-              TAG_ARGS+=(--tag "${DOCKERHUB_REPOSITORY}:latest")
-            fi
-          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
-          SOURCE_SHA="$(git rev-parse HEAD)"
-          docker buildx build \
-            --platform "${BUILD_PLATFORMS}" \
-            --file .release-artifacts/docker-context/Dockerfile \
-            --build-arg "RUNTIME_IMAGE=${runtime_image}" \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
-            --label "org.opencontainers.image.version=${RELEASE_VERSION}" \
-            "${TAG_ARGS[@]}" \
-            --push \
-            .release-artifacts/docker-context
-
-  publish_macos:
-    if: ${{ always() && needs.init.outputs.runner == 'macos' && needs.package.result == 'success' }}
-    needs: [init, package]
-    runs-on: ${{ fromJSON(needs.init.outputs.runs_on) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Build and push image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          fetch-depth: 0
-          ref: ${{ needs.init.outputs.release_ref }}
+          context: .
+          file: Dockerfile
+          platforms: ${{ steps.platforms.outputs.platforms }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.commit.outputs.release_commit }}
+            org.opencontainers.image.version=${{ steps.release.outputs.release_version }}
 
-      - name: Create publish workspace
-        run: mkdir -p .release-artifacts/version .release-artifacts/build
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          tag_name: ${{ steps.release.outputs.release_tag }}
+          name: ${{ steps.release.outputs.release_tag }}
+          body_path: .release-artifacts/release-notes.md
+          files: |
+            .release-artifacts/${{ steps.meta.outputs.bundle_name }}
+            .release-artifacts/version/VERSION
 
-      - name: Download package artifacts from Nexus
-        if: ${{ needs.init.outputs.storage_backend == 'nexus' }}
+      - name: Notify GitOps panel (success → auto-deploy)
         shell: bash
         env:
-          NEXUS_BUILD_OUTPUT_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_build_output_url }}
-          NEXUS_VERSION_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_version_url }}
-          NEXUS_SOURCE_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_source_bundle_url }}
-          NEXUS_NOTES_DOWNLOAD_URL: ${{ needs.init.outputs.nexus_release_notes_url }}
-        run: |
-          set -euo pipefail
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/build-output.tar.gz \
-            "${NEXUS_BUILD_OUTPUT_DOWNLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/version-file.tar.gz \
-            "${NEXUS_VERSION_DOWNLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/source-bundle.tar.gz \
-            "${NEXUS_SOURCE_DOWNLOAD_URL}"
-          curl -fS --retry 3 --retry-all-errors \
-            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            -o .release-artifacts/release-notes.md \
-            "${NEXUS_NOTES_DOWNLOAD_URL}"
-
-      - name: Download package artifact
-        if: ${{ needs.init.outputs.storage_backend != 'nexus' }}
-        uses: actions/download-artifact@v8
-        with:
-          name: release-package
-          path: .release-artifacts
-
-      - name: Prepare staged files
-        run: |
-          tar -xzf .release-artifacts/build-output.tar.gz -C .release-artifacts/build
-          tar -xzf .release-artifacts/version-file.tar.gz -C .release-artifacts/version
-          cp .release-artifacts/source-bundle.tar.gz ".release-artifacts/${{ needs.init.outputs.bundle_name }}"
-
-      - name: Verify Docker on macOS runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! docker info >/dev/null 2>&1; then
-            echo "Docker Desktop is not running on this macOS runner."
-            exit 1
-          fi
-
-      - name: Set up QEMU
-        if: ${{ runner.os == 'Linux' }}
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to DockerHub
-        if: ${{ needs.init.outputs.dockerhub_repository != 'skip' }}
-        uses: docker/login-action@v3
-        with:
-          registry: docker.io
-          username: ${{ needs.init.outputs.dockerhub_username }}
-          password: ${{ secrets.DOCKERHUB_TOKEN || vars.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ needs.init.outputs.ghcr_registry }}
-          username: ${{ needs.init.outputs.ghcr_username }}
-          password: ${{ secrets.GHCR_TOKEN || vars.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Build and push packaged image
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.init.outputs.release_tag }}
-          RELEASE_VERSION: ${{ needs.init.outputs.release_version }}
-          PLATFORMS: ${{ needs.init.outputs.platforms }}
-          GHCR_REPOSITORY: ${{ needs.init.outputs.ghcr_repository }}
-          DOCKERHUB_REPOSITORY: ${{ needs.init.outputs.dockerhub_repository }}
+          IMAGE: ${{ steps.meta.outputs.repository }}:${{ steps.commit.outputs.short_sha }}
+          PIPELINE_ID: ${{ github.run_id }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
           set -euo pipefail
 
-          . .release-artifacts/build/build-output.env
+          if [ -z "${PANEL_URL:-}" ] || [ -z "${PANEL_WEBHOOK_TOKEN:-}" ]; then
+            echo "::notice::PANEL_URL / PANEL_WEBHOOK_TOKEN not configured; skipping panel deploy notify."
+            exit 0
+          fi
 
-          if [ "${artifact_mode:-}" != "docker-context" ]; then
-            echo "Publish stage requires package artifact_mode=docker-context, got: ${artifact_mode:-unset}"
+          BODY="$(jq -cn \
+            --arg image "${IMAGE}" \
+            --arg pid "${PIPELINE_ID}" \
+            --arg ref "${RELEASE_TAG}" \
+            --arg cref "${GITHUB_REPOSITORY}" \
+            '{status: "success", stage: "release", image: $image, pipeline_id: $pid, ref: $ref, ci_ref: $cref}')"
+
+          HTTP_CODE="$(curl -sS -m 20 -w '%{http_code}' -o /tmp/panel-notify.json \
+            -X POST "${PANEL_URL%/}/api/v1/webhook/cicd/${PANEL_WEBHOOK_TOKEN}" \
+            -H 'Content-Type: application/json' --data "${BODY}")"
+
+          echo "HTTP ${HTTP_CODE}"
+          cat /tmp/panel-notify.json || true
+          echo
+
+          # 202 = accepted; the panel deploys asynchronously via opsagent under
+          # its status-lock, so CI never blocks on the docker pull.
+          if [ "${HTTP_CODE}" != "202" ] && [ "${HTTP_CODE}" != "200" ]; then
+            echo "panel deploy notify failed with HTTP ${HTTP_CODE}"
             exit 1
           fi
-
-          DOCKER_CONTEXT="${docker_context:-docker-context.tar.gz}"
-          if [ ! -f ".release-artifacts/build/${DOCKER_CONTEXT}" ]; then
-            echo "Packaged Docker context is missing: .release-artifacts/build/${DOCKER_CONTEXT}"
-            exit 1
-          fi
-
-          BUILD_PLATFORMS="${platforms:-${PLATFORMS:-}}"
-          if [ -z "${BUILD_PLATFORMS}" ]; then
-            echo "Docker platforms are required for publish."
-            exit 1
-          fi
-
-          rm -rf .release-artifacts/docker-context
-          mkdir -p .release-artifacts/docker-context
-          tar -xzf ".release-artifacts/build/${DOCKER_CONTEXT}" -C .release-artifacts/docker-context
-
-          TAG_ARGS=(
-            --tag "${GHCR_REPOSITORY}:${RELEASE_TAG}"
-            --tag "${GHCR_REPOSITORY}:${RELEASE_VERSION}"
-          )
-          if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-            TAG_ARGS+=(--tag "${GHCR_REPOSITORY}:latest")
-          fi
-
-          if [ "${DOCKERHUB_REPOSITORY}" != "skip" ]; then
-            TAG_ARGS+=(
-              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_TAG}"
-              --tag "${DOCKERHUB_REPOSITORY}:${RELEASE_VERSION}"
-            )
-            if [ "${PUBLISH_LATEST_TAG}" != "false" ]; then
-              TAG_ARGS+=(--tag "${DOCKERHUB_REPOSITORY}:latest")
-            fi
-          fi
-
-          SOURCE_SHA="$(git rev-parse HEAD)"
-          docker buildx build \
-            --platform "${BUILD_PLATFORMS}" \
-            --file .release-artifacts/docker-context/Dockerfile \
-            --build-arg "RUNTIME_IMAGE=${runtime_image}" \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
-            --label "org.opencontainers.image.version=${RELEASE_VERSION}" \
-            "${TAG_ARGS[@]}" \
-            --push \
-            .release-artifacts/docker-context
