@@ -7387,6 +7387,69 @@ def test_proxy_health_proxy_crud_endpoints(client) -> None:
         assert state.get("deleted") is True
 
 
+def test_proxy_health_account_pin_endpoints(client) -> None:
+    login(client)
+    state: dict = {
+        "proxies": [
+            {"id": 9, "name": "us-node", "host": "1.2.3.4", "port": 1080, "status": "active"}
+        ],
+        "accounts": [{"id": 3, "name": "acct-3", "proxy_id": None}],
+    }
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if path == "/api/v1/admin/proxies" and method == "GET":
+            return FakeResponse(200, {"code": 0, "data": {"items": state["proxies"]}})
+        if path == "/api/v1/admin/accounts" and method == "GET":
+            return FakeResponse(200, {"code": 0, "data": {"items": state["accounts"]}})
+        if path == "/api/v1/admin/accounts/3" and method == "PUT":
+            state["accounts"][0]["proxy_id"] = (json or {}).get("proxy_id")
+            return FakeResponse(200, {"code": 0, "data": {}})
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        listed = client.get("/api/proxy-health/account-assignments")
+        assert listed.status_code == 200
+        assert listed.json()["items"][0]["pinned_proxy_id"] is None
+
+        pinned = client.put(
+            "/api/proxy-health/account-assignments/3/pin", json={"proxy_id": "9"}
+        )
+        assert pinned.status_code == 200
+        # Pinning moves the account onto that proxy right away.
+        assert state["accounts"][0]["proxy_id"] == 9
+
+        listed = client.get("/api/proxy-health/account-assignments")
+        item = listed.json()["items"][0]
+        assert item["pinned_proxy_id"] == "9"
+        assert item["proxy_id"] == "9"
+
+        released = client.delete("/api/proxy-health/account-assignments/3/pin")
+        assert released.status_code == 200
+
+        listed = client.get("/api/proxy-health/account-assignments")
+        # Unpinning releases the binding but leaves the account where it is.
+        assert listed.json()["items"][0]["pinned_proxy_id"] is None
+        assert listed.json()["items"][0]["proxy_id"] == "9"
+
+
+def test_proxy_health_pin_rejects_unknown_proxy(client) -> None:
+    login(client)
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if path == "/api/v1/admin/proxies" and method == "GET":
+            return FakeResponse(200, {"code": 0, "data": {"items": []}})
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.put(
+            "/api/proxy-health/account-assignments/3/pin", json={"proxy_id": "404"}
+        )
+
+    assert response.status_code >= 400
+
+
 def test_proxy_health_manual_rebalance_and_runs_endpoints(client) -> None:
     login(client)
     state: dict = {"proxies": []}

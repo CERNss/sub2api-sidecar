@@ -66,6 +66,23 @@ class ProxyParkedAccount(BaseModel):
     parked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ProxyAccountPin(BaseModel):
+    """An account manually bound to one specific proxy by an operator.
+
+    Pinned accounts are excluded from the even-split rebalance: as long as their
+    proxy is eligible they stay on (or are returned to) it. When that proxy dies
+    they are rebalanced like any other account so traffic keeps flowing, but the
+    pin record survives so a later recovery sends them home.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    account_id: str
+    account_name: str = ""
+    proxy_id: str
+    pinned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ProxyAccountMove(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -75,6 +92,7 @@ class ProxyAccountMove(BaseModel):
     to_proxy_id: str | None = None
     status: str = "planned"  # planned | moved | skipped | failed
     reason: str | None = None
+    pinned: bool = False
 
 
 class ProxyHealthRun(BaseModel):

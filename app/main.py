@@ -55,7 +55,10 @@ from app.models.schemas import (
     AccountHealthRuntimeSettingsRequest,
     AccountHealthRuntimeSettingsResponse,
     AccountHealthSchedulerStatusResponse,
+    ProxyAccountAssignmentResponse,
+    ProxyAccountAssignmentsEnvelope,
     ProxyAccountMoveResponse,
+    ProxyAccountPinRequest,
     ProxyActionEnvelope,
     ProxyHealthRunEnvelope,
     ProxyHealthRunResponse,
@@ -694,6 +697,7 @@ def proxy_health_run_response(run: ProxyHealthRun) -> ProxyHealthRunResponse:
                 to_proxy_id=move.to_proxy_id,
                 status=move.status,
                 reason=move.reason,
+                pinned=move.pinned,
             )
             for move in run.moves
         ],
@@ -1102,6 +1106,8 @@ def index(request: Request) -> Response:
 @app.get("/orchestration", response_class=HTMLResponse)
 @app.get("/orchestration/manual", response_class=HTMLResponse)
 @app.get("/orchestration/dynamic", response_class=HTMLResponse)
+@app.get("/orchestration/migrations", response_class=HTMLResponse)
+@app.get("/orchestration/account-health", response_class=HTMLResponse)
 @app.get("/dynamic", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
 @app.get("/provision", response_class=HTMLResponse)
@@ -1113,6 +1119,9 @@ def index(request: Request) -> Response:
 @app.get("/credit-control/policies", response_class=HTMLResponse)
 @app.get("/credit-control/runs", response_class=HTMLResponse)
 @app.get("/credit-control/audit", response_class=HTMLResponse)
+@app.get("/ip-proxy", response_class=HTMLResponse)
+# Pre-split path for what is now the IP proxy view; kept so old links/bookmarks
+# still land on a page instead of a 404.
 @app.get("/proxy-management", response_class=HTMLResponse)
 def operator_view(request: Request) -> Response:
     session = get_optional_auth_session(request)
@@ -2149,6 +2158,49 @@ def proxy_health_delete_proxy(
     return JSONResponse(
         status_code=200,
         content=ProxyActionEnvelope(result=result).model_dump(mode="json"),
+    )
+
+
+@app.get("/api/proxy-health/account-assignments")
+def proxy_health_list_account_assignments(
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    items = get_proxy_health_service().list_accounts_with_assignment()
+    envelope = ProxyAccountAssignmentsEnvelope(
+        items=[ProxyAccountAssignmentResponse(**item) for item in items],
+        total=len(items),
+    )
+    return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
+
+
+@app.put("/api/proxy-health/account-assignments/{account_id}/pin")
+def proxy_health_pin_account(
+    account_id: str,
+    payload: ProxyAccountPinRequest,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    pin = get_proxy_health_service().pin_account(
+        account_id=account_id, proxy_id=payload.proxy_id
+    )
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(
+            result=pin.model_dump(mode="json")
+        ).model_dump(mode="json"),
+    )
+
+
+@app.delete("/api/proxy-health/account-assignments/{account_id}/pin")
+def proxy_health_unpin_account(
+    account_id: str,
+    _: AuthSession = Depends(require_api_auth),
+) -> JSONResponse:
+    get_proxy_health_service().unpin_account(account_id)
+    return JSONResponse(
+        status_code=200,
+        content=ProxyActionEnvelope(
+            result={"account_id": account_id, "pinned": False}
+        ).model_dump(mode="json"),
     )
 
 

@@ -20,6 +20,7 @@ from app.models.account_health import (
     AccountHealthState,
 )
 from app.models.proxy_health import (
+    ProxyAccountPin,
     ProxyHealthRun,
     ProxyHealthRuntimeSettings,
     ProxyHealthState,
@@ -611,6 +612,48 @@ class PostgresFlowStore(FlowStore):
         with self._connect() as connection:
             connection.execute(
                 "DELETE FROM proxy_parked_accounts WHERE account_id_key = %s",
+                (account_id,),
+            )
+            connection.commit()
+
+    def upsert_proxy_account_pin(self, pin: ProxyAccountPin) -> ProxyAccountPin:
+        payload = pin.model_dump_json()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO proxy_account_pins (
+                    account_id_key, proxy_id_key, payload, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(account_id_key) DO UPDATE SET
+                    proxy_id_key = excluded.proxy_id_key,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    pin.account_id,
+                    pin.proxy_id,
+                    payload,
+                    pin.pinned_at.isoformat(),
+                    pin.pinned_at.isoformat(),
+                ),
+            )
+            connection.commit()
+        return pin
+
+    def list_proxy_account_pins(self) -> list[ProxyAccountPin]:
+        return self._load_many_models(
+            """
+            SELECT payload FROM proxy_account_pins
+            ORDER BY account_id_key ASC
+            """,
+            (),
+            ProxyAccountPin,
+        )
+
+    def delete_proxy_account_pin(self, account_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM proxy_account_pins WHERE account_id_key = %s",
                 (account_id,),
             )
             connection.commit()
@@ -2022,6 +2065,17 @@ class PostgresFlowStore(FlowStore):
                 """
                 CREATE TABLE IF NOT EXISTS proxy_parked_accounts (
                     account_id_key TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS proxy_account_pins (
+                    account_id_key TEXT PRIMARY KEY,
+                    proxy_id_key TEXT NOT NULL,
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL

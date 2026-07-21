@@ -12,6 +12,7 @@ from app.errors import ProvisioningError
 from app.models.operational_data import OperationalMetricSample
 from app.models.proxy_health import (
     ProxyAccountMove,
+    ProxyAccountPin,
     ProxyHealthRun,
     ProxyHealthRuntimeSettings,
     ProxyHealthState,
@@ -91,6 +92,59 @@ class ProxyHealthService:
             )
             items.append(item)
         return items
+
+    def list_accounts_with_assignment(self) -> list[dict[str, Any]]:
+        """Accounts with their current proxy and whether an operator pinned it."""
+        accounts = self.client.list_openai_accounts()
+        pins = {pin.account_id: pin for pin in self.store.list_proxy_account_pins()}
+        parked = {p.account_id: p for p in self.store.list_proxy_parked_accounts()}
+        items: list[dict[str, Any]] = []
+        for account in accounts:
+            raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
+            proxy_id = raw.get("proxy_id") if isinstance(raw, dict) else None
+            account_id = str(account.get("id"))
+            pin = pins.get(account_id)
+            items.append(
+                {
+                    "account_id": account_id,
+                    "account_name": str(account.get("name") or ""),
+                    "proxy_id": None if proxy_id in (None, "", 0) else str(proxy_id),
+                    "pinned_proxy_id": pin.proxy_id if pin else None,
+                    "pinned_at": pin.pinned_at.isoformat() if pin else None,
+                    "parked": account_id in parked,
+                }
+            )
+        return items
+
+    def pin_account(self, *, account_id: str, proxy_id: str) -> ProxyAccountPin:
+        """Bind an account to one proxy and move it there immediately."""
+        with self._operation_lock:
+            proxies = self.client.list_proxies()
+            if not any(str(proxy["id"]) == str(proxy_id) for proxy in proxies):
+                raise ProxyHealthError(f"No proxy found with id={proxy_id}")
+            accounts = self.client.list_openai_accounts()
+            account = next(
+                (item for item in accounts if str(item.get("id")) == str(account_id)),
+                None,
+            )
+            if account is None:
+                raise ProxyHealthError(f"No account found with id={account_id}")
+            self.client.set_account_proxy(account=account, proxy_id=proxy_id)
+            # Pinning is an explicit placement, so any parked record (which exists
+            # only to remember an involuntary move to direct) no longer applies.
+            self.store.delete_proxy_parked_account(str(account_id))
+            return self.store.upsert_proxy_account_pin(
+                ProxyAccountPin(
+                    account_id=str(account_id),
+                    account_name=str(account.get("name") or ""),
+                    proxy_id=str(proxy_id),
+                )
+            )
+
+    def unpin_account(self, account_id: str) -> None:
+        """Release an account back to automatic balancing; it stays put for now."""
+        with self._operation_lock:
+            self.store.delete_proxy_account_pin(str(account_id))
 
     def clear_proxy_state(self, proxy_id: str) -> None:
         """Drop a proxy's health state and emit a clearing sample so its scoped
@@ -450,6 +504,7 @@ class ProxyHealthService:
             return self.store.save_proxy_health_run(run)
         states = {state.proxy_id: state for state in self.store.list_proxy_health_states()}
         parked = {p.account_id: p for p in self.store.list_proxy_parked_accounts()}
+        pins = {p.account_id: p for p in self.store.list_proxy_account_pins()}
 
         def eligible(proxy: dict[str, Any]) -> bool:
             state = states.get(str(proxy["id"]))
@@ -484,12 +539,28 @@ class ProxyHealthService:
                 # Someone already put it back on a proxy; parking no longer applies.
                 self.store.delete_proxy_parked_account(account_id)
 
-        # Parked records for accounts that vanished upstream are stale; drop them.
+        # Parked/pin records for accounts that vanished upstream are stale, as are
+        # pins onto a proxy that no longer exists; drop them.
         if not dry_run:
             known_ids = {str(account.get("id")) for account in accounts}
             for parked_id in list(parked):
                 if parked_id not in known_ids:
                     self.store.delete_proxy_parked_account(parked_id)
+            known_proxy_ids = {str(proxy["id"]) for proxy in proxies}
+            for pinned_id, pin in list(pins.items()):
+                if pinned_id not in known_ids or pin.proxy_id not in known_proxy_ids:
+                    self.store.delete_proxy_account_pin(pinned_id)
+                    pins.pop(pinned_id, None)
+
+        # Accounts pinned onto an eligible proxy are placed by operator intent, not
+        # by the even split. A pin whose proxy is currently dead is deliberately
+        # absent here: the account rejoins the pool so traffic keeps flowing, and
+        # the surviving pin record sends it home once the proxy recovers.
+        pin_target: dict[str, str] = {
+            account_id: pin.proxy_id
+            for account_id, pin in pins.items()
+            if account_id in account_by_id and pin.proxy_id in eligible_ids
+        }
 
         if not proxied and not parked_direct:
             run.status = "noop"
@@ -509,6 +580,7 @@ class ProxyHealthService:
                         account_name=str(account_by_id[account_id].get("name") or ""),
                         from_proxy_id=from_proxy_id,
                         to_proxy_id=None,
+                        pinned=account_id in pins,
                     )
                 )
             if not moves:
@@ -517,11 +589,40 @@ class ProxyHealthService:
                 return self._finish_run(run, persist=trigger == "manual" or dry_run)
         else:
             total_to_place = len(proxied) + len(parked_direct)
+            where: dict[str, str | None] = {
+                account_id: None for account_id in parked_direct
+            }
+            where.update({account_id: proxy_id for account_id, proxy_id in proxied})
+
+            # Pinned accounts claim their target's slots first and are returned to
+            # it whenever they have drifted away (rescued during an outage of that
+            # proxy, or moved by an earlier even split).
+            pinned_by_proxy: dict[str, list[str]] = {
+                proxy_id: [] for proxy_id in eligible_ids
+            }
+            for account_id, target in pin_target.items():
+                pinned_by_proxy[target].append(account_id)
+                if where.get(account_id) != target:
+                    moves.append(
+                        ProxyAccountMove(
+                            account_id=account_id,
+                            account_name=str(
+                                account_by_id[account_id].get("name") or ""
+                            ),
+                            from_proxy_id=where.get(account_id),
+                            to_proxy_id=target,
+                            pinned=True,
+                        )
+                    )
+
             current: dict[str, list[str]] = {proxy_id: [] for proxy_id in eligible_ids}
-            homeless: list[tuple[str, str | None]] = [
-                (account_id, None) for account_id in parked_direct
-            ]
+            homeless: list[tuple[str, str | None]] = []
+            for account_id in parked_direct:
+                if account_id not in pin_target:
+                    homeless.append((account_id, None))
             for account_id, proxy_id in proxied:
+                if account_id in pin_target:
+                    continue
                 if proxy_id in current:
                     current[proxy_id].append(account_id)
                 else:
@@ -530,23 +631,35 @@ class ProxyHealthService:
             # Even split with minimal movement: hand the +1 caps to the proxies that
             # already hold the most accounts, keep every account below its proxy's
             # cap, and only relocate the surplus plus stranded/parked accounts.
+            # Pinned accounts count against their proxy's cap (so a proxy loaded
+            # with pins receives fewer free accounts) and can never be evicted by
+            # it, hence the floor at the pinned count.
             base, remainder = divmod(total_to_place, len(eligible_ids))
             cap_order = sorted(
-                eligible_ids, key=lambda pid: len(current[pid]), reverse=True
+                eligible_ids,
+                key=lambda pid: len(current[pid]) + len(pinned_by_proxy[pid]),
+                reverse=True,
             )
             caps = {
-                proxy_id: base + (1 if index < remainder else 0)
+                proxy_id: max(
+                    base + (1 if index < remainder else 0),
+                    len(pinned_by_proxy[proxy_id]),
+                )
                 for index, proxy_id in enumerate(cap_order)
+            }
+            free_caps = {
+                proxy_id: caps[proxy_id] - len(pinned_by_proxy[proxy_id])
+                for proxy_id in eligible_ids
             }
             pool: list[tuple[str, str | None]] = list(homeless)
             kept: dict[str, int] = {}
             for proxy_id in eligible_ids:
-                kept[proxy_id] = min(len(current[proxy_id]), caps[proxy_id])
-                for account_id in current[proxy_id][caps[proxy_id]:]:
+                kept[proxy_id] = min(len(current[proxy_id]), free_caps[proxy_id])
+                for account_id in current[proxy_id][free_caps[proxy_id]:]:
                     pool.append((account_id, proxy_id))
 
             for proxy_id in eligible_ids:
-                deficit = caps[proxy_id] - kept[proxy_id]
+                deficit = free_caps[proxy_id] - kept[proxy_id]
                 for _ in range(deficit):
                     if not pool:
                         break
