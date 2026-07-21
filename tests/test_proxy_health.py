@@ -228,6 +228,93 @@ def test_rebalance_evenly_splits_with_minimal_moves(app_env) -> None:
     assert "proxy_id" not in fake.accounts[6]["raw"]
 
 
+def test_pin_binds_account_and_survives_rebalance(app_env) -> None:
+    fake = FakeProxyClient()
+    fake.proxies = [_proxy(1), _proxy(2)]
+    fake.accounts = [_account(11, 1), _account(12, 1), _account(13, 1), _account(14, 1)]
+    settings = ProxyHealthRuntimeSettings()
+    service, store = _service(app_env, fake, settings)
+
+    service.pin_account(account_id="11", proxy_id="2")
+    assert fake.accounts[0]["raw"]["proxy_id"] == 2
+
+    run = service.rebalance(trigger="manual")
+
+    # The even split still lands 2/2, but the pinned account is never the one
+    # that gets moved off proxy 2.
+    assert run.status == "completed"
+    placement = {
+        str(account["id"]): account["raw"].get("proxy_id") for account in fake.accounts
+    }
+    assert placement["11"] == 2
+    assert sorted(placement.values()) == [1, 1, 2, 2]
+
+
+def test_pin_is_rescued_when_its_proxy_dies_and_returns_on_recovery(app_env) -> None:
+    fake = FakeProxyClient()
+    fake.proxies = [_proxy(1), _proxy(2)]
+    fake.accounts = [_account(11, 2), _account(12, 1)]
+    fake.test_scripts = {"1": [_ok()], "2": [_fail(), _fail(), _fail(), _ok()]}
+    fake.quality_scripts = {"1": [_quality(True)], "2": [_quality(True)]}
+    settings = ProxyHealthRuntimeSettings(failure_threshold=3, recovery_threshold=2)
+    service, store = _service(app_env, fake, settings)
+
+    service.pin_account(account_id="11", proxy_id="2")
+
+    # Proxy 2 dies: the pinned account is rescued onto proxy 1 so traffic keeps
+    # flowing, but the pin record survives.
+    for _ in range(3):
+        service.probe_once()
+    states = {s.proxy_id: s for s in store.list_proxy_health_states()}
+    assert states["2"].health == "dead"
+    assert fake.accounts[0]["raw"]["proxy_id"] == 1
+    assert {p.account_id for p in store.list_proxy_account_pins()} == {"11"}
+
+    # Proxy 2 recovers: the pin sends it home without anyone asking.
+    service.probe_once()
+    service.probe_once()
+    states = {s.proxy_id: s for s in store.list_proxy_health_states()}
+    assert states["2"].health == "healthy"
+    assert fake.accounts[0]["raw"]["proxy_id"] == 2
+
+
+def test_unpin_releases_account_back_to_balancing(app_env) -> None:
+    fake = FakeProxyClient()
+    fake.proxies = [_proxy(1), _proxy(2)]
+    fake.accounts = [_account(11, 1), _account(12, 1), _account(13, 1), _account(14, 1)]
+    settings = ProxyHealthRuntimeSettings()
+    service, store = _service(app_env, fake, settings)
+
+    service.pin_account(account_id="11", proxy_id="2")
+    service.unpin_account("11")
+
+    assert store.list_proxy_account_pins() == []
+    # With the pin gone the account is an ordinary pool member again: it stays
+    # only because the split happens to be balanced already.
+    run = service.rebalance(trigger="manual")
+    assert run.status in {"completed", "noop"}
+    counts: dict[object, int] = {}
+    for account in fake.accounts:
+        proxy_id = account["raw"].get("proxy_id")
+        counts[proxy_id] = counts.get(proxy_id, 0) + 1
+    assert counts == {1: 2, 2: 2}
+
+
+def test_pin_onto_deleted_proxy_is_dropped(app_env) -> None:
+    fake = FakeProxyClient()
+    fake.proxies = [_proxy(1), _proxy(2)]
+    fake.accounts = [_account(11, 1)]
+    settings = ProxyHealthRuntimeSettings()
+    service, store = _service(app_env, fake, settings)
+
+    service.pin_account(account_id="11", proxy_id="2")
+    fake.proxies = [_proxy(1)]
+
+    service.rebalance(trigger="manual")
+
+    assert store.list_proxy_account_pins() == []
+
+
 def test_rebalance_dry_run_moves_nothing(app_env) -> None:
     fake = FakeProxyClient()
     fake.proxies = [_proxy(1), _proxy(2)]

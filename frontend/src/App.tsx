@@ -57,11 +57,13 @@ import {
   ArrowDownOutlined,
   BranchesOutlined,
   ClusterOutlined,
+  HeartOutlined,
   KeyOutlined,
   PartitionOutlined,
   NodeIndexOutlined,
   ReloadOutlined,
   SendOutlined,
+  SwapOutlined,
   SyncOutlined,
   UserOutlined,
   QuestionCircleOutlined
@@ -126,7 +128,7 @@ type OperatorView =
   | "notification"
   | "creditControl"
   | "proxyManagement";
-type OrchestrationTab = "manual" | "dynamic";
+type OrchestrationTab = "manual" | "dynamic" | "migrations" | "accountHealth";
 type CreditControlTab = "users" | "policies" | "runs" | "audit";
 
 type ProvisionFlowSummary = {
@@ -749,11 +751,13 @@ const operatorViewPaths: Record<OperatorView, string> = {
   keyTransfer: "/key-transfer",
   notification: "/notifications",
   creditControl: "/credit-control",
-  proxyManagement: "/proxy-management"
+  proxyManagement: "/ip-proxy"
 };
 const orchestrationTabPaths: Record<OrchestrationTab, string> = {
   manual: "/orchestration/manual",
-  dynamic: "/orchestration/dynamic"
+  dynamic: "/orchestration/dynamic",
+  migrations: "/orchestration/migrations",
+  accountHealth: "/orchestration/account-health"
 };
 const frontendRouteBase = appBasePath();
 
@@ -1700,6 +1704,12 @@ function orchestrationTabFromPath(pathname: string): OrchestrationTab {
   if (pathname === orchestrationTabPaths.dynamic || pathname === "/dynamic") {
     return "dynamic";
   }
+  if (pathname === orchestrationTabPaths.migrations) {
+    return "migrations";
+  }
+  if (pathname === orchestrationTabPaths.accountHealth) {
+    return "accountHealth";
+  }
   return "manual";
 }
 
@@ -1716,7 +1726,8 @@ function viewFromPath(pathname: string): OperatorView {
   if (pathname === operatorViewPaths.notification) {
     return "notification";
   }
-  if (pathname === operatorViewPaths.proxyManagement) {
+  // /proxy-management is the pre-split path for what is now the IP proxy view.
+  if (pathname === operatorViewPaths.proxyManagement || pathname === "/proxy-management") {
     return "proxyManagement";
   }
   return "orchestration";
@@ -1740,6 +1751,7 @@ function loginRedirectPath(): string {
     ...Object.values(orchestrationTabPaths),
     "/orchestration",
     "/dynamic",
+    "/proxy-management",
     "/key-transfer",
     "/data-sync",
     "/credit-control/users",
@@ -2808,7 +2820,7 @@ function OperatorWorkspace() {
               onClick={() => navigateView("proxyManagement")}
             >
               <Network size={17} aria-hidden="true" />
-              健康管控
+              IP 代理
             </button>
           </div>
           <button className="button secondary compact" type="button" onClick={logout} disabled={logoutBusy}>
@@ -3025,6 +3037,20 @@ const ACCOUNT_AVAILABILITY_LABELS: Record<string, string> = {
   unknown: "未知"
 };
 
+type ProxyAccountAssignment = {
+  account_id: string;
+  account_name: string;
+  proxy_id: string | null;
+  pinned_proxy_id: string | null;
+  pinned_at: string | null;
+  parked: boolean;
+};
+
+type ProxyAccountAssignmentsPayload = ApiPayload & {
+  items: ProxyAccountAssignment[];
+  total: number;
+};
+
 function ProxyManagementView({
   onAuthExpired
 }: {
@@ -3032,8 +3058,6 @@ function ProxyManagementView({
 }) {
   const [proxies, setProxies] = useState<ProxyItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [runs, setRuns] = useState<ProxyHealthRunItem[]>([]);
-  const [runsLoading, setRunsLoading] = useState(false);
   const [settings, setSettings] = useState<ProxyHealthSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -3042,6 +3066,12 @@ function ProxyManagementView({
   const [proxyForm, setProxyForm] = useState({ ...emptyProxyForm });
   const [proxySaving, setProxySaving] = useState(false);
   const [actionBusyIds, setActionBusyIds] = useState<Set<string>>(new Set());
+  const [rebalanceBusy, setRebalanceBusy] = useState(false);
+  const [probeBusy, setProbeBusy] = useState(false);
+  const [status, setStatus] = useState<StatusState>({ message: "", tone: "idle" });
+  const [assignments, setAssignments] = useState<ProxyAccountAssignment[]>([]);
+  const [assignmentsLoading, setAssignmentsLoading] = useState(false);
+  const [pinBusyIds, setPinBusyIds] = useState<Set<string>>(new Set());
 
   function markActionBusy(proxyId: string, busy: boolean) {
     setActionBusyIds((previous) => {
@@ -3054,20 +3084,9 @@ function ProxyManagementView({
       return next;
     });
   }
-  const [rebalanceBusy, setRebalanceBusy] = useState(false);
-  const [probeBusy, setProbeBusy] = useState(false);
-  const [status, setStatus] = useState<StatusState>({ message: "", tone: "idle" });
-  const [accounts, setAccounts] = useState<AccountHealthItem[]>([]);
-  const [accountsLoading, setAccountsLoading] = useState(false);
-  const [accountRuns, setAccountRuns] = useState<AccountHealthRunItem[]>([]);
-  const [accountRunsLoading, setAccountRunsLoading] = useState(false);
-  const [accountSettings, setAccountSettings] = useState<AccountHealthSettings | null>(null);
-  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
-  const [accountSettingsSaving, setAccountSettingsSaving] = useState(false);
-  const [accountBusyIds, setAccountBusyIds] = useState<Set<string>>(new Set());
 
-  function markAccountBusy(accountId: string, busy: boolean) {
-    setAccountBusyIds((previous) => {
+  function markPinBusy(accountId: string, busy: boolean) {
+    setPinBusyIds((previous) => {
       const next = new Set(previous);
       if (busy) {
         next.add(accountId);
@@ -3076,93 +3095,6 @@ function ProxyManagementView({
       }
       return next;
     });
-  }
-
-  async function loadAccounts() {
-    setAccountsLoading(true);
-    try {
-      const payload = await requestJson<AccountHealthListPayload>(
-        "/api/account-health/accounts",
-        { method: "GET" },
-        "加载账号健康列表失败"
-      );
-      setAccounts(payload.items ?? []);
-    } catch (error) {
-      onAuthExpired(error, setStatus);
-    } finally {
-      setAccountsLoading(false);
-    }
-  }
-
-  async function loadAccountRuns() {
-    setAccountRunsLoading(true);
-    try {
-      const payload = await requestJson<AccountHealthRunsPayload>(
-        "/api/account-health/runs?limit=20",
-        { method: "GET" },
-        "加载账号处置记录失败"
-      );
-      setAccountRuns(payload.items ?? []);
-    } catch (error) {
-      onAuthExpired(error, setStatus);
-    } finally {
-      setAccountRunsLoading(false);
-    }
-  }
-
-  async function loadAccountSettings() {
-    try {
-      const payload = await requestJson<AccountHealthSettingsPayload>(
-        "/api/account-health/settings",
-        { method: "GET" },
-        "加载账号健康设置失败"
-      );
-      setAccountSettings(payload.settings);
-    } catch (error) {
-      onAuthExpired(error, setStatus);
-    }
-  }
-
-  async function saveAccountSettings() {
-    if (!accountSettings) return;
-    setAccountSettingsSaving(true);
-    try {
-      const payload = await requestJson<AccountHealthSettingsPayload>(
-        "/api/account-health/settings",
-        { method: "PUT", body: JSON.stringify(accountSettings) },
-        "保存账号健康设置失败"
-      );
-      setAccountSettings(payload.settings);
-      setAccountSettingsOpen(false);
-      setStatus({ message: "账号健康设置已保存，立即生效", tone: "success" });
-    } catch (error) {
-      onAuthExpired(error, setStatus);
-    } finally {
-      setAccountSettingsSaving(false);
-    }
-  }
-
-  async function toggleAccountEviction(account: AccountHealthItem, evict: boolean) {
-    const accountId = idValue(account.id);
-    markAccountBusy(accountId, true);
-    try {
-      await requestJson<ApiPayload>(
-        `/api/account-health/accounts/${encodeURIComponent(accountId)}/${evict ? "evict" : "rejoin"}`,
-        { method: "POST" },
-        evict ? "驱逐账号失败" : "恢复账号失败"
-      );
-      setStatus({
-        message: evict
-          ? `「${account.name}」已暂停调度（手动驱逐不会自动回归，需手动恢复）`
-          : `「${account.name}」已恢复调度（回归）`,
-        tone: "success"
-      });
-      await Promise.all([loadAccounts(), loadAccountRuns()]);
-    } catch (error) {
-      onAuthExpired(error, setStatus);
-    } finally {
-      markAccountBusy(accountId, false);
-    }
   }
 
   async function loadProxies() {
@@ -3181,19 +3113,60 @@ function ProxyManagementView({
     }
   }
 
-  async function loadRuns() {
-    setRunsLoading(true);
+  async function loadAssignments() {
+    setAssignmentsLoading(true);
     try {
-      const payload = await requestJson<ProxyRunsPayload>(
-        "/api/proxy-health/runs?limit=20",
+      const payload = await requestJson<ProxyAccountAssignmentsPayload>(
+        "/api/proxy-health/account-assignments",
         { method: "GET" },
-        "加载搬迁记录失败"
+        "加载账号代理分配失败"
       );
-      setRuns(payload.items ?? []);
+      setAssignments(payload.items ?? []);
     } catch (error) {
       onAuthExpired(error, setStatus);
     } finally {
-      setRunsLoading(false);
+      setAssignmentsLoading(false);
+    }
+  }
+
+  async function pinAccount(item: ProxyAccountAssignment, proxyId: string) {
+    markPinBusy(item.account_id, true);
+    try {
+      await requestJson<ApiPayload>(
+        `/api/proxy-health/account-assignments/${encodeURIComponent(item.account_id)}/pin`,
+        { method: "PUT", body: JSON.stringify({ proxy_id: proxyId }) },
+        "钉住账号失败"
+      );
+      const proxy = proxies.find((candidate) => idValue(candidate.id) === proxyId);
+      setStatus({
+        message: `「${item.account_name || item.account_id}」已钉在「${proxy?.name ?? proxyId}」上，自动均衡不会再挪动它`,
+        tone: "success"
+      });
+      await Promise.all([loadAssignments(), loadProxies()]);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      markPinBusy(item.account_id, false);
+    }
+  }
+
+  async function unpinAccount(item: ProxyAccountAssignment) {
+    markPinBusy(item.account_id, true);
+    try {
+      await requestJson<ApiPayload>(
+        `/api/proxy-health/account-assignments/${encodeURIComponent(item.account_id)}/pin`,
+        { method: "DELETE" },
+        "取消钉住失败"
+      );
+      setStatus({
+        message: `「${item.account_name || item.account_id}」已交回自动均衡，当前代理保持不变`,
+        tone: "success"
+      });
+      await loadAssignments();
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      markPinBusy(item.account_id, false);
     }
   }
 
@@ -3214,20 +3187,11 @@ function ProxyManagementView({
     let cancelled = false;
     void (async () => {
       if (cancelled) return;
-      await Promise.all([
-        loadProxies(),
-        loadRuns(),
-        loadSettings(),
-        loadAccounts(),
-        loadAccountRuns(),
-        loadAccountSettings()
-      ]);
+      await Promise.all([loadProxies(), loadSettings(), loadAssignments()]);
     })();
     const timer = window.setInterval(() => {
       void loadProxies();
-      void loadRuns();
-      void loadAccounts();
-      void loadAccountRuns();
+      void loadAssignments();
     }, 30_000);
     return () => {
       cancelled = true;
@@ -3324,7 +3288,7 @@ function ProxyManagementView({
             "删除代理失败"
           );
           setStatus({ message: "代理已删除", tone: "success" });
-          await loadProxies();
+          await Promise.all([loadProxies(), loadAssignments()]);
         } catch (error) {
           onAuthExpired(error, setStatus);
         }
@@ -3388,7 +3352,7 @@ function ProxyManagementView({
         "批量质量检测失败"
       );
       setStatus({ message: "批量质量检测完成", tone: "success" });
-      await Promise.all([loadProxies(), loadRuns()]);
+      await Promise.all([loadProxies(), loadAssignments()]);
     } catch (error) {
       onAuthExpired(error, setStatus);
     } finally {
@@ -3414,13 +3378,18 @@ function ProxyManagementView({
               : `均衡完成：移动 ${run.moved_count} 个，失败 ${run.failed_count} 个`;
         setStatus({ message: summary, tone: run.failed_count ? "error" : "success" });
       }
-      await Promise.all([loadProxies(), loadRuns()]);
+      await Promise.all([loadProxies(), loadAssignments()]);
     } catch (error) {
       onAuthExpired(error, setStatus);
     } finally {
       setRebalanceBusy(false);
     }
   }
+
+  const proxyOptions = proxies.map((proxy) => ({
+    value: idValue(proxy.id),
+    label: `${proxy.name ?? idValue(proxy.id)}（${proxy.host}:${proxy.port}）`
+  }));
 
   const proxyColumns = [
     {
@@ -3529,46 +3498,80 @@ function ProxyManagementView({
     }
   ];
 
-  const runColumns = [
+  const assignmentColumns = [
     {
-      title: "时间",
-      key: "created_at",
-      render: (_: unknown, run: ProxyHealthRunItem) => new Date(run.created_at).toLocaleString()
-    },
-    {
-      title: "触发",
-      key: "trigger",
-      render: (_: unknown, run: ProxyHealthRunItem) => (
-        <span>
-          {PROXY_RUN_TRIGGER_LABELS[run.trigger] ?? run.trigger}
-          {run.dry_run ? <Tag style={{ marginLeft: 6 }}>预演</Tag> : null}
-          {run.fallback_direct ? (
-            <Tag color="orange" style={{ marginLeft: 6 }}>
-              回落直连
-            </Tag>
-          ) : null}
-        </span>
+      title: "账号",
+      key: "account",
+      render: (_: unknown, item: ProxyAccountAssignment) => (
+        <strong>{item.account_name || item.account_id}</strong>
       )
     },
     {
-      title: "状态",
-      key: "status",
-      render: (_: unknown, run: ProxyHealthRunItem) => {
-        const label = PROXY_RUN_STATUS_LABELS[run.status] ?? { text: run.status, color: "default" };
+      title: "当前代理",
+      key: "current",
+      render: (_: unknown, item: ProxyAccountAssignment) => {
+        const proxy = proxies.find((candidate) => idValue(candidate.id) === item.proxy_id);
         return (
-          <Tooltip title={run.reason ?? ""}>
-            <Tag color={label.color}>{label.text}</Tag>
-          </Tooltip>
+          <span>
+            {item.proxy_id ? (proxy?.name ?? item.proxy_id) : <Tag>直连</Tag>}
+            {item.parked ? (
+              <Tooltip title="所有代理都不可用时被临时改为直连，代理恢复后会自动回填">
+                <Tag color="orange" style={{ marginLeft: 6 }}>
+                  临时直连
+                </Tag>
+              </Tooltip>
+            ) : null}
+          </span>
         );
       }
     },
     {
-      title: "结果",
-      key: "counts",
-      render: (_: unknown, run: ProxyHealthRunItem) =>
-        run.status === "noop"
-          ? "-"
-          : `移动 ${run.moved_count} / 跳过 ${run.skipped_count} / 失败 ${run.failed_count}`
+      title: "分配方式",
+      key: "mode",
+      render: (_: unknown, item: ProxyAccountAssignment) => {
+        if (!item.pinned_proxy_id) {
+          return <Tag color="blue">自动均衡</Tag>;
+        }
+        const pinned = proxies.find(
+          (candidate) => idValue(candidate.id) === item.pinned_proxy_id
+        );
+        const displaced = item.proxy_id !== item.pinned_proxy_id;
+        return (
+          <span>
+            <Tag color="purple">钉住：{pinned?.name ?? item.pinned_proxy_id}</Tag>
+            {displaced ? (
+              <Tooltip title="指定的代理当前不可用，已临时接管；代理恢复后会自动送回">
+                <Tag color="orange">临时接管中</Tag>
+              </Tooltip>
+            ) : null}
+          </span>
+        );
+      }
+    },
+    {
+      title: "操作",
+      key: "actions",
+      render: (_: unknown, item: ProxyAccountAssignment) => {
+        const busy = pinBusyIds.has(item.account_id);
+        return (
+          <Space wrap>
+            <Select
+              size="small"
+              style={{ minWidth: 200 }}
+              placeholder="钉到指定代理"
+              value={item.pinned_proxy_id ?? undefined}
+              disabled={busy}
+              options={proxyOptions}
+              onChange={(value) => void pinAccount(item, value)}
+            />
+            {item.pinned_proxy_id ? (
+              <AntButton size="small" loading={busy} onClick={() => void unpinAccount(item)}>
+                取消钉住
+              </AntButton>
+            ) : null}
+          </Space>
+        );
+      }
     }
   ];
 
@@ -3623,6 +3626,267 @@ function ProxyManagementView({
         />
       </div>
 
+
+      <div className="panel">
+        <div className="proxy-toolbar">
+          <div>
+            <p className="eyebrow">账号绑定</p>
+            <h2>账号走哪个代理</h2>
+            <Typography.Text type="secondary">
+              默认由自动均衡分配。钉住后该账号固定走指定代理、不再被均衡挪走；万一那个代理挂了会临时接管保证不断流，代理恢复后自动送回。
+            </Typography.Text>
+          </div>
+          <AntButton
+            icon={<ReloadOutlined />}
+            loading={assignmentsLoading}
+            onClick={() => void loadAssignments()}
+          >
+            刷新
+          </AntButton>
+        </div>
+        <Table
+          style={{ marginTop: 16 }}
+          rowKey={(item) => item.account_id}
+          columns={assignmentColumns}
+          dataSource={assignments}
+          loading={assignmentsLoading}
+          pagination={false}
+          locale={{ emptyText: <Empty description="暂无账号" /> }}
+        />
+      </div>
+
+      <Modal
+        title={editingProxyId ? "编辑代理" : "新增代理"}
+        open={editorOpen}
+        onCancel={() => setEditorOpen(false)}
+        onOk={() => void submitProxyForm()}
+        okText={editingProxyId ? "保存" : "创建"}
+        cancelText="取消"
+        confirmLoading={proxySaving}
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size="middle">
+          <div>
+            <Typography.Text>名称</Typography.Text>
+            <Input
+              value={proxyForm.name}
+              onChange={(event) => setProxyForm({ ...proxyForm, name: event.target.value })}
+              placeholder="例如 us-node-1"
+            />
+          </div>
+          <Space style={{ width: "100%" }}>
+            <div>
+              <Typography.Text>协议</Typography.Text>
+              <Select
+                value={proxyForm.protocol}
+                style={{ width: 120 }}
+                onChange={(value) => setProxyForm({ ...proxyForm, protocol: value })}
+                options={[
+                  { value: "socks5", label: "socks5" },
+                  { value: "http", label: "http" },
+                  { value: "https", label: "https" }
+                ]}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <Typography.Text>主机</Typography.Text>
+              <Input
+                value={proxyForm.host}
+                onChange={(event) => setProxyForm({ ...proxyForm, host: event.target.value })}
+                placeholder="1.2.3.4 或域名"
+              />
+            </div>
+            <div>
+              <Typography.Text>端口</Typography.Text>
+              <InputNumber
+                min={1}
+                max={65535}
+                value={proxyForm.port}
+                onChange={(value) => setProxyForm({ ...proxyForm, port: Number(value ?? 1080) })}
+              />
+            </div>
+          </Space>
+          <Space style={{ width: "100%" }}>
+            <div>
+              <Typography.Text>用户名（可选）</Typography.Text>
+              <Input
+                value={proxyForm.username}
+                onChange={(event) => setProxyForm({ ...proxyForm, username: event.target.value })}
+              />
+            </div>
+            <div>
+              <Typography.Text>密码（可选）</Typography.Text>
+              <Input.Password
+                value={proxyForm.password}
+                onChange={(event) => setProxyForm({ ...proxyForm, password: event.target.value })}
+              />
+            </div>
+          </Space>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="探活设置"
+        open={settingsOpen}
+        onCancel={() => setSettingsOpen(false)}
+        onOk={() => void saveSettings()}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={settingsSaving}
+      >
+        {settings ? (
+          <Space direction="vertical" style={{ width: "100%" }} size="middle">
+            <div className="proxy-settings-row">
+              <Typography.Text>启用定时探活</Typography.Text>
+              <Switch
+                checked={settings.enabled}
+                onChange={(checked) => setSettings({ ...settings, enabled: checked })}
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>探活间隔（秒）</Typography.Text>
+              <InputNumber
+                min={5}
+                value={settings.probe_interval_seconds}
+                onChange={(value) =>
+                  setSettings({ ...settings, probe_interval_seconds: Number(value ?? 60) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>质量检测间隔（秒）</Typography.Text>
+              <InputNumber
+                min={30}
+                value={settings.quality_check_interval_seconds}
+                onChange={(value) =>
+                  setSettings({ ...settings, quality_check_interval_seconds: Number(value ?? 300) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>连续失败判死次数</Typography.Text>
+              <InputNumber
+                min={1}
+                value={settings.failure_threshold}
+                onChange={(value) => setSettings({ ...settings, failure_threshold: Number(value ?? 3) })}
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>连续成功判活次数</Typography.Text>
+              <InputNumber
+                min={1}
+                value={settings.recovery_threshold}
+                onChange={(value) => setSettings({ ...settings, recovery_threshold: Number(value ?? 3) })}
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>延迟阈值（毫秒，超过判失败）</Typography.Text>
+              <InputNumber
+                min={1}
+                value={settings.latency_threshold_ms ?? undefined}
+                onChange={(value) =>
+                  setSettings({ ...settings, latency_threshold_ms: value === null ? null : Number(value) })
+                }
+              />
+            </div>
+            <div className="proxy-settings-row">
+              <Typography.Text>判死自动驱逐 / 恢复自动回填</Typography.Text>
+              <Switch
+                checked={settings.auto_move_enabled}
+                onChange={(checked) => setSettings({ ...settings, auto_move_enabled: checked })}
+              />
+            </div>
+            <Typography.Text type="secondary">
+              哪些代理判死不发告警，改到「告警中心 · 告警白名单」统一配置。
+            </Typography.Text>
+          </Space>
+        ) : (
+          <Spin />
+        )}
+      </Modal>
+    </section>
+  );
+}
+
+function ProxyMigrationsView({
+  onAuthExpired
+}: {
+  onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+}) {
+  const [runs, setRuns] = useState<ProxyHealthRunItem[]>([]);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [status, setStatus] = useState<StatusState>({ message: "", tone: "idle" });
+
+  async function loadRuns() {
+    setRunsLoading(true);
+    try {
+      const payload = await requestJson<ProxyRunsPayload>(
+        "/api/proxy-health/runs?limit=20",
+        { method: "GET" },
+        "加载搬迁记录失败"
+      );
+      setRuns(payload.items ?? []);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setRunsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadRuns();
+    const timer = window.setInterval(() => void loadRuns(), 30_000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const runColumns = [
+    {
+      title: "时间",
+      key: "created_at",
+      render: (_: unknown, run: ProxyHealthRunItem) => new Date(run.created_at).toLocaleString()
+    },
+    {
+      title: "触发",
+      key: "trigger",
+      render: (_: unknown, run: ProxyHealthRunItem) => (
+        <span>
+          {PROXY_RUN_TRIGGER_LABELS[run.trigger] ?? run.trigger}
+          {run.dry_run ? <Tag style={{ marginLeft: 6 }}>预演</Tag> : null}
+          {run.fallback_direct ? (
+            <Tag color="orange" style={{ marginLeft: 6 }}>
+              回落直连
+            </Tag>
+          ) : null}
+        </span>
+      )
+    },
+    {
+      title: "状态",
+      key: "status",
+      render: (_: unknown, run: ProxyHealthRunItem) => {
+        const label = PROXY_RUN_STATUS_LABELS[run.status] ?? { text: run.status, color: "default" };
+        return (
+          <Tooltip title={run.reason ?? ""}>
+            <Tag color={label.color}>{label.text}</Tag>
+          </Tooltip>
+        );
+      }
+    },
+    {
+      title: "结果",
+      key: "counts",
+      render: (_: unknown, run: ProxyHealthRunItem) =>
+        run.status === "noop"
+          ? "-"
+          : `移动 ${run.moved_count} / 跳过 ${run.skipped_count} / 失败 ${run.failed_count}`
+    }
+  ];
+
+  return (
+    <section className="operator-stack proxy-management">
+      {status.tone === "error" && status.message ? (
+        <Alert type="error" message={status.message} showIcon />
+      ) : null}
       <div className="panel">
         <div className="proxy-toolbar">
           <div>
@@ -3678,7 +3942,150 @@ function ProxyManagementView({
           locale={{ emptyText: <Empty description="暂无搬迁记录" /> }}
         />
       </div>
+    </section>
+  );
+}
 
+function AccountHealthView({
+  onAuthExpired
+}: {
+  onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
+}) {
+  const [accounts, setAccounts] = useState<AccountHealthItem[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountRuns, setAccountRuns] = useState<AccountHealthRunItem[]>([]);
+  const [accountRunsLoading, setAccountRunsLoading] = useState(false);
+  const [accountSettings, setAccountSettings] = useState<AccountHealthSettings | null>(null);
+  const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
+  const [accountSettingsSaving, setAccountSettingsSaving] = useState(false);
+  const [accountBusyIds, setAccountBusyIds] = useState<Set<string>>(new Set());
+  const [status, setStatus] = useState<StatusState>({ message: "", tone: "idle" });
+
+  function markAccountBusy(accountId: string, busy: boolean) {
+    setAccountBusyIds((previous) => {
+      const next = new Set(previous);
+      if (busy) {
+        next.add(accountId);
+      } else {
+        next.delete(accountId);
+      }
+      return next;
+    });
+  }
+
+  async function loadAccounts() {
+    setAccountsLoading(true);
+    try {
+      const payload = await requestJson<AccountHealthListPayload>(
+        "/api/account-health/accounts",
+        { method: "GET" },
+        "加载账号健康列表失败"
+      );
+      setAccounts(payload.items ?? []);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setAccountsLoading(false);
+    }
+  }
+
+  async function loadAccountRuns() {
+    setAccountRunsLoading(true);
+    try {
+      const payload = await requestJson<AccountHealthRunsPayload>(
+        "/api/account-health/runs?limit=20",
+        { method: "GET" },
+        "加载账号处置记录失败"
+      );
+      setAccountRuns(payload.items ?? []);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setAccountRunsLoading(false);
+    }
+  }
+
+  async function loadAccountSettings() {
+    try {
+      const payload = await requestJson<AccountHealthSettingsPayload>(
+        "/api/account-health/settings",
+        { method: "GET" },
+        "加载账号健康设置失败"
+      );
+      setAccountSettings(payload.settings);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (cancelled) return;
+      await Promise.all([loadAccounts(), loadAccountRuns(), loadAccountSettings()]);
+    })();
+    const timer = window.setInterval(() => {
+      void loadAccounts();
+      void loadAccountRuns();
+    }, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function saveAccountSettings() {
+    if (!accountSettings) return;
+    setAccountSettingsSaving(true);
+    try {
+      const payload = await requestJson<AccountHealthSettingsPayload>(
+        "/api/account-health/settings",
+        { method: "PUT", body: JSON.stringify(accountSettings) },
+        "保存账号健康设置失败"
+      );
+      setAccountSettings(payload.settings);
+      setAccountSettingsOpen(false);
+      setStatus({ message: "账号健康设置已保存，立即生效", tone: "success" });
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      setAccountSettingsSaving(false);
+    }
+  }
+
+  async function toggleAccountEviction(account: AccountHealthItem, evict: boolean) {
+    const accountId = idValue(account.id);
+    markAccountBusy(accountId, true);
+    try {
+      await requestJson<ApiPayload>(
+        `/api/account-health/accounts/${encodeURIComponent(accountId)}/${evict ? "evict" : "rejoin"}`,
+        { method: "POST" },
+        evict ? "驱逐账号失败" : "恢复账号失败"
+      );
+      setStatus({
+        message: evict
+          ? `「${account.name}」已暂停调度（手动驱逐不会自动回归，需手动恢复）`
+          : `「${account.name}」已恢复调度（回归）`,
+        tone: "success"
+      });
+      await Promise.all([loadAccounts(), loadAccountRuns()]);
+    } catch (error) {
+      onAuthExpired(error, setStatus);
+    } finally {
+      markAccountBusy(accountId, false);
+    }
+  }
+
+  return (
+    <section className="operator-stack proxy-management">
+      {status.tone !== "idle" && status.message ? (
+        <Alert
+          type={status.tone === "error" ? "error" : status.tone === "success" ? "success" : "info"}
+          message={status.message}
+          showIcon
+        />
+      ) : null}
       <div className="panel">
         <div className="proxy-toolbar">
           <div>
@@ -3918,184 +4325,9 @@ function ProxyManagementView({
                 }
               />
             </div>
-            <div>
-              <Typography.Text>告警白名单（驱逐这些账号时不发告警）</Typography.Text>
-              <Select
-                mode="tags"
-                style={{ width: "100%", marginTop: 4 }}
-                placeholder="按账号选择"
-                value={accountSettings.alert_whitelist}
-                onChange={(values) =>
-                  setAccountSettings({ ...accountSettings, alert_whitelist: values })
-                }
-                options={accounts.map((account) => ({
-                  value: idValue(account.id),
-                  label: `${account.name ?? idValue(account.id)}`
-                }))}
-              />
-            </div>
-          </Space>
-        ) : (
-          <Spin />
-        )}
-      </Modal>
-
-      <Modal
-        title={editingProxyId ? "编辑代理" : "新增代理"}
-        open={editorOpen}
-        onCancel={() => setEditorOpen(false)}
-        onOk={() => void submitProxyForm()}
-        okText={editingProxyId ? "保存" : "创建"}
-        cancelText="取消"
-        confirmLoading={proxySaving}
-      >
-        <Space direction="vertical" style={{ width: "100%" }} size="middle">
-          <div>
-            <Typography.Text>名称</Typography.Text>
-            <Input
-              value={proxyForm.name}
-              onChange={(event) => setProxyForm({ ...proxyForm, name: event.target.value })}
-              placeholder="例如 us-node-1"
-            />
-          </div>
-          <Space style={{ width: "100%" }}>
-            <div>
-              <Typography.Text>协议</Typography.Text>
-              <Select
-                value={proxyForm.protocol}
-                style={{ width: 120 }}
-                onChange={(value) => setProxyForm({ ...proxyForm, protocol: value })}
-                options={[
-                  { value: "socks5", label: "socks5" },
-                  { value: "http", label: "http" },
-                  { value: "https", label: "https" }
-                ]}
-              />
-            </div>
-            <div style={{ flex: 1 }}>
-              <Typography.Text>主机</Typography.Text>
-              <Input
-                value={proxyForm.host}
-                onChange={(event) => setProxyForm({ ...proxyForm, host: event.target.value })}
-                placeholder="1.2.3.4 或域名"
-              />
-            </div>
-            <div>
-              <Typography.Text>端口</Typography.Text>
-              <InputNumber
-                min={1}
-                max={65535}
-                value={proxyForm.port}
-                onChange={(value) => setProxyForm({ ...proxyForm, port: Number(value ?? 1080) })}
-              />
-            </div>
-          </Space>
-          <Space style={{ width: "100%" }}>
-            <div>
-              <Typography.Text>用户名（可选）</Typography.Text>
-              <Input
-                value={proxyForm.username}
-                onChange={(event) => setProxyForm({ ...proxyForm, username: event.target.value })}
-              />
-            </div>
-            <div>
-              <Typography.Text>密码（可选）</Typography.Text>
-              <Input.Password
-                value={proxyForm.password}
-                onChange={(event) => setProxyForm({ ...proxyForm, password: event.target.value })}
-              />
-            </div>
-          </Space>
-        </Space>
-      </Modal>
-
-      <Modal
-        title="探活设置"
-        open={settingsOpen}
-        onCancel={() => setSettingsOpen(false)}
-        onOk={() => void saveSettings()}
-        okText="保存"
-        cancelText="取消"
-        confirmLoading={settingsSaving}
-      >
-        {settings ? (
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <div className="proxy-settings-row">
-              <Typography.Text>启用定时探活</Typography.Text>
-              <Switch
-                checked={settings.enabled}
-                onChange={(checked) => setSettings({ ...settings, enabled: checked })}
-              />
-            </div>
-            <div className="proxy-settings-row">
-              <Typography.Text>探活间隔（秒）</Typography.Text>
-              <InputNumber
-                min={5}
-                value={settings.probe_interval_seconds}
-                onChange={(value) =>
-                  setSettings({ ...settings, probe_interval_seconds: Number(value ?? 60) })
-                }
-              />
-            </div>
-            <div className="proxy-settings-row">
-              <Typography.Text>质量检测间隔（秒）</Typography.Text>
-              <InputNumber
-                min={30}
-                value={settings.quality_check_interval_seconds}
-                onChange={(value) =>
-                  setSettings({ ...settings, quality_check_interval_seconds: Number(value ?? 300) })
-                }
-              />
-            </div>
-            <div className="proxy-settings-row">
-              <Typography.Text>连续失败判死次数</Typography.Text>
-              <InputNumber
-                min={1}
-                value={settings.failure_threshold}
-                onChange={(value) => setSettings({ ...settings, failure_threshold: Number(value ?? 3) })}
-              />
-            </div>
-            <div className="proxy-settings-row">
-              <Typography.Text>连续成功判活次数</Typography.Text>
-              <InputNumber
-                min={1}
-                value={settings.recovery_threshold}
-                onChange={(value) => setSettings({ ...settings, recovery_threshold: Number(value ?? 3) })}
-              />
-            </div>
-            <div className="proxy-settings-row">
-              <Typography.Text>延迟阈值（毫秒，超过判失败）</Typography.Text>
-              <InputNumber
-                min={1}
-                value={settings.latency_threshold_ms ?? undefined}
-                onChange={(value) =>
-                  setSettings({ ...settings, latency_threshold_ms: value === null ? null : Number(value) })
-                }
-              />
-            </div>
-            <div className="proxy-settings-row">
-              <Typography.Text>判死自动驱逐 / 恢复自动回填</Typography.Text>
-              <Switch
-                checked={settings.auto_move_enabled}
-                onChange={(checked) => setSettings({ ...settings, auto_move_enabled: checked })}
-              />
-            </div>
-            <div>
-              <Typography.Text>告警白名单（这些代理判死不发告警，仍会探活和搬家）</Typography.Text>
-              <Select
-                mode="tags"
-                style={{ width: "100%", marginTop: 4 }}
-                placeholder="按名称或 ID 选择要忽略告警的代理"
-                value={settings.alert_whitelist}
-                onChange={(values) => setSettings({ ...settings, alert_whitelist: values })}
-                options={proxies.map((proxy) => ({
-                  // Store proxy IDs, not names: names are not unique upstream and
-                  // renaming a proxy would silently un-whitelist it.
-                  value: idValue(proxy.id),
-                  label: `${proxy.name ?? idValue(proxy.id)}（${proxy.host}:${proxy.port}）`
-                }))}
-              />
-            </div>
+            <Typography.Text type="secondary">
+              哪些账号驱逐时不发告警，改到「告警中心 · 告警白名单」统一配置。
+            </Typography.Text>
           </Space>
         ) : (
           <Spin />
@@ -5825,6 +6057,8 @@ function ExistingOrchestrationView({
     />
   );
 
+  const isRelationshipTab = activeTab === "manual" || activeTab === "dynamic";
+
   return (
     <div className="orchestration-workbench">
       <section className="orchestration-top-panel">
@@ -5839,12 +6073,16 @@ function ExistingOrchestrationView({
               onChange={(value) => onTabChange(value as OrchestrationTab)}
               options={[
                 { label: "手动编排", value: "manual", icon: <BranchesOutlined /> },
-                { label: "动态编排", value: "dynamic", icon: <SyncOutlined /> }
+                { label: "动态编排", value: "dynamic", icon: <SyncOutlined /> },
+                { label: "搬迁记录", value: "migrations", icon: <SwapOutlined /> },
+                { label: "账号健康", value: "accountHealth", icon: <HeartOutlined /> }
               ]}
             />
-            <AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadResources(selectedUserId)}>
-              刷新
-            </AntButton>
+            {isRelationshipTab ? (
+              <AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadResources(selectedUserId)}>
+                刷新
+              </AntButton>
+            ) : null}
           </Space>
         </div>
 
@@ -6103,15 +6341,20 @@ function ExistingOrchestrationView({
 
             </section>
           </form>
-        ) : (
+        ) : activeTab === "dynamic" ? (
           <DynamicOrchestrationView
             selectedUpstreamId={selectedUpstreamId}
             defaultUpstreamId={defaultUpstreamId}
             onAuthExpired={onAuthExpired}
             onRunRecorded={() => setRecordsRefreshSignal((value) => value + 1)}
           />
-        )}
+        ) : null}
       </section>
+
+      {activeTab === "migrations" ? <ProxyMigrationsView onAuthExpired={onAuthExpired} /> : null}
+      {activeTab === "accountHealth" ? <AccountHealthView onAuthExpired={onAuthExpired} /> : null}
+      {isRelationshipTab ? (
+        <>
 
       <section className="orchestration-canvas-shell">
         <div className="canvas-title-row">
@@ -6164,6 +6407,8 @@ function ExistingOrchestrationView({
         refreshSignal={recordsRefreshSignal}
         onStatus={setStatus}
       />
+        </>
+      ) : null}
     </div>
   );
 }

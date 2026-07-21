@@ -1017,6 +1017,26 @@ class ProxyAccountMoveResponse(BaseModel):
     to_proxy_id: str | None = None
     status: str
     reason: str | None = None
+    pinned: bool = False
+
+
+class ProxyAccountAssignmentResponse(BaseModel):
+    account_id: str
+    account_name: str = ""
+    proxy_id: str | None = None
+    pinned_proxy_id: str | None = None
+    pinned_at: str | None = None
+    parked: bool = False
+
+
+class ProxyAccountAssignmentsEnvelope(BaseModel):
+    success: bool = True
+    items: list[ProxyAccountAssignmentResponse]
+    total: int
+
+
+class ProxyAccountPinRequest(BaseModel):
+    proxy_id: str
 
 
 class ProxyHealthRunResponse(BaseModel):

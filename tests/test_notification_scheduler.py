@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -377,6 +378,25 @@ def test_sub2api_collectors_account_signals() -> None:
     assert collectors.account_quota_low(_rule()).value == 12
     assert collectors.platform_key_health(_rule()).value == 1
     assert collectors.platform_key_expiry(_rule()).value >= 0
+
+
+def test_sub2api_collectors_value_signals_name_offending_accounts() -> None:
+    collectors = Sub2APINotificationCollectors(_FakeSub2APIClient())
+
+    capacity_high = collectors.account_capacity_high(_rule())
+    top = capacity_high.snapshot["top_capacity_accounts"]
+    assert [item["name"] for item in top] == ["Key down"]
+    assert top[0]["capacity_percent"] == 100
+
+    quota_low = collectors.account_quota_low(_rule())
+    low = quota_low.snapshot["low_quota_accounts"]
+    assert [item["name"] for item in low] == ["Rate limited"]
+    assert low[0]["quota_remaining_percent"] == 12
+
+    key_expiry = collectors.platform_key_expiry(_rule())
+    expiring = key_expiry.snapshot["expiring_platform_keys"]
+    assert [item["name"] for item in expiring] == ["Key down"]
+    assert expiring[0]["days_until_expiry"] == key_expiry.value
 
 
 def test_sub2api_collectors_account_invalid_whitelist_suppresses_only_invalid() -> None:
@@ -1086,6 +1106,49 @@ def test_tick_dispatches_fire_to_sendable_receiver(client) -> None:
     persisted = main.get_flow_store().get_notification_rule_state("r1")
     assert persisted is not None
     assert persisted.is_firing is True
+
+
+def test_tick_delivery_names_offending_accounts(client) -> None:
+    login(client)
+    settings = _settings([_rule(threshold="1", for_minutes=0, read_interval_minutes=1)])
+    main.get_flow_store().save_notification_settings(settings)
+
+    service = main.get_notification_service()
+    _install_fake_pipeline(
+        [
+            _metric_sample(
+                value=2,
+                snapshot={
+                    "invalid_accounts": [
+                        {"id": "acct-1", "name": "主站 OAuth 1", "status": "expired"},
+                        {"id": "acct-2", "name": "备用 OAuth 2", "status": "banned"},
+                    ],
+                    "matched_count": 2,
+                    "total_count": 5,
+                },
+            )
+        ]
+    )
+
+    bodies: list[dict[str, Any]] = []
+
+    class _OkResp:
+        status_code = 200
+        text = "ok"
+
+    def fake_request(self, method, url, data=None, headers=None, timeout=None):
+        bodies.append(json.loads(data))
+        return _OkResp()
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        outcomes = service.tick()
+
+    assert outcomes[0].decision.action == NotificationRuleAction.fire
+    assert bodies
+    body = bodies[0]
+    assert body["signal"]["targets"] == ["主站 OAuth 1", "备用 OAuth 2"]
+    assert body["signal"]["targets_label"] == "主站 OAuth 1、备用 OAuth 2"
+    assert "[主站 OAuth 1、备用 OAuth 2]" in body["alert"]["summary"]
 
 
 def test_tick_skips_disabled_rules(client) -> None:

@@ -541,6 +541,65 @@ export async function loadGroupWhitelistOptions(): Promise<WhitelistOption[]> {
     .filter((option) => option.value);
 }
 
+export async function loadProxyWhitelistOptions(): Promise<WhitelistOption[]> {
+  const payload = await requestNotificationJson<ApiPayload>(
+    "/api/proxy-health/proxies",
+    { method: "GET" },
+    "加载代理列表失败"
+  );
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  return items
+    .map((raw) => {
+      const item = (raw ?? {}) as ApiPayload;
+      const value = item.id === undefined || item.id === null ? "" : String(item.id);
+      const name = typeof item.name === "string" ? item.name : "";
+      const host = typeof item.host === "string" ? item.host : "";
+      const port = item.port === undefined || item.port === null ? "" : String(item.port);
+      const endpoint = host && port ? `${host}:${port}` : host;
+      const label = [name || value, endpoint].filter(Boolean).join("（") + (endpoint ? "）" : "");
+      return { value, label };
+    })
+    .filter((option) => option.value);
+}
+
+// The proxy-death and account-eviction mutes live in their own health services
+// rather than in the notification config, so they are read and written through
+// those services' settings endpoints (full-object PUT, patched field by field).
+async function loadHealthSettings(scope: "proxy" | "account"): Promise<ApiPayload> {
+  const payload = await requestNotificationJson<ApiPayload>(
+    `/api/${scope}-health/settings`,
+    { method: "GET" },
+    scope === "proxy" ? "加载代理探活设置失败" : "加载账号健康设置失败"
+  );
+  const settings = (payload.settings ?? {}) as ApiPayload;
+  return settings;
+}
+
+export async function loadHealthAlertWhitelist(
+  scope: "proxy" | "account"
+): Promise<string[]> {
+  const settings = await loadHealthSettings(scope);
+  const list = settings.alert_whitelist;
+  return Array.isArray(list) ? list.map((value) => String(value)) : [];
+}
+
+export async function saveHealthAlertWhitelist(
+  scope: "proxy" | "account",
+  ids: string[]
+): Promise<string[]> {
+  const settings = await loadHealthSettings(scope);
+  const payload = await requestNotificationJson<ApiPayload>(
+    `/api/${scope}-health/settings`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ ...settings, alert_whitelist: ids })
+    },
+    scope === "proxy" ? "保存代理免告警名单失败" : "保存账号免告警名单失败"
+  );
+  const saved = ((payload.settings ?? {}) as ApiPayload).alert_whitelist;
+  return Array.isArray(saved) ? saved.map((value) => String(value)) : ids;
+}
+
 export async function saveNotificationSettings(
   settings: NotificationSettings
 ): Promise<NotificationSettings> {

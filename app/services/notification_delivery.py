@@ -60,6 +60,25 @@ CARD_COLOR_VALUES = {
     "green": 0x10B981,
     "blue": 0x3B82F6,
 }
+# Snapshot keys whose entries identify the accounts/groups/users behind an alert,
+# in display-priority order. Collectors cap each list at 10 entries.
+TARGET_SNAPSHOT_KEYS = (
+    "invalid_accounts",
+    "rate_limited_accounts",
+    "reauth_accounts",
+    "full_accounts",
+    "top_capacity_accounts",
+    "low_quota_accounts",
+    "unhealthy_platform_keys",
+    "expiring_platform_keys",
+    "full_groups",
+    "unhealthy_groups",
+    "problem_accounts",
+    "problem_groups",
+    "unhealthy_users",
+    "low_users",
+)
+MAX_TARGET_LABELS = 5
 
 DEFAULT_FEISHU_CARD_TEMPLATE: dict[str, object] = {
     "config": {"wide_screen_mode": True},
@@ -97,6 +116,10 @@ DEFAULT_FEISHU_CARD_TEMPLATE: dict[str, object] = {
                 {
                     "is_short": True,
                     "text": {"tag": "lark_md", "content": "**范围**\n${signal.scope_label}"},
+                },
+                {
+                    "is_short": True,
+                    "text": {"tag": "lark_md", "content": "**对象**\n${signal.targets_label}"},
                 },
             ],
         },
@@ -154,6 +177,38 @@ def _alert_color(
     return "blue"
 
 
+def extract_target_labels(snapshot: dict | None) -> list[str]:
+    """Collect the account/group/user names an alert sample matched on."""
+    if not isinstance(snapshot, dict):
+        return []
+    labels: list[str] = []
+    seen: set[str] = set()
+    for key in TARGET_SNAPSHOT_KEYS:
+        items = snapshot.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("name") or item.get("email") or item.get("id")
+            if label in (None, ""):
+                continue
+            text = str(label)
+            if text in seen:
+                continue
+            seen.add(text)
+            labels.append(text)
+    return labels
+
+
+def format_target_labels(labels: list[str], max_items: int = MAX_TARGET_LABELS) -> str:
+    shown = labels[:max_items]
+    text = "、".join(shown)
+    if len(labels) > len(shown):
+        text += f" 等{len(labels)}个"
+    return text
+
+
 def _format_text(message: NotificationMessage) -> str:
     payload = build_notification_payload(message)
     alert = payload["alert"]
@@ -167,6 +222,8 @@ def _format_text(message: NotificationMessage) -> str:
         lines.append(f"value={signal['value']}")
     if signal.get("scope_label"):
         lines.append(f"scope={signal['scope_label']}")
+    if signal.get("targets_label"):
+        lines.append(f"targets={signal['targets_label']}")
     return "\n".join(lines)
 
 
@@ -195,6 +252,8 @@ def _card_context(message: NotificationMessage) -> dict[str, object]:
         fields.append(("当前值", _display_value(signal.get("value"))))
     if signal.get("scope_label"):
         fields.append(("范围", _display_value(signal.get("scope_label"))))
+    if signal.get("targets_label"):
+        fields.append(("对象", _display_value(signal.get("targets_label"))))
     return {
         "payload": payload,
         "title": _display_value(alert.get("title")),
@@ -251,6 +310,12 @@ def build_notification_payload(message: NotificationMessage) -> dict[str, object
             signal_payload["scope_key"] = snapshot["scope_key"]
         if "scope_label" in snapshot:
             signal_payload["scope_label"] = snapshot["scope_label"]
+        if not snapshot.get("scope_label"):
+            data = snapshot.get("data")
+            targets = extract_target_labels(data if isinstance(data, dict) else None)
+            if targets:
+                signal_payload["targets"] = targets
+                signal_payload["targets_label"] = format_target_labels(targets)
     return {
         "alert": {
             "status": status,
