@@ -153,22 +153,7 @@ class Sub2APINotificationCollectors:
         return _count_sample(needs_reauth, accounts, "reauth_accounts")
 
     def account_capacity_high(self, _: NotificationRule) -> CollectorSample | None:
-        accounts = self._accounts()
-        percentages: list[float] = []
-        for account in accounts:
-            capacity = _account_capacity(account)
-            if capacity is not None:
-                used, limit = capacity
-                percentages.append(used / limit * 100)
-        if not percentages:
-            raise CollectorNoData("account capacity fields are missing from account data")
-        return CollectorSample(
-            value=max(percentages),
-            snapshot={
-                "max_capacity_percent": max(percentages),
-                "account_count": len(accounts),
-            },
-        )
+        return account_capacity_high_sample(self._accounts())
 
     def account_capacity_full(self, _: NotificationRule) -> CollectorSample | None:
         accounts = self._accounts()
@@ -229,15 +214,7 @@ class Sub2APINotificationCollectors:
         )
 
     def account_quota_low(self, _: NotificationRule) -> CollectorSample | None:
-        accounts = self._accounts()
-        values = [_quota_remaining_percent(account) for account in accounts]
-        remaining = [value for value in values if value is not None]
-        if not remaining:
-            raise CollectorNoData("quota or account usage percentage fields are missing from account data")
-        return CollectorSample(
-            value=min(remaining),
-            snapshot={"min_quota_remaining": min(remaining), "account_count": len(accounts)},
-        )
+        return account_quota_low_sample(self._accounts())
 
     def platform_key_health(self, _: NotificationRule) -> CollectorSample | None:
         accounts = [
@@ -257,19 +234,7 @@ class Sub2APINotificationCollectors:
         return self.account_quota_low(rule)
 
     def platform_key_expiry(self, _: NotificationRule) -> CollectorSample | None:
-        accounts = self._accounts()
-        today = date.today()
-        days: list[float] = []
-        for account in accounts:
-            expires = _date_value(account, "raw.expires_at", "expires_at")
-            if expires is not None:
-                days.append(float((expires - today).days))
-        if not days:
-            raise CollectorNoData("expires_at fields are missing from platform key account data")
-        return CollectorSample(
-            value=min(days),
-            snapshot={"min_days_until_expiry": min(days), "expiring_account_count": len(days)},
-        )
+        return platform_key_expiry_sample(self._accounts(), today=date.today())
 
     def subscription_usage(self, _: NotificationRule) -> CollectorSample | None:
         stats = self._usage_for_day(date.today())
@@ -416,6 +381,79 @@ def _count_sample(matches: list[dict], source: list[dict], key: str) -> Collecto
             key: [_entity_snapshot(item) for item in matches[:10]],
             "matched_count": len(matches),
             "total_count": len(source),
+        },
+    )
+
+
+def account_capacity_high_sample(accounts: list[dict]) -> CollectorSample:
+    measured: list[tuple[dict, float]] = []
+    for account in accounts:
+        capacity = _account_capacity(account)
+        if capacity is not None:
+            used, limit = capacity
+            measured.append((account, used / limit * 100))
+    if not measured:
+        raise CollectorNoData("account capacity fields are missing from account data")
+    max_percent = max(percent for _, percent in measured)
+    top_accounts = [
+        {**_entity_snapshot(account), "capacity_percent": percent}
+        for account, percent in measured
+        if percent == max_percent
+    ]
+    return CollectorSample(
+        value=max_percent,
+        snapshot={
+            "max_capacity_percent": max_percent,
+            "account_count": len(accounts),
+            "top_capacity_accounts": top_accounts[:10],
+        },
+    )
+
+
+def account_quota_low_sample(accounts: list[dict]) -> CollectorSample:
+    measured: list[tuple[dict, float]] = []
+    for account in accounts:
+        remaining = _quota_remaining_percent(account)
+        if remaining is not None:
+            measured.append((account, remaining))
+    if not measured:
+        raise CollectorNoData("quota or account usage percentage fields are missing from account data")
+    min_remaining = min(remaining for _, remaining in measured)
+    low_accounts = [
+        {**_entity_snapshot(account), "quota_remaining_percent": remaining}
+        for account, remaining in measured
+        if remaining == min_remaining
+    ]
+    return CollectorSample(
+        value=min_remaining,
+        snapshot={
+            "min_quota_remaining": min_remaining,
+            "account_count": len(accounts),
+            "low_quota_accounts": low_accounts[:10],
+        },
+    )
+
+
+def platform_key_expiry_sample(accounts: list[dict], *, today: date) -> CollectorSample:
+    measured: list[tuple[dict, float]] = []
+    for account in accounts:
+        expires = _date_value(account, "raw.expires_at", "expires_at")
+        if expires is not None:
+            measured.append((account, float((expires - today).days)))
+    if not measured:
+        raise CollectorNoData("expires_at fields are missing from platform key account data")
+    min_days = min(days for _, days in measured)
+    expiring = [
+        {**_entity_snapshot(account), "days_until_expiry": days}
+        for account, days in measured
+        if days == min_days
+    ]
+    return CollectorSample(
+        value=min_days,
+        snapshot={
+            "min_days_until_expiry": min_days,
+            "expiring_account_count": len(measured),
+            "expiring_platform_keys": expiring[:10],
         },
     )
 

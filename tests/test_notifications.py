@@ -577,6 +577,25 @@ def test_notification_payload_uses_abstract_alert_shape() -> None:
     assert payload["snapshot"]["data"]["low_users"][0]["name"] == "idle@example.com"
 
 
+def test_notification_payload_includes_target_names_for_account_alerts() -> None:
+    payload = build_notification_payload(_account_group_message())
+
+    assert payload["signal"]["targets"] == ["主站 OpenAI OAuth 1", "主站 Landing 池"]
+    assert payload["signal"]["targets_label"] == "主站 OpenAI OAuth 1、主站 Landing 池"
+
+
+def test_notification_payload_omits_targets_for_scoped_alerts() -> None:
+    message = _balance_message()
+    message.snapshot["scope_key"] = "user:u2"
+    message.snapshot["scope_label"] = "idle@example.com"
+
+    payload = build_notification_payload(message)
+
+    assert payload["signal"]["scope_label"] == "idle@example.com"
+    assert "targets" not in payload["signal"]
+    assert "targets_label" not in payload["signal"]
+
+
 def test_provider_generic_signs_with_hmac_when_secret_present() -> None:
     receiver = NotificationWebhook(
         id="g",
@@ -792,6 +811,31 @@ def test_provider_wecom_uses_msgtype_text() -> None:
     assert body["msgtype"] == "markdown"
     assert "告警触发 - 用户余额低" in body["markdown"]["content"]
     assert "**状态**：告警触发" in body["markdown"]["content"]
+
+
+def test_provider_wecom_lists_account_and_group_names() -> None:
+    receiver = NotificationWebhook(
+        id="w",
+        enabled=True,
+        provider=WebhookProvider.wecom,
+        url="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x",
+    )
+    prepared = build_request(receiver, _account_group_message())
+    content = json.loads(prepared.body)["markdown"]["content"]
+    assert "**对象**：主站 OpenAI OAuth 1、主站 Landing 池" in content
+
+
+def test_provider_feishu_default_card_lists_target_names() -> None:
+    receiver = NotificationWebhook(
+        id="f",
+        enabled=True,
+        provider=WebhookProvider.feishu,
+        url="https://open.feishu.cn/open-apis/bot/v2/hook/x",
+    )
+    prepared = build_request(receiver, _account_group_message())
+    fields = json.loads(prepared.body)["card"]["elements"][0]["fields"]
+    contents = [field["text"]["content"] for field in fields]
+    assert "**对象**\n主站 OpenAI OAuth 1、主站 Landing 池" in contents
 
 
 def test_provider_feishu_includes_sign_when_secret_present() -> None:

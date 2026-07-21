@@ -24,6 +24,8 @@ from app.models.operational_data import OperationalMetricSample
 from app.services.notification_delivery import (
     DeliveryOutcome,
     NotificationDeliveryService,
+    extract_target_labels,
+    format_target_labels,
 )
 from app.services.notification_evaluator import (
     evaluate_rule,
@@ -297,11 +299,13 @@ class NotificationService:
         return moment - observed_at > timedelta(seconds=expiration)
 
     def _summary_for(self, decision: RuleDecision, rule: NotificationRule) -> str:
-        target = (
-            f" scope={decision.next_state.scope_label}"
-            if decision.next_state.scope_label
-            else ""
-        )
+        target = ""
+        if decision.next_state.scope_label:
+            target = f" scope={decision.next_state.scope_label}"
+        elif decision.sample is not None:
+            labels = extract_target_labels(decision.sample.snapshot)
+            if labels:
+                target = f" [{format_target_labels(labels)}]"
         if decision.action == NotificationRuleAction.recover:
             return f"Rule '{rule.name or rule.signal_key}'{target} recovered: {decision.reason}"
         return f"Rule '{rule.name or rule.signal_key}'{target} firing: {decision.reason}"

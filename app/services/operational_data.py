@@ -20,20 +20,21 @@ from app.services.notification_collector import (
     GroupAlertWhitelist,
     CollectorNoData,
     _account_capacity,
+    account_capacity_high_sample,
+    account_quota_low_sample,
     group_matches_alert_whitelist,
     normalize_account_alert_whitelist,
     normalize_group_alert_whitelist,
+    platform_key_expiry_sample,
     _capacity_count_sample,
     _capacity_is_full,
     _count_sample,
     _cost_spike_sample,
-    _date_value,
     _entity_snapshot,
     _group_name_for_account,
     is_account_invalid_for_alert,
     _limit_usage_percent,
     _number,
-    _quota_remaining_percent,
     _status_key,
     _usage_log_error_spike_sample,
     _usage_snapshot,
@@ -631,16 +632,21 @@ class OperationalDataCollector:
             )
             add("account_rate_limited", lambda: _account_rate_limited_sample(accounts))
             add("account_reauth_needed", lambda: _account_reauth_needed_sample(accounts))
-            add("account_capacity_high", lambda: _account_capacity_high_sample(accounts))
+            add("account_capacity_high", lambda: account_capacity_high_sample(accounts))
             add("account_capacity_full", lambda: _account_capacity_full_sample(accounts))
             add(
                 "group_capacity_full",
                 lambda: _group_capacity_full_sample(accounts, group_whitelist=group_whitelist),
             )
-            add("account_quota_low", lambda: _account_quota_low_sample(accounts))
+            add("account_quota_low", lambda: account_quota_low_sample(accounts))
             add("platform_key_health", lambda: _platform_key_health_sample(accounts))
-            add("platform_key_quota", lambda: _account_quota_low_sample(accounts))
-            add("platform_key_expiry", lambda: _platform_key_expiry_sample(accounts))
+            add("platform_key_quota", lambda: account_quota_low_sample(accounts))
+            add(
+                "platform_key_expiry",
+                lambda: platform_key_expiry_sample(
+                    accounts, today=observed_at.astimezone(timezone.utc).date()
+                ),
+            )
 
         if users is not None:
             add_many("user_balance_low", lambda: _user_balance_low_samples(users))
@@ -1136,24 +1142,6 @@ def _account_reauth_needed_sample(accounts: list[dict[str, Any]]) -> CollectorSa
     return _count_sample(needs_reauth, accounts, "reauth_accounts")
 
 
-def _account_capacity_high_sample(accounts: list[dict[str, Any]]) -> CollectorSample:
-    percentages: list[float] = []
-    for account in accounts:
-        capacity = _account_capacity(account)
-        if capacity is not None:
-            used, limit = capacity
-            percentages.append(used / limit * 100)
-    if not percentages:
-        raise CollectorNoData("account capacity fields are missing from account data")
-    return CollectorSample(
-        value=max(percentages),
-        snapshot={
-            "max_capacity_percent": max(percentages),
-            "account_count": len(accounts),
-        },
-    )
-
-
 def _account_capacity_full_sample(accounts: list[dict[str, Any]]) -> CollectorSample:
     measurable: list[tuple[dict[str, Any], float, float]] = []
     full: list[tuple[dict[str, Any], float, float]] = []
@@ -1222,17 +1210,6 @@ def _group_capacity_full_sample(
     )
 
 
-def _account_quota_low_sample(accounts: list[dict[str, Any]]) -> CollectorSample:
-    values = [_quota_remaining_percent(account) for account in accounts]
-    remaining = [value for value in values if value is not None]
-    if not remaining:
-        raise CollectorNoData("quota or account usage percentage fields are missing")
-    return CollectorSample(
-        value=min(remaining),
-        snapshot={"min_quota_remaining": min(remaining), "account_count": len(accounts)},
-    )
-
-
 def _platform_key_health_sample(accounts: list[dict[str, Any]]) -> CollectorSample:
     platform_keys = [
         account
@@ -1247,21 +1224,6 @@ def _platform_key_health_sample(accounts: list[dict[str, Any]]) -> CollectorSamp
         and account.get("is_available") is not True
     ]
     return _count_sample(unhealthy, platform_keys, "unhealthy_platform_keys")
-
-
-def _platform_key_expiry_sample(accounts: list[dict[str, Any]]) -> CollectorSample:
-    today = datetime.now(timezone.utc).date()
-    days: list[float] = []
-    for account in accounts:
-        expires = _date_value(account, "raw.expires_at", "expires_at")
-        if expires is not None:
-            days.append(float((expires - today).days))
-    if not days:
-        raise CollectorNoData("expires_at fields are missing from platform key account data")
-    return CollectorSample(
-        value=min(days),
-        snapshot={"min_days_until_expiry": min(days), "expiring_account_count": len(days)},
-    )
 
 
 def _subscription_usage_sample(stats: dict[str, Any]) -> CollectorSample:
