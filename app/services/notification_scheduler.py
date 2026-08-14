@@ -38,11 +38,13 @@ class NotificationScheduler:
         cadence_seconds: int,
         enabled_provider: Callable[[], bool] | None = None,
         cadence_provider: Callable[[], int] | None = None,
+        ready_event: Event | None = None,
     ) -> None:
         self.notification_service = notification_service
         self.cadence_seconds = cadence_seconds
         self.enabled_provider = enabled_provider or (lambda: True)
         self.cadence_provider = cadence_provider
+        self._ready_event = ready_event
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._tick_count = 0
@@ -105,8 +107,22 @@ class NotificationScheduler:
             source_statuses=source_statuses or [],
         )
 
+    def _await_ready(self) -> bool:
+        """Block until the startup warmup opens the gate, or the scheduler is stopped."""
+        if self._ready_event is None:
+            return True
+        while not self._ready_event.wait(0.5):
+            if self._stop_event.is_set():
+                return False
+        return True
+
     def _run(self) -> None:
-        last_tick_at = 0.0
+        if not self._await_ready():
+            return
+        # A gated scheduler is released by the startup warmup, which has just collected a
+        # full set of samples. Counting that as tick zero keeps boot down to one upstream
+        # sweep instead of immediately collecting the same data a second time.
+        last_tick_at = time.monotonic() if self._ready_event is not None else 0.0
         while not self._stop_event.is_set():
             next_tick_at = last_tick_at + self._cadence_seconds()
             wait_seconds = min(1.0, max(0.0, next_tick_at - time.monotonic()))

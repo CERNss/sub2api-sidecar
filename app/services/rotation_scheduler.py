@@ -35,10 +35,12 @@ class AutoRotationScheduler:
         rotation_service: RotationService,
         cadence_seconds: int,
         enabled_provider: Callable[[], bool] | None = None,
+        ready_event: Event | None = None,
     ) -> None:
         self.rotation_service = rotation_service
         self.cadence_seconds = cadence_seconds
         self.enabled_provider = enabled_provider or (lambda: True)
+        self._ready_event = ready_event
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._tick_count = 0
@@ -96,7 +98,22 @@ class AutoRotationScheduler:
             last_failed_count=self._last_failed_count,
         )
 
+    def _await_ready(self) -> bool:
+        """Block until the startup warmup opens the gate, or the scheduler is stopped.
+
+        Rotation decisions read the operational snapshots the warmup collects, so the
+        startup tick must not run against stale data.
+        """
+        if self._ready_event is None:
+            return True
+        while not self._ready_event.wait(0.5):
+            if self._stop_event.is_set():
+                return False
+        return True
+
     def _run(self) -> None:
+        if not self._await_ready():
+            return
         while not self._stop_event.is_set():
             self._tick_once()
             if self._stop_event.wait(self.cadence_seconds):

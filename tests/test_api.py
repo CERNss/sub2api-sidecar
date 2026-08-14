@@ -13,6 +13,7 @@ import requests
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import started_test_client
 from app.auth import ACCESS_KEY_COOKIE_NAME
 from app.clients.sub2api import Sub2APIClient
 from app.config import Sub2APIProvisioningDefaults, get_settings
@@ -2905,7 +2906,7 @@ def test_provision_apikey_start_requires_auth(client) -> None:
 def test_provision_start_supports_header_auth(client, auth_headers) -> None:
     access_key = login(client)["access_key"]
 
-    with TestClient(main.app) as stateless_client:
+    with started_test_client() as stateless_client:
         with patch.object(requests.Session, "request", new=fake_sub2api_request):
             response = stateless_client.post(
                 "/provision/start",
@@ -2927,7 +2928,7 @@ def test_oauth_complete_from_pasted_callback_url_after_cache_reset(client) -> No
 
         clear_caches()
 
-        with TestClient(main.app) as restarted_client:
+        with started_test_client() as restarted_client:
             login(restarted_client)
             callback_response = restarted_client.post(
                 "/provision/oauth/complete",
@@ -5356,7 +5357,7 @@ def test_token_apikey_api_requires_auth(client) -> None:
 def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) -> None:
     backend = FakeRotationSub2API()
 
-    with TestClient(main.app) as managed_client:
+    with started_test_client() as managed_client:
         login(managed_client)
         main.get_flow_store().save_provisioning_runtime_settings(
             ProvisioningRuntimeSettings(assignment_mode=AssignmentMode.managed_pool)
@@ -5409,7 +5410,7 @@ def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) 
 def test_provision_start_uses_first_landing_pool_group_for_new_user(client) -> None:
     backend = FakeRotationSub2API()
 
-    with TestClient(main.app) as managed_client:
+    with started_test_client() as managed_client:
         login(managed_client)
         store = main.get_flow_store()
         store.upsert_rotation_pool_group(
@@ -5479,7 +5480,7 @@ def test_provision_start_prefers_existing_email_group_over_landing_pool(client) 
         }
     )
 
-    with TestClient(main.app) as managed_client:
+    with started_test_client() as managed_client:
         login(managed_client)
         main.get_flow_store().upsert_rotation_pool_group(
             RotationPoolGroup(
@@ -5797,11 +5798,58 @@ def test_app_startup_refreshes_operational_data_before_auto_rotation(
     monkeypatch.setattr(main, "get_rotation_service", fake_rotation_service)
 
     with TestClient(main.app):
-        deadline = time.monotonic() + 1
+        # The refresh now runs on the startup warmup thread, so give the ordering a few
+        # seconds instead of assuming it already happened before startup returned.
+        deadline = time.monotonic() + 5
         while calls != ["collect", "rotate"] and time.monotonic() < deadline:
             time.sleep(0.01)
 
     assert calls[:2] == ["collect", "rotate"]
+
+
+def test_app_startup_does_not_block_on_slow_operational_refresh(
+    app_env, monkeypatch
+) -> None:
+    refresh_started = threading.Event()
+    refresh_finished = threading.Event()
+    release_refresh = threading.Event()
+
+    class _BlockingNotificationService:
+        def __init__(self) -> None:
+            self.operational_data_collector = None
+            self.last_collection_result = None
+
+        def refresh_samples(self, *, now=None):
+            refresh_started.set()
+            release_refresh.wait(timeout=5)
+            refresh_finished.set()
+
+        def operational_data_runtime_settings(self):
+            return OperationalDataRuntimeSettings(enabled=True)
+
+    def fake_notification_service():
+        return _BlockingNotificationService()
+
+    fake_notification_service.cache_clear = lambda: None
+    main.get_notification_service.cache_clear()
+    monkeypatch.setattr(main, "get_notification_service", fake_notification_service)
+
+    try:
+        with TestClient(main.app) as test_client:
+            assert refresh_started.wait(timeout=5)
+            # Startup already returned while the slow refresh is still in flight. Uvicorn
+            # binds its socket only after this point, so a blocking refresh would leave
+            # port 8000 closed and every proxied request answered with 502.
+            assert refresh_finished.is_set() is False
+            assert test_client.get("/ping").status_code == 200
+            # Schedulers are alive for the status endpoints, but auto-rotation still
+            # holds its first tick until the warmup has fresh snapshots to rotate on.
+            rotation_snapshot = main.app.state.auto_rotation_scheduler.snapshot()
+            assert rotation_snapshot.running is True
+            assert rotation_snapshot.tick_count == 0
+            release_refresh.set()
+    finally:
+        release_refresh.set()
 
 
 def test_manual_rotation_success_skip_and_failure(client) -> None:
@@ -5973,7 +6021,7 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     backend.user_api_keys[202] = [{"id": 2, "usage_5h": 1.0, "usage_1d": 10.0, "usage_7d": 20.0}]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6055,7 +6103,7 @@ def test_auto_rotation_execution_forces_refresh_before_using_snapshots(client) -
     call_order: list[str] = []
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6118,7 +6166,7 @@ def test_auto_rotation_refreshes_usage_segments_before_execution(client) -> None
     backend.users[0]["group_name"] = "rotation-high"
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6182,7 +6230,7 @@ def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -
     backend.user_api_keys[202] = [{"id": 2, "usage_5h": 0.0, "usage_1d": 0.0, "usage_7d": 0.0}]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6258,7 +6306,7 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     add_available_account_for_group(backend, 22)
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6368,7 +6416,7 @@ def test_auto_rotation_fails_when_target_group_missing_upstream(client) -> None:
     add_available_account_for_group(backend, 99)
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6466,7 +6514,7 @@ def test_auto_rotation_fails_when_target_group_has_no_upstream_accounts(client) 
     )
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6554,7 +6602,7 @@ def test_auto_rotation_fails_when_target_group_accounts_are_unschedulable(client
     ]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6636,7 +6684,7 @@ def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 8.0, "usage_1d": 80.0, "usage_7d": 200.0}]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config()
@@ -6693,7 +6741,7 @@ def test_manual_and_preview_run_records_reject_rollback(client, monkeypatch) -> 
     backend = FakeRotationSub2API()
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config(usage_window=AutoRotationUsageWindow.window_1d)
@@ -6756,7 +6804,7 @@ def test_auto_rotation_dead_band_skips_when_spread_within_epsilon(
     backend.user_api_keys[202] = [{"id": 2, "usage_5h": 4.0, "usage_1d": 40.0, "usage_7d": 80.0}]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config(imbalance_epsilon=10.0)
@@ -6825,7 +6873,7 @@ def test_auto_rotation_improvement_delta_blocks_marginal_swap(
     backend.user_api_keys[202] = [{"id": 2, "usage_5h": 0.0, "usage_1d": 0.0, "usage_7d": 0.0}]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config(improvement_delta=10.0)
@@ -6892,7 +6940,7 @@ def test_auto_rotation_dry_run_syncs_current_upstream_assignments_without_mutati
     add_available_account_for_group(backend, 22)
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config(usage_window=AutoRotationUsageWindow.window_1d)
@@ -6953,7 +7001,7 @@ def test_auto_rotation_runtime_config_can_be_saved_and_controls_execution(
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 10.0, "usage_7d": 20.0}]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_operational_snapshots(backend)
@@ -7059,7 +7107,7 @@ def test_auto_rotation_auto_assigns_new_users_only_within_schedule_range(
     ]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_operational_snapshots(backend)
@@ -7147,7 +7195,7 @@ def test_auto_rotation_empty_schedule_range_does_not_auto_assign_new_users(
     ]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_operational_snapshots(backend)
@@ -7210,7 +7258,7 @@ def test_auto_rotation_skips_ambiguous_and_outside_pool_current_upstream_users(
     ]
     clear_caches()
 
-    with TestClient(main.app) as auto_client:
+    with started_test_client() as auto_client:
         login(auto_client)
         store = main.get_flow_store()
         save_auto_rotation_config(usage_thresholds=(10.0,))

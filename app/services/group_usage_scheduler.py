@@ -30,10 +30,12 @@ class GroupUsageScheduler:
         group_usage_service: GroupUsageService,
         cadence_seconds: int,
         enabled_provider: Callable[[], bool] | None = None,
+        ready_event: Event | None = None,
     ) -> None:
         self.group_usage_service = group_usage_service
         self.cadence_seconds = cadence_seconds
         self.enabled_provider = enabled_provider or (lambda: True)
+        self._ready_event = ready_event
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._tick_count = 0
@@ -87,7 +89,18 @@ class GroupUsageScheduler:
             last_window_counts=self._last_window_counts,
         )
 
+    def _await_ready(self) -> bool:
+        """Block until the startup warmup opens the gate, or the scheduler is stopped."""
+        if self._ready_event is None:
+            return True
+        while not self._ready_event.wait(0.5):
+            if self._stop_event.is_set():
+                return False
+        return True
+
     def _run(self) -> None:
+        if not self._await_ready():
+            return
         while not self._stop_event.wait(self.cadence_seconds):
             self._tick_once()
 

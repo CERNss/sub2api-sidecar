@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -213,48 +214,48 @@ async def lifespan(app_instance: FastAPI):
             return stored
         return OperationalDataRuntimeSettings()
 
+    # Uvicorn binds the listening socket only after lifespan startup returns, so anything
+    # slow here keeps port 8000 closed and everything in front of it answering 502. The
+    # initial operational refresh walks the full upstream usage log and can take minutes,
+    # so it runs on a background warmup thread. Schedulers whose work reads those
+    # snapshots start right away but hold their first tick until the warmup opens this
+    # gate, which keeps auto-rotation off stale data without delaying the port binding.
+    warmup_completed = Event()
+    app_instance.state.startup_warmup_completed = warmup_completed
     notification_service = get_notification_service()
     notification_scheduler = NotificationScheduler(
         notification_service=notification_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
         enabled_provider=lambda: operational_runtime_settings().enabled,
         cadence_provider=lambda: operational_runtime_settings().collect_interval_seconds,
+        ready_event=warmup_completed,
     )
     app_instance.state.notification_scheduler = notification_scheduler
-    try:
-        notification_service.refresh_samples(now=datetime.now(timezone.utc))
-    except Exception:
-        logger.exception("Initial operational data refresh failed")
+    notification_scheduler.start()
     usage_segmentation_service = get_usage_segmentation_service()
-    try:
-        usage_segmentation_service.refresh(now=datetime.now(timezone.utc))
-    except Exception:
-        logger.exception("Initial usage segmentation refresh failed")
     group_usage_service = get_group_usage_service()
-    try:
-        group_usage_service.refresh(now=datetime.now(timezone.utc))
-    except Exception:
-        logger.exception("Initial group usage refresh failed")
     usage_segmentation_scheduler = UsageSegmentationScheduler(
         segmentation_service=usage_segmentation_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
         enabled_provider=lambda: operational_runtime_settings().enabled,
+        ready_event=warmup_completed,
     )
     app_instance.state.usage_segmentation_scheduler = usage_segmentation_scheduler
+    usage_segmentation_scheduler.start()
     group_usage_scheduler = GroupUsageScheduler(
         group_usage_service=group_usage_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
         enabled_provider=lambda: operational_runtime_settings().enabled,
+        ready_event=warmup_completed,
     )
     app_instance.state.group_usage_scheduler = group_usage_scheduler
-    usage_segmentation_scheduler.start()
     group_usage_scheduler.start()
-    notification_scheduler.start()
     rotation_service = get_rotation_service()
     rotation_scheduler = AutoRotationScheduler(
         rotation_service=rotation_service,
         cadence_seconds=OPERATIONAL_RUNTIME_INTERVAL_SECONDS,
         enabled_provider=lambda: rotation_service.get_auto_rotation_config().enabled,
+        ready_event=warmup_completed,
     )
     app_instance.state.auto_rotation_scheduler = rotation_scheduler
     rotation_scheduler.start()
@@ -284,9 +285,43 @@ async def lifespan(app_instance: FastAPI):
     )
     app_instance.state.account_health_scheduler = account_health_scheduler
     account_health_scheduler.start()
+
+    shutdown_requested = Event()
+
+    def run_startup_warmup() -> None:
+        initial_refreshes = (
+            ("operational data", notification_service.refresh_samples),
+            ("usage segmentation", usage_segmentation_service.refresh),
+            ("group usage", group_usage_service.refresh),
+        )
+        try:
+            for label, refresh in initial_refreshes:
+                if shutdown_requested.is_set():
+                    logger.info(
+                        "Startup warmup aborted | reason=shutdown pending_refresh=%s", label
+                    )
+                    return
+                try:
+                    refresh(now=datetime.now(timezone.utc))
+                except Exception:
+                    logger.exception("Initial %s refresh failed", label)
+            logger.info("Startup warmup completed | data_schedulers=released")
+        finally:
+            # Opened in a finally so an unexpected failure cannot strand the schedulers
+            # behind the gate, but never during shutdown: those threads notice the stop
+            # event on their own within one gate poll.
+            if not shutdown_requested.is_set():
+                warmup_completed.set()
+
+    warmup_thread = Thread(target=run_startup_warmup, name="startup-warmup", daemon=True)
+    warmup_thread.start()
+    logger.info("Startup warmup dispatched to background thread | serving=immediately")
+
     try:
         yield
     finally:
+        shutdown_requested.set()
+        warmup_thread.join(timeout=2)
         account_health_scheduler.stop()
         proxy_health_scheduler.stop()
         rotation_scheduler.stop()

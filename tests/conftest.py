@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import sys
 import os
+import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 from urllib.parse import quote
 
 import psycopg
@@ -141,7 +144,30 @@ def app_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     clear_app_caches()
 
 
+def await_startup_settled(timeout: float = 30.0) -> None:
+    """Wait until the background startup work is done.
+
+    Startup no longer blocks on the initial data refresh, so tests have to wait for the
+    warmup thread and the auto-rotation startup tick here instead. Otherwise those land
+    in the middle of a test body and mutate the state it is asserting on.
+    """
+    assert main.app.state.startup_warmup_completed.wait(timeout=timeout)
+    scheduler = main.app.state.auto_rotation_scheduler
+    deadline = time.monotonic() + timeout
+    while scheduler.snapshot().last_tick_started_at is None:
+        assert time.monotonic() < deadline, "Auto-rotation startup tick did not run"
+        time.sleep(0.01)
+
+
+@contextmanager
+def started_test_client() -> Iterator[TestClient]:
+    """TestClient whose background startup work has finished before the body runs."""
+    with TestClient(main.app) as test_client:
+        await_startup_settled()
+        yield test_client
+
+
 @pytest.fixture
 def client(app_env: dict[str, str]) -> TestClient:
-    with TestClient(main.app) as test_client:
+    with started_test_client() as test_client:
         yield test_client
