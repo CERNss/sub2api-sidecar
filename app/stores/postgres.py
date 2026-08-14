@@ -298,14 +298,16 @@ class PostgresFlowStore(FlowStore):
                     group_id_key,
                     priority,
                     group_name,
+                    platform,
                     is_exclusive,
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(pool_kind, group_id_key) DO UPDATE SET
                     priority = excluded.priority,
                     group_name = excluded.group_name,
+                    platform = excluded.platform,
                     is_exclusive = excluded.is_exclusive,
                     payload = excluded.payload,
                     updated_at = excluded.updated_at
@@ -315,6 +317,7 @@ class PostgresFlowStore(FlowStore):
                     self._serialize_key(group.group_id),
                     group.priority,
                     group.group_name,
+                    group.platform,
                     1 if group.is_exclusive else 0,
                     payload,
                     group.created_at.isoformat(),
@@ -778,6 +781,7 @@ class PostgresFlowStore(FlowStore):
                 """
                 INSERT INTO user_group_assignments (
                     user_id_key,
+                    platform,
                     email,
                     group_id_key,
                     assignment_mode,
@@ -786,8 +790,8 @@ class PostgresFlowStore(FlowStore):
                     payload,
                     created_at,
                     updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT(user_id_key) DO UPDATE SET
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(user_id_key, platform) DO UPDATE SET
                     email = excluded.email,
                     group_id_key = excluded.group_id_key,
                     assignment_mode = excluded.assignment_mode,
@@ -798,6 +802,7 @@ class PostgresFlowStore(FlowStore):
                 """,
                 (
                     self._serialize_key(assignment.user_id),
+                    assignment.platform,
                     assignment.email,
                     self._serialize_key(assignment.current_group_id),
                     assignment.assignment_mode.value,
@@ -811,23 +816,40 @@ class PostgresFlowStore(FlowStore):
             connection.commit()
         return assignment
 
-    def get_user_assignment(self, user_id: Any) -> UserGroupAssignment | None:
+    def get_user_assignment(
+        self,
+        user_id: Any,
+        # Transitional default: callers that predate the per-platform binding still call
+        # this with a user id only. The orchestration layer should pass platform explicitly.
+        platform: str = "openai",
+    ) -> UserGroupAssignment | None:
         return self._load_single_model(
             """
             SELECT payload FROM user_group_assignments
-            WHERE user_id_key = %s
+            WHERE user_id_key = %s AND platform = %s
             """,
-            (self._serialize_key(user_id),),
+            (self._serialize_key(user_id), platform),
             UserGroupAssignment,
         )
 
-    def list_user_assignments(self) -> list[UserGroupAssignment]:
+    def list_user_assignments(self, user_id: Any | None = None) -> list[UserGroupAssignment]:
+        """List assignments; with `user_id` set, every platform binding of that user."""
+        if user_id is None:
+            return self._load_many_models(
+                """
+                SELECT payload FROM user_group_assignments
+                ORDER BY updated_at DESC, created_at DESC
+                """,
+                (),
+                UserGroupAssignment,
+            )
         return self._load_many_models(
             """
             SELECT payload FROM user_group_assignments
-            ORDER BY updated_at DESC, created_at DESC
+            WHERE user_id_key = %s
+            ORDER BY platform ASC
             """,
-            (),
+            (self._serialize_key(user_id),),
             UserGroupAssignment,
         )
 
@@ -1909,6 +1931,7 @@ class PostgresFlowStore(FlowStore):
                     group_id_key TEXT NOT NULL,
                     priority INTEGER NOT NULL,
                     group_name TEXT NOT NULL,
+                    platform TEXT,
                     is_exclusive INTEGER NOT NULL,
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -1916,6 +1939,11 @@ class PostgresFlowStore(FlowStore):
                     PRIMARY KEY (pool_kind, group_id_key)
                 )
                 """
+            )
+            # Pools are bucketed per platform, so the upstream platform string is kept in
+            # its own nullable column instead of only inside the JSON payload.
+            connection.execute(
+                "ALTER TABLE rotation_pool_groups ADD COLUMN IF NOT EXISTS platform TEXT"
             )
             connection.execute(
                 """
@@ -1948,10 +1976,18 @@ class PostgresFlowStore(FlowStore):
                 ON provision_events(flow_id, created_at ASC)
                 """
             )
+            # Assignments used to be one row per user (user_id_key PRIMARY KEY). A user
+            # now holds one dedicated group per platform, so a legacy table is dropped and
+            # rebuilt on the new (user_id_key, platform) key — the rows are rebuilt from
+            # upstream on the next sync.
+            self._drop_table_if_column_missing(
+                connection, "user_group_assignments", "platform"
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_group_assignments (
-                    user_id_key TEXT PRIMARY KEY,
+                    user_id_key TEXT NOT NULL,
+                    platform TEXT NOT NULL,
                     email TEXT NOT NULL,
                     group_id_key TEXT NOT NULL,
                     assignment_mode TEXT NOT NULL,
@@ -1959,7 +1995,8 @@ class PostgresFlowStore(FlowStore):
                     has_api_keys INTEGER,
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id_key, platform)
                 )
                 """
             )
@@ -2331,6 +2368,34 @@ class PostgresFlowStore(FlowStore):
                 """
             )
             connection.commit()
+
+    def _drop_table_if_column_missing(self, connection, table: str, column: str) -> None:
+        """Drop a table left over from an older, incompatible schema.
+
+        Used where the primary key itself changed shape: the table is rebuilt empty by the
+        CREATE TABLE that follows, and its rows are re-derived from upstream.
+        """
+        table_exists = connection.execute(
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_name = %s
+            """,
+            (table,),
+        ).fetchone()
+        if not table_exists:
+            return
+        column_exists = connection.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = %s
+              AND column_name = %s
+            """,
+            (table, column),
+        ).fetchone()
+        if column_exists:
+            return
+        connection.execute(f"DROP TABLE {table}")
 
     def _load_single_flow(self, query: str, params: tuple[Any, ...]) -> ProvisionFlow | None:
         return self._load_single_model(query, params, ProvisionFlow)

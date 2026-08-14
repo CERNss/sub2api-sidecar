@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import psycopg
 
 from app.models.auth import PersistedAuthSession
 from app.models.flow import AssignmentMode, FlowStatus, ProvisionEvent, ProvisionEventStatus, ProvisionEventType, ProvisionFlow
@@ -130,6 +133,7 @@ def test_postgres_store_persists_rotation_pool_assignments_and_events(app_env: d
     first_store.upsert_user_assignment(
         UserGroupAssignment(
             user_id=101,
+            platform="openai",
             email="rotate@example.com",
             current_group_id=11,
             current_group_name="rotation-low",
@@ -158,14 +162,261 @@ def test_postgres_store_persists_rotation_pool_assignments_and_events(app_env: d
 
     assert len(groups) == 1
     assert groups[0].group_id == "11"
+    assert groups[0].platform == "openai"
     assert second_store.get_rotation_pool_group(11) is not None
     assert second_store.get_rotation_pool_group("11") is not None
     second_store.delete_rotation_pool_group("11")
     assert second_store.get_rotation_pool_group(11) is None
     assert assignment is not None
     assert assignment.current_group_id == 11
+    assert assignment.platform == "openai"
     assert len(events) == 1
     assert events[0].target_group_id == 22
+
+
+def build_assignment(
+    *,
+    user_id: Any,
+    platform: str,
+    group_id: Any,
+    group_name: str,
+    email: str = "multi@example.com",
+) -> UserGroupAssignment:
+    now = datetime.now(timezone.utc)
+    return UserGroupAssignment(
+        user_id=user_id,
+        platform=platform,
+        email=email,
+        current_group_id=group_id,
+        current_group_name=group_name,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_postgres_store_keeps_one_assignment_per_user_and_platform(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    store = PostgresFlowStore(database_url)
+    store.upsert_user_assignment(
+        build_assignment(user_id=101, platform="openai", group_id=11, group_name="openai-low")
+    )
+    store.upsert_user_assignment(
+        build_assignment(user_id=101, platform="grok", group_id=22, group_name="grok-low")
+    )
+
+    reloaded = PostgresFlowStore(database_url)
+    openai_assignment = reloaded.get_user_assignment(101, "openai")
+    grok_assignment = reloaded.get_user_assignment(101, "grok")
+
+    assert openai_assignment is not None
+    assert grok_assignment is not None
+    assert openai_assignment.current_group_id == 11
+    assert openai_assignment.current_group_name == "openai-low"
+    assert grok_assignment.current_group_id == 22
+    assert grok_assignment.current_group_name == "grok-low"
+    assert reloaded.get_user_assignment(101, "gemini") is None
+    assert len(reloaded.list_user_assignments()) == 2
+
+
+def test_postgres_store_overwrites_assignment_for_same_user_and_platform(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    store = PostgresFlowStore(database_url)
+    store.upsert_user_assignment(
+        build_assignment(user_id=101, platform="openai", group_id=11, group_name="openai-low")
+    )
+    store.upsert_user_assignment(
+        build_assignment(user_id=101, platform="grok", group_id=22, group_name="grok-low")
+    )
+    store.upsert_user_assignment(
+        build_assignment(user_id=101, platform="openai", group_id=33, group_name="openai-high")
+    )
+
+    reloaded = PostgresFlowStore(database_url)
+    openai_assignment = reloaded.get_user_assignment(101, "openai")
+    grok_assignment = reloaded.get_user_assignment(101, "grok")
+
+    assert openai_assignment is not None
+    assert openai_assignment.current_group_id == 33
+    assert openai_assignment.current_group_name == "openai-high"
+    assert grok_assignment is not None
+    assert grok_assignment.current_group_id == 22
+    assert len(reloaded.list_user_assignments()) == 2
+
+
+def test_postgres_store_lists_assignments_per_user(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    store = PostgresFlowStore(database_url)
+    store.upsert_user_assignment(
+        build_assignment(user_id=101, platform="openai", group_id=11, group_name="openai-low")
+    )
+    store.upsert_user_assignment(
+        build_assignment(user_id=101, platform="grok", group_id=22, group_name="grok-low")
+    )
+    store.upsert_user_assignment(
+        build_assignment(
+            user_id=202,
+            platform="openai",
+            group_id=33,
+            group_name="openai-high",
+            email="other@example.com",
+        )
+    )
+
+    reloaded = PostgresFlowStore(database_url)
+    for_user = reloaded.list_user_assignments(101)
+    for_other_user = reloaded.list_user_assignments(202)
+
+    assert [assignment.platform for assignment in for_user] == ["grok", "openai"]
+    assert {assignment.current_group_id for assignment in for_user} == {11, 22}
+    assert [assignment.current_group_id for assignment in for_other_user] == [33]
+    assert len(reloaded.list_user_assignments()) == 3
+
+
+def test_postgres_store_defaults_assignment_platform_for_legacy_callers(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    store = PostgresFlowStore(database_url)
+    now = datetime.now(timezone.utc)
+    store.upsert_user_assignment(
+        UserGroupAssignment(
+            user_id=101,
+            email="legacy@example.com",
+            current_group_id=11,
+            current_group_name="openai-low",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    reloaded = PostgresFlowStore(database_url)
+    assignment = reloaded.get_user_assignment(101)
+
+    assert assignment is not None
+    assert assignment.platform == "openai"
+
+
+def test_postgres_store_rebuilds_legacy_assignment_table_without_platform(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("DROP TABLE IF EXISTS user_group_assignments")
+        connection.execute(
+            """
+            CREATE TABLE user_group_assignments (
+                user_id_key TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                group_id_key TEXT NOT NULL,
+                assignment_mode TEXT NOT NULL,
+                last_rotation_at TEXT,
+                has_api_keys INTEGER,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO user_group_assignments (
+                user_id_key, email, group_id_key, assignment_mode, payload, created_at, updated_at
+            ) VALUES ('101', 'legacy@example.com', '11', 'dedicated', '{}', 'x', 'x')
+            """
+        )
+
+    store = PostgresFlowStore(database_url)
+
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        columns = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'user_group_assignments'
+                """
+            ).fetchall()
+        }
+        primary_key_columns = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT attname FROM pg_index
+                JOIN pg_attribute ON attrelid = indrelid AND attnum = ANY(indkey)
+                WHERE indrelid = 'user_group_assignments'::regclass AND indisprimary
+                """
+            ).fetchall()
+        }
+        index_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT indexname FROM pg_indexes WHERE tablename = 'user_group_assignments'"
+            ).fetchall()
+        }
+
+    assert "platform" in columns
+    assert primary_key_columns == {"user_id_key", "platform"}
+    assert "idx_user_group_assignments_group" in index_names
+    # The legacy row is intentionally discarded; bindings are re-derived from upstream.
+    assert store.list_user_assignments() == []
+
+
+def test_postgres_store_round_trips_rotation_pool_group_platform(app_env: dict[str, str]) -> None:
+    database_url = app_env["database_url"]
+    now = datetime.now(timezone.utc)
+    store = PostgresFlowStore(database_url)
+    store.upsert_rotation_pool_group(
+        RotationPoolGroup(
+            group_id=11,
+            group_name="grok-low",
+            platform="grok",
+            is_exclusive=True,
+            priority=0,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.upsert_rotation_pool_group(
+        RotationPoolGroup(
+            group_id=22,
+            group_name="no-platform",
+            is_exclusive=True,
+            priority=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    reloaded = PostgresFlowStore(database_url)
+    grok_group = reloaded.get_rotation_pool_group(11)
+    platformless_group = reloaded.get_rotation_pool_group(22)
+
+    assert grok_group is not None
+    assert grok_group.platform == "grok"
+    assert platformless_group is not None
+    assert platformless_group.platform is None
+
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        rows = connection.execute(
+            "SELECT group_id_key, platform FROM rotation_pool_groups ORDER BY priority ASC"
+        ).fetchall()
+    assert [row[1] for row in rows] == ["grok", None]
+
+    # The upstream platform must survive an in-place update of an existing pool row.
+    store.upsert_rotation_pool_group(
+        RotationPoolGroup(
+            group_id=11,
+            group_name="grok-low",
+            platform="composite",
+            is_exclusive=True,
+            priority=0,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        updated_platform = connection.execute(
+            "SELECT platform FROM rotation_pool_groups WHERE group_id_key = %s",
+            ('"11"',),
+        ).fetchone()[0]
+    assert updated_platform == "composite"
+    assert PostgresFlowStore(database_url).get_rotation_pool_group(11).platform == "composite"
 
 
 def test_postgres_store_persists_latest_operational_metric_sample(app_env: dict[str, str]) -> None:

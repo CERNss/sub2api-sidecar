@@ -71,6 +71,10 @@ class UserGroupAssignment(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     user_id: Any
+    # Bindings are two-dimensional: one dedicated group per user *per platform*. The
+    # "openai" default is a transitional value so callers that have not been upgraded
+    # yet keep working; the orchestration layer should always pass platform explicitly.
+    platform: str = "openai"
     email: str
     current_group_id: Any
     current_group_name: str | None = None
