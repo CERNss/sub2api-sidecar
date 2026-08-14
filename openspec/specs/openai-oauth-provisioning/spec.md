@@ -9,8 +9,9 @@ The system SHALL expose a `POST /provision/start` endpoint that accepts an exter
 #### Scenario: Valid external email creates a pending OAuth flow
 - **GIVEN** the client submits a valid external OAuth account email address to `POST /provision/start`
 - **WHEN** the system starts a provisioning flow
-- **THEN** the system creates a dedicated group whose name is derived from the configured group prefix and the submitted email
-- **THEN** the dedicated group creation request includes the configured OpenAI platform value
+- **THEN** the system creates a dedicated group named `{email}_{platform}` for the platform being provisioned
+- **THEN** an over-long name is truncated on the email side so the `_{platform}` suffix always survives, within the upstream's 128-character group name limit
+- **THEN** the dedicated group creation request includes that platform value
 - **THEN** the system does not create a Sub2API user for the submitted email
 - **THEN** the system does not bind a Sub2API user to the dedicated group
 - **THEN** the system generates an OpenAI OAuth login URL through the Sub2API admin API without sending a redirect URI because the upstream callback is fixed
@@ -19,6 +20,14 @@ The system SHALL expose a `POST /provision/start` endpoint that accepts an exter
 - **THEN** the response includes `success=true`, `flow_id`, `email`, `group_id`, `account_name`, `oauth_url`, and the configured local callback hint URI
 - **THEN** the response does not require `user_id`
 - **THEN** `account_name` equals the submitted email value
+
+#### Scenario: Dedicated group resolution is decided on the platform field
+- **GIVEN** the system resolves the dedicated group for a provisioning flow
+- **WHEN** it looks for a reusable group named `{email}_{platform}`
+- **THEN** it reuses an existing group only when that group's upstream `platform` matches the platform being provisioned
+- **THEN** a same-named group on another platform is a different dedicated slot and is never reused
+- **THEN** the platform suffix in the name is an operator-facing label only; the decision reads the group's `platform` field and never parses the name
+- **THEN** when no reusable group exists, the default upstream may place the flow into a Landing pool group of that same platform before falling back to creating a new dedicated group
 
 #### Scenario: Invalid email is rejected before provisioning
 - **GIVEN** the client submits an invalid email address to `POST /provision/start`
@@ -153,6 +162,8 @@ The system SHALL centralize Sub2API admin API calls behind a client abstraction,
 - **WHEN** it builds the Sub2API admin client and flow store
 - **THEN** the client reads the Sub2API base URL from config-backed settings and the admin API key from environment-backed settings
 - **THEN** the client reads the configured OpenAI group/account defaults and temporary-unschedulable rules from config-backed settings
+- **THEN** the configured `sub2api.provisioning_defaults.group_platform` is a free-form upstream platform string, not an enum, and is only the default used when a caller names no platform
+- **THEN** the resolved platform is threaded explicitly through group naming, group reuse, and Landing pool selection instead of being re-read from config in each layer
 - **THEN** the client sends admin requests with `x-api-key`
 - **THEN** the OAuth login URL generation and OAuth code exchange do not send a redirect URI to Sub2API
 - **THEN** the flow store receives an internally assembled PostgreSQL connection string from structured `database` config and `POSTGRES_PASSWORD`

@@ -1,9 +1,69 @@
 # group-rotation Specification
 
 ## Purpose
-Define manual and automatic rotation of existing Sub2API users between dedicated Landing and Rotation groups, including pool discovery, durable assignment and audit state, dynamic configuration, and the safety guards that prevent unsafe or no-op rotations.
+Define manual and automatic rotation of existing Sub2API users between dedicated Landing and Rotation groups, including pool discovery, durable assignment and audit state, dynamic configuration, the per-platform scoping of every binding, and the safety guards that prevent unsafe or no-op rotations.
 
 ## Requirements
+
+### Requirement: Scope every user/group binding to a single upstream platform
+The system SHALL treat the upstream group's `platform` field as the only source of truth for which platform a group, key, or binding serves, and SHALL enforce that a user holds at most one dedicated group — and the keys routed to it — per platform. The platform value is an opaque upstream string (today `openai` and `grok`), never an enum owned by the sidecar and never parsed out of a group name.
+
+#### Scenario: Platform is read from upstream group metadata
+- **GIVEN** the system must decide which platform a group, an API key, or a user binding belongs to
+- **WHEN** it resolves that platform
+- **THEN** it reads the `platform` field of the upstream group from the group snapshot index
+- **THEN** it does not infer the platform from the group name, the group name suffix, or the configured provisioning default
+- **THEN** the group snapshot index is loaded unfiltered so groups of every platform are visible
+- **THEN** a group whose upstream payload carries no platform is logged and falls back to the legacy single-platform path
+
+#### Scenario: A user's direct group is derived per platform
+- **GIVEN** an upstream user exposes only its authorized groups (`allowed_groups` / `group_ids`)
+- **WHEN** the system derives that user's current direct group
+- **THEN** it buckets the authorized groups by the platform of each group
+- **THEN** a bucket holding exactly one group is that user's direct group on that platform
+- **THEN** a bucket holding more than one group violates the one-group-per-platform rule, is logged as a warning, and is treated as "no direct group" instead of being guessed
+- **THEN** groups whose platform is unknown do not produce a direct group
+
+#### Scenario: Local assignment state is keyed by user and platform
+- **GIVEN** a user holds a dedicated group on more than one platform
+- **WHEN** the system persists assignment state
+- **THEN** the local store holds one row per `(user, platform)` under a composite primary key
+- **THEN** each stored assignment carries the platform it belongs to
+- **THEN** the bindings of one platform rotate independently from the bindings of another platform
+- **THEN** a legacy assignment table keyed by user alone is dropped and rebuilt on the composite key at startup, and its rows are rebuilt from upstream on the next sync
+- **THEN** the rotation pool table gains its platform column in place, preserving existing pool rows
+
+#### Scenario: Rotation pool rows remember their platform
+- **GIVEN** an operator adds an exclusive group into the Landing or Rotation pool
+- **WHEN** the system persists the pool membership
+- **THEN** the persisted row stores the upstream group's platform
+- **THEN** pool candidate and pool listing responses expose the platform of each group
+
+#### Scenario: Cross-platform group changes are rejected
+- **GIVEN** an operator submits a manual replace, an existing-user orchestration, or a group-to-group migration
+- **WHEN** the resolved source and target groups serve different platforms
+- **THEN** the system rejects the request with a validation error naming both platforms
+- **THEN** the system does not call any Sub2API group replacement API
+
+#### Scenario: First assignment on a platform guards the one-group rule
+- **GIVEN** an existing-user orchestration request without a source group
+- **AND** the target group's platform is known
+- **WHEN** the selected user already holds one or more groups on that platform
+- **THEN** the system rejects the request and asks the operator to pick the group to replace
+- **WHEN** the selected user holds no group on that platform
+- **THEN** the system grants the target group as an additional authorization and synchronizes the user's resources into it
+
+#### Scenario: Key moves never cross a platform
+- **GIVEN** the system synchronizes a user's API keys into a target group
+- **WHEN** a key currently sits in a group of another platform
+- **THEN** the system leaves that key where it is and logs the skip
+- **THEN** keys that sit in no group at all may follow the user into the target group
+
+#### Scenario: One unbindable account does not sink a rotation
+- **GIVEN** the system binds the accounts behind a user's keys to the target group
+- **WHEN** one account cannot be resolved or updated upstream
+- **THEN** the system logs a warning and skips that account
+- **THEN** the remaining accounts are still bound and the rotation continues
 
 ### Requirement: Discover and manage dedicated landing and rotation pools
 The system SHALL support separate operator-managed Landing and Rotation pools so new-user default placement is distinct from automatic usage-based rotation targets.
@@ -12,12 +72,14 @@ The system SHALL support separate operator-managed Landing and Rotation pools so
 - **WHEN** the service starts with or without rotation features enabled
 - **THEN** OAuth account provisioning does not assign new Sub2API users into the Rotation pool
 - **THEN** managed-pool provisioning chooses its default group from the Landing pool
+- **THEN** managed-pool provisioning only considers Landing pool rows whose platform matches the platform being provisioned
 - **THEN** the Landing pool remains independent from automatic usage-based rotation targets
 
 #### Scenario: Operator can discover current groups and inspect exclusivity
 - **GIVEN** an authenticated operator calls `GET /rotation/pool/candidates`
 - **WHEN** the system queries the upstream Sub2API admin groups API
 - **THEN** the system returns current groups with their `is_exclusive` classification
+- **THEN** the system returns the `platform` of each group so the operator can tell which platform a candidate serves
 - **THEN** the system returns whether each group is a subscription group when upstream metadata exposes it
 - **THEN** the response distinguishes dedicated candidate groups from non-exclusive groups
 - **THEN** the response marks which dedicated groups are selected into the Landing pool
@@ -57,12 +119,13 @@ The system SHALL support separate operator-managed Landing and Rotation pools so
 - **THEN** invalid automatic rotation runtime values are rejected when the operator saves them instead of being read from deployment config
 
 ### Requirement: Persist current assignment state and rotation audit
-The system SHALL persist each managed user's current group assignment and SHALL persist the outcome of every manual or automatic rotation attempt in durable local storage.
+The system SHALL persist each managed user's current group assignment per platform and SHALL persist the outcome of every manual or automatic rotation attempt in durable local storage.
 
 #### Scenario: Assignment state survives restart
 - **GIVEN** a user has been assigned or rotated into a dedicated rotation-target group
 - **WHEN** the service restarts
 - **THEN** the system can load the user's current group assignment, assignment mode, last rotation time, and last decision reason from PostgreSQL
+- **THEN** the assignment is loaded for the `(user, platform)` pair, so a user with dedicated groups on several platforms keeps one stored assignment per platform
 
 #### Scenario: Rotation execution writes an audit record
 - **GIVEN** a manual or automatic rotation attempt finishes
@@ -82,7 +145,7 @@ The system SHALL expose an authenticated `POST /rotation/manual` API that moves 
 - **AND** the target group differs from the user's current group
 - **AND** the target group is an upstream dedicated standard group supported by `replace-group`
 - **WHEN** the system executes the request
-- **THEN** the system loads the user's current assignment state
+- **THEN** the system loads the user's stored assignment for the target group's platform
 - **THEN** the system calls the Sub2API admin API that replaces the user's effective group and migrates existing keys
 - **THEN** the system does not rely only on updating the user's `allowed_groups`
 - **THEN** the system updates the stored current assignment to the target group
@@ -120,11 +183,12 @@ The system SHALL evaluate eligible users against current Rotation pool usage loa
 - **GIVEN** automatic new-user assignment is enabled
 - **AND** the operator has configured a Landing pool
 - **AND** the dedicated rotation pool contains at least one target group
-- **WHEN** a dynamic orchestration cycle discovers an upstream user whose current direct group is in the Landing pool but not in the Rotation pool
-- **THEN** the system treats that user as a new-user assignment candidate
+- **WHEN** a dynamic orchestration cycle discovers an upstream user whose current direct group on a platform is in the Landing pool but not in the Rotation pool
+- **THEN** the system treats that `(user, platform)` binding as a new-user assignment candidate
 - **THEN** preview reports the planned assignment without mutating upstream Sub2API state
 - **THEN** real execution moves that user into the configured rotation target range through the same key-migrating `replace-group` API
-- **THEN** the target group is selected from the lowest current usage load in the Rotation pool for the configured usage window
+- **THEN** the target group is selected from the lowest current usage load among the Rotation pool groups on that binding's platform for the configured usage window
+- **THEN** a binding whose platform has no Rotation pool group is skipped with a reason naming that platform
 - **THEN** users outside the Landing pool are skipped and not assigned
 - **THEN** an empty Landing pool does not implicitly mean all groups
 
@@ -144,12 +208,14 @@ The system SHALL evaluate eligible users against current Rotation pool usage loa
 #### Scenario: On-demand automatic rotation cycle reassigns eligible users
 - **GIVEN** automatic rotation is enabled and the dedicated rotation pool contains at least one target group
 - **WHEN** an authenticated operator calls `POST /rotation/auto/run`
-- **THEN** the system synchronizes existing upstream users whose current direct group can be inferred unambiguously
-- **THEN** the system treats only users currently assigned to a selected rotation-pool group as automatic rotation candidates
-- **THEN** users without an unambiguous current direct group are skipped instead of guessed from multi-group access data
+- **THEN** the system synchronizes existing upstream users whose current direct group on a platform can be inferred unambiguously, emitting one assignment row per `(user, platform)`
+- **THEN** the system treats only bindings currently assigned to a selected rotation-pool group as automatic rotation candidates
+- **THEN** bindings without an unambiguous current direct group are skipped instead of guessed from multi-group access data
+- **THEN** the sync summary counts bindings skipped because a platform bucket held more than one group and bindings skipped because the group's platform is unknown
+- **THEN** the system buckets the Rotation pool by platform and selects targets only inside the bucket of the candidate's own platform
 - **THEN** the system computes current usage totals per selected Rotation pool group for the configured usage window using persisted group usage records when all selected groups have records
 - **THEN** the system falls back to summing candidate user usage when group usage records are missing
-- **THEN** the system chooses the lowest-usage target group when a move is needed to reduce usage imbalance
+- **THEN** the system chooses the lowest-usage target group in that platform bucket when a move is needed to reduce usage imbalance
 - **THEN** the system skips users when moving them would not reduce usage imbalance
 - **THEN** the system executes the same group-replacement workflow used by manual rotation for users whose desired group differs from their current group
 - **THEN** the response includes moved, skipped, and failed results for the rotation cycle
@@ -208,6 +274,12 @@ The system SHALL skip or reject rotation when the requested or computed target g
 - **THEN** the system rejects or skips the rotation before calling the Sub2API group replacement API
 - **THEN** the system records the result as an invalid target because only dedicated standard groups are allowed
 
+#### Scenario: Automatic execution refuses a target on another platform
+- **GIVEN** an automatic rotation candidate whose stored binding is on one platform
+- **WHEN** the resolved target pool group serves a different platform
+- **THEN** the system records the attempt as failed with a reason naming both platforms
+- **THEN** the system does not call the Sub2API group replacement API
+
 #### Scenario: Rotation is skipped when the target group matches the current group
 - **GIVEN** a manual or automatic rotation attempt resolves the same group that the user is already assigned to
 - **WHEN** the system evaluates the request
@@ -231,15 +303,16 @@ The system SHALL expose two non-negative tunables, `imbalance_epsilon` and `impr
 
 #### Scenario: Dead band skips the rebalance loop when load spread is within epsilon
 - **GIVEN** automatic rotation is enabled and the configured `imbalance_epsilon` is greater than zero
-- **WHEN** a dynamic orchestration cycle computes per-group usage loads for the Rotation pool
-- **AND** the spread between the highest and lowest group load is less than or equal to `imbalance_epsilon`
-- **THEN** the system does not iterate existing-user candidates for usage balancing
+- **WHEN** a dynamic orchestration cycle computes per-group usage loads for the Rotation pool groups on a candidate's platform
+- **AND** the spread between the highest and lowest group load inside that platform bucket is less than or equal to `imbalance_epsilon`
+- **THEN** the system does not rebalance the candidates of that platform
+- **THEN** candidates on another platform whose bucket is still imbalanced are evaluated normally
 - **THEN** the system reports the cycle as dead-band skipped on the run record and response
 - **THEN** the system still performs new-user assignment from the Landing pool when configured
 
 #### Scenario: Improvement delta blocks marginal per-user moves
 - **GIVEN** automatic rotation is enabled and the configured `improvement_delta` is greater than zero
-- **WHEN** the system evaluates moving a candidate from its current group to the lowest-loaded Rotation pool group
+- **WHEN** the system evaluates moving a candidate from its current group to the lowest-loaded Rotation pool group on the candidate's own platform
 - **AND** the post-move imbalance gap is not strictly less than the pre-move gap minus `improvement_delta`
 - **THEN** the system keeps the user in the current group instead of moving
 - **THEN** the system records the result as a skipped no-improvement rotation

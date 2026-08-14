@@ -8,7 +8,7 @@
 
 - `POST /provision/start`
   - 校验 email
-  - 创建专属分组
+  - 创建 `{email}_{platform}` 专属分组（同名同平台已存在则复用）
   - 生成 OpenAI OAuth 登录链接
   - 不向 Sub2API OAuth 接口传入回调地址；上游使用固定回调配置
   - 将 flow 上下文持久化到 PostgreSQL
@@ -38,8 +38,11 @@
   - 受保护的编排详情接口，返回 flow 安全详情和步骤时间线
 - `GET /orchestration/users`
   - 拉取 upstream 已有用户，并合并本地 assignment 作为当前分组上下文
+  - 返回 `assignments: [{platform, group_id, group_name}]`，每个平台一条；某平台上绑了多个分组或分组没有 platform 时，该平台不出现在列表里
+  - `current_group_id` / `current_group_name` 是过渡字段，取 `assignments` 里 `platform=openai` 的那条
 - `GET /orchestration/groups`
-  - 拉取 upstream 已有分组，并标记哪些分组支持整体 `replace-group`
+  - 拉取 upstream 全部平台的已有分组（不按平台过滤），每条带自己的 `platform`
+  - 并标记哪些分组支持整体 `replace-group`
 - `GET /orchestration/users/{user_id}/api-keys`
   - 拉取某个已有用户的 API keys，用于单 key 分组调整
 - `POST /orchestration/assignments/replace-group`
@@ -52,6 +55,7 @@
 - `POST /api/v1/apikey`
   - Bearer token / `X-Access-Key` 鉴权的自动化接口
   - `action=create` 按指定 `name` 创建 API key，复用密钥管理里的邮箱解析和首个可用分组选择逻辑
+  - `action=create` 可选传 `platform`，只在目标用户该平台的分组里选组；不传等于 `openai`
   - `action=list` 列出 `service:environment:object:version:email` 格式 key，可用 `email` 精确过滤
 - `POST /auth/api-token`
   - 登录后生成可用于自动化调用的长期 bearer-compatible API token
@@ -78,6 +82,20 @@
   - 覆盖登录、受保护接口、paste-back OAuth 编排流程和错误分支
   - 覆盖已有用户/分组编排、轮换池发现、专属组预配复用、手动轮换、自动轮换
 
+## 平台维度的分组规则
+
+核心业务规则：**一个用户在每个平台上最多一个专属分组，以及一把绑在该分组上的 key**。
+
+- 平台（platform）来自上游 `group.platform` 字段，是不透明字符串，不是枚举；当前实际用到的是 `openai` 和 `grok`
+- 判断一个分组/key/绑定属于哪个平台，一律读 `group.platform`，**不解析分组名**
+- 分组命名习惯是 `{email}_{platform}`（预配建组时生成）。名字太长时从 email 一侧截断，保证 `_{platform}` 后缀不被吃掉；后缀只是给人看的标签，程序不从名字里反解平台
+- 上游用户只有 `allowed_groups`，所以“当前直属分组”是按平台分桶后**恰好只有一个分组**的那个桶；同平台绑了多个分组属于违规，按“没有直属分组”处理并打 warning 日志
+- 换组、分组迁移、key transfer 都拒绝跨平台；某平台还没有分组时才允许直接授权加入，已经有分组则要求显式指定要替换哪个
+- 本地绑定表按 `(user, platform)` 存行（复合主键），不同平台的绑定互相独立轮换
+- 轮换池行记录自己的 platform，自动轮换在平台桶内做负载均衡；landing pool 也按平台过滤
+
+升级注意：本地 `user_group_assignments` 表的主键从 `user_id_key` 变成 `(user_id_key, platform)`。启动时如果发现是旧表结构，会直接删表重建，旧的 assignment 记录会丢失，下一轮同步会从上游重新建立；`rotation_pool_groups` 是原地加 `platform` 列，已有轮换池不受影响。
+
 ## 已有用户/分组编排
 
 前端默认页是已有资源编排台，使用 Ant Design 做操作面板，并用可拖放的 React Flow 全局关系图按“所有 API Key → 所有用户 → 所有分组”的左到右顺序展示资源关系：
@@ -91,6 +109,15 @@
 
 整体替换只允许目标为专属标准分组，因为 upstream `replace-group` 当前只支持这类分组。订阅分组不要走 `replace-group`；需要按实际 upstream 能力使用单 key 更新或其他专用接口。
 
+源分组和目标分组必须是同一个平台，跨平台会直接被拒绝。源分组要等于该用户**在目标分组所属平台上**的直属分组；不传源分组时，只有该用户在这个平台上一个分组都没有才允许直接授权加入，否则会返回“已绑了 N 个分组，请指定要替换哪个”。分组到分组迁移同理：只搬同平台的 key，其他平台的 key 原地不动。
+
+上游写入语义（`app/clients/sub2api.py`）：
+
+- 换组用 upstream `replace-group` 定向替换，它会同时迁移旧组下的 key；不要用改写 `allowed_groups` 代替，那样会撤销授权但不迁移 key，把其他组的 key 变成 403 孤儿
+- 授权加入某个分组时，先读用户再 PUT `allowed_groups` 的**并集**；上游用户更新接口没有顶层 `group_id` 字段，传了会被静默丢弃
+- 账号绑分组走 `PUT /api/v1/admin/accounts/{account_id}`，`group_ids` 同样是先读后取**并集**，并带上 `confirm_mixed_channel_risk`；上游没有 `POST /api/v1/admin/groups/{group_id}/accounts` 这条路由（恒 404）
+- 更新已有账号（改名、换凭证）时 `group_ids` 也取并集，避免顺带把账号从其他分组上解绑
+
 ## 自动化 API Key 接口
 
 在 `密钥管理` 页面点击 `查看 API Token` 打开弹窗，再点击弹窗里的 `刷新 API Token` 获取长期 token；也可以用已登录会话调用 `POST /auth/api-token` 获取长期 token。每次刷新会让同一用户之前生成的 API token 失效，但不会影响当前浏览器登录会话。调用方可以用 `Authorization: Bearer <token>` 或 `X-Access-Key: <token>` 访问：
@@ -102,7 +129,16 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
   -d '{"action":"create","name":"svc:prod:obj:v1:user@example.com","quota":0}'
 ```
 
-创建时 `name` 必须是 `service:environment:object:version:email` 格式。`target` 为空时，会沿用 key 名最后一段邮箱作为目标用户；如果能精确匹配一个 Sub2API 用户，会放到该用户第一个可用分组；没有对应账号时默认放到 admin 用户下。请求里的 `group_id` / `group_ids` 会被忽略，分组只由 sidecar 选择。旧的 `service:object:version:email` 格式不会被创建或匹配。
+创建时 `name` 必须是 `service:environment:object:version:email` 格式。`target` 为空时，会沿用 key 名最后一段邮箱作为目标用户；如果能精确匹配一个 Sub2API 用户，会放到该用户在目标平台上第一个可用分组；没有对应账号时默认放到 admin 用户下。请求里的 `group_id` / `group_ids` 会被忽略，分组只由 sidecar 选择。旧的 `service:object:version:email` 格式不会被创建或匹配。
+
+`platform` 可选，缺省 `openai`（兼容多平台改造之前的调用方）。选组时只看目标用户在这个平台上的分组（按上游 `group.platform` 判断，不看分组名）；该用户在这个平台上没有可用分组时直接报错，错误信息里会带上平台名，不会退到别的平台的分组：
+
+```bash
+curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
+  -H "Authorization: Bearer $SIDECAR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"create","name":"svc:prod:obj:v1:user@example.com","platform":"grok","quota":0}'
+```
 
 也可以显式传 `target` 强制指定用户：
 
@@ -115,7 +151,7 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
 
 显式 `target` 不存在或不唯一时不会 fallback 到 admin，会返回 `{"success":false,"status":"USER_NOT_FOUND"}` 或 `{"success":false,"status":"USER_EMAIL_NOT_UNIQUE"}`。
 
-当目标用户有多个可用分组时，默认沿用旧逻辑选择第一个可用分组；可以在 `config.yaml` 设置 `sub2api.api_key_group_selection: random`，让 API key 创建时从该用户的可用分组中随机选择一个。这个配置只影响自动化 API Key 创建，不影响自动轮换或迁移。
+当目标用户在该平台上有多个可用分组时，默认沿用旧逻辑选择第一个可用分组；可以在 `config.yaml` 设置 `sub2api.api_key_group_selection: random`，让 API key 创建时从该用户在该平台的可用分组中随机选择一个。这个配置只影响自动化 API Key 创建，不影响自动轮换或迁移。
 
 ```bash
 curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
@@ -132,8 +168,9 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
 
 1. 用户输入 email，调用 `POST /provision/start`
 2. 服务按 email 解析专属分组，并检查上游是否已有同名或同邮箱 OAuth 账号
-   - 如果同名分组已存在则复用；否则创建新分组
-   - 分组创建默认携带 `platform=openai`
+   - 专属分组名是 `{email}_{platform}`；已存在同名**且同平台**的分组才复用，同名但在别的平台上的分组算另一个槽位，不会被复用
+   - 没有可复用分组时：默认上游会先看 landing pool（只看同平台的 landing 分组），都没有才创建新分组
+   - 分组创建携带的 `platform` 来自 `sub2api.provisioning_defaults.group_platform`（默认 `openai`）
 3. 如果已有同名或同邮箱 OAuth 账号，服务会保留现有 OAuth token，按默认账号配置更新该账号并补齐分组绑定，然后直接返回 `status=completed`、`oauth_required=false`、`oauth_url=null`
 4. 如果没有匹配账号，服务返回 OAuth 登录链接
 5. 用户手动点击 OAuth 登录链接
@@ -153,7 +190,7 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
 前端「账号预配」页提供 OAuth / API Key 两种模式切换。API Key 模式不走 OAuth：
 
 1. 用户输入 `名称`、`API 地址`、`API Key` 三项，调用 `POST /provision/apikey/start`
-2. 服务按 `名称` 解析专属分组（与 OAuth 同样的逻辑：复用同名分组 / landing pool / 新建专属分组）
+2. 服务按 `名称` 解析专属分组（与 OAuth 同样的逻辑：复用同名同平台分组 / 同平台 landing pool / 新建专属分组）
 3. 直接创建 `type=api_key` 账号，credentials 写入 `api_key` 和 `base_url`；并发、`model_mapping`、临时不可调度规则等默认配置与 OAuth 流程一致
 4. 绑定到目标分组、补齐默认定时测试计划后，同步返回 `status=completed`（无回调步骤）
 5. 如已存在同名且类型为 API Key 的账号，则更新其凭证并补齐绑定，避免重复创建；同名但为 OAuth 的账号不会被改写
@@ -177,12 +214,19 @@ curl -sS -X POST https://sub2api.tcgcard.jp/sidecar/api/v1/apikey \
 
 非专属组不会被允许加入轮换池；订阅分组也不会被允许加入轮换池，因为 upstream `replace-group` 当前只支持专属标准分组。
 
+轮换池行会记下分组的 platform，候选和池列表接口也会返回 platform。轮换池可以同时放多个平台的分组，自动轮换会自己按平台分桶，不需要为每个平台单独配一份策略。
+
 ### 自动轮换策略
 
 - V1 仅支持 4 个窗口：`5h`、`1d`、`7d`、`30d`
 - `5h` / `1d` / `7d` 通过用户现有 API key 的窗口用量字段汇总
 - `30d` 通过 upstream usage stats 聚合查询
 - 自动轮换的业务策略通过后台页面或 `/rotation/auto/config` 运行时配置保存，不再放进 `config.yaml`
+- 负载均衡严格在平台桶内进行：候选只会被挪到**自己平台**的轮换池分组，最小负载选组、dead band（`imbalance_epsilon`）和单次移动增益（`improvement_delta`）都在桶内算
+- 用户在某个平台上的绑定，如果这个平台在轮换池里一个分组都没有，会被 skip 并在原因里点名该平台
+- 同步已有用户时按 `(user, platform)` 出行；某平台绑了多个分组、或分组没有 platform 的，分别计入 `skipped_multiple_groups_on_platform`、`skipped_unknown_group_platform`，不做猜测
+- 执行前还会再校验一次：目标分组平台和该绑定的平台不一致时记为 failed，不会调用 upstream 替换接口
+- key 只跟着同平台走：当前挂在别的平台分组下的 key 原地不动（没挂任何分组的 key 可以跟随）
 - 实际切组使用 upstream `POST /api/v1/admin/users/{user_id}/replace-group`，由 upstream 迁移该用户旧分组下的 API keys 并失效认证缓存
 - 正在进行中的流式请求、WebSocket 或已建立连接不会半路切换，需要下一次请求或重连才会使用新分组
 
@@ -307,7 +351,7 @@ database:
 - URL 类启动配置放在 `config.yaml`，包括 `app.base_url`、`app.base_path`、`openai.oauth_redirect_uri`、`sub2api.upstreams[*].base_url`、以及 `database.url`；不要写进 `.env`。
 - 当前运行时只支持 PostgreSQL，不再支持 SQLite，也不做 SQLite 数据迁移。
 - `app.base_path` 默认空字符串；如果通过 Nginx Proxy Manager 挂在子路径，例如 `https://sub2api.example.com/sidecar/`，设置为 `/sidecar`。
-- 预配页面不再提供 assignment mode 切换；`POST /provision/start` 会先复用入口 email 的专属分组。没有专属分组且配置了 landing pool 时，新 OAuth 账号会进入优先级最高的 landing 分组并把 flow 记录为 `managed_pool`；landing pool 为空时才创建新的 email 专属分组并记录为 `dedicated`。
+- 预配页面不再提供 assignment mode 切换；`POST /provision/start` 会先复用入口 email 在该平台上的专属分组。没有专属分组且配置了同平台 landing 分组时，新 OAuth 账号会进入其中优先级最高的一个并把 flow 记录为 `managed_pool`；该平台没有可用 landing 分组时才创建新的 `{email}_{platform}` 专属分组并记录为 `dedicated`。
 - 自动轮换执行开关和业务策略通过动态编排页面或 `/rotation/auto/config` 运行时配置；已登录管理员可请求 `GET /rotation/auto/scheduler` 查看后台调度线程和当前运行时开关。
 - 自动充值后台执行开关通过额度控制页面或 `/api/credit-control/settings` 运行时配置；已登录管理员可请求 `GET /api/credit-control/scheduler` 查看状态。
 - 运行态数据采集开关、`collect_interval_seconds`、`expiration`、`retention_seconds` 和 `max_storage_mb` 通过全局设置或 `/api/operational-data/settings` 运行时配置，不写进 `config.yaml`。采集线程默认 60 秒一轮，按当前 PostgreSQL 设置调整间隔，按顺序拉取 Sub2API accounts、groups、users、用户 usage、用户 API keys、当天 usage、昨天 usage，先落 PostgreSQL raw snapshots 和派生 metrics，再由告警、自动编排、额度控制读取本地数据。`expiration` 不设置表示本地数据永不过期，设置为正整数秒时，告警读取到缺失或过期样本会记为 `no_data`，不会触发告警。`retention_seconds` 按时间删除旧 snapshots/metrics，`max_storage_mb` 按大小从最老记录开始清理并保留每个 source/metric 的最新记录。已登录管理员可请求 `GET /api/operational-data/status` 查看采样状态、当前占用、每个数据源状态、最近一次 tick 时间和错误。
@@ -392,7 +436,7 @@ https://sub2api.example.com/sidecar/
 
 这些默认值现在集中放在 `config.yaml` 的 `sub2api.provisioning_defaults`：
 
-- 创建分组时携带 `platform=openai`
+- 创建分组时携带 `platform=openai`（`group_platform` 是自由字符串，不是枚举；它只是调用方没指定平台时的默认值，下游所有平台判断读的是上游 `group.platform`）
 - 创建 OAuth 账号时携带 `provider=openai`
 - 创建 OAuth 账号时携带 `platform=openai`
 - 创建 OAuth 账号时携带 `type=oauth`
@@ -404,7 +448,7 @@ https://sub2api.example.com/sidecar/
   - `529` -> 暂停 `60` 分钟，关键词 `overloaded, too many`
   - `429` -> 暂停 `10` 分钟，关键词 `rate limit, too many requests`
   - `503` -> 暂停 `30` 分钟，关键词 `unavailable, maintenance`
-- 创建 OAuth 账号时会把目标分组 ID 带入 payload：优先使用已有 email 专属分组，其次使用 landing pool，最后才创建新的 email 专属分组
+- 创建 OAuth 账号时会把目标分组 ID 带入 payload：优先使用已有的同平台 `{email}_{platform}` 专属分组，其次使用同平台 landing pool，最后才创建新的专属分组
 - 如果已存在同名或同邮箱 OAuth 账号，`POST /provision/start` 会跳过授权登录，保留已有 OAuth token，只更新账号默认配置并确保绑定到目标分组
 
 ## 安装依赖
@@ -619,7 +663,10 @@ curl -X POST 'http://127.0.0.1:8000/provision/oauth/complete' \
 - 入口 email 贯穿全流程。
 - 创建 OpenAI OAuth 账号时，`name` 强制使用入口 email。
 - `用户绑定分组` 和 `账号绑定分组` 两步都会执行。
+- 一个用户每个平台最多一个专属分组 + 一把绑该分组的 key；平台一律读上游 `group.platform`，不解析分组名。
+- 换组、分组迁移、key transfer 都不允许跨平台。
 - 轮换已有用户时不要只改用户 `allowed_groups`；必须使用 upstream `replace-group`，或在只迁移单个 key 的场景使用 `PUT /api/v1/admin/api-keys/{key_id}`。
+- 写 `allowed_groups`（用户）和 `group_ids`（账号）时必须先读后取并集：这两个字段在上游是声明式的，直接覆盖等于撤销其他绑定，且不会迁移 key。
 - 页面和编排 API 需要先登录；登录密码默认每次启动重新生成。
 - 编排看板只读；不会重试、删除、编辑或强制完成历史 flow。
 - 编排看板会隐藏 OAuth token、密码、API key 等敏感字段。

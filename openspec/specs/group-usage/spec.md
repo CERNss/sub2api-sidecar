@@ -13,6 +13,13 @@ The system SHALL persist one latest usage profile per upstream group using local
 - **WHEN** group usage refresh runs
 - **THEN** each group with an id has a latest group usage record
 - **THEN** the record includes per-window usage values, daily averages, trend ratios, member counts, source metadata, observed timestamp, and refreshed timestamp
+- **THEN** the record carries the group's upstream `platform`, which dynamic orchestration uses to balance load inside a single platform
+
+#### Scenario: Groups of every platform receive usage records
+- **GIVEN** the upstream serves groups on more than one platform
+- **WHEN** group usage refresh runs over the operational group snapshot
+- **THEN** the snapshot is not filtered to one platform, so groups of every platform receive a record
+- **THEN** rotation pools that mix platforms can read a load for each of their groups
 
 #### Scenario: Missing dashboard data falls back to local signals
 - **GIVEN** a group is present in the group snapshot but has no dashboard aggregate for a window
@@ -27,7 +34,7 @@ The system SHALL expose authenticated APIs to read latest group usage profiles a
 - **GIVEN** group usage records are stored
 - **WHEN** an authenticated operator requests the group usage list API
 - **THEN** the response includes items, pagination fields, and total count
-- **THEN** each item includes group identity, usage windows, daily averages, source metadata, and refresh timestamps
+- **THEN** each item includes group identity, platform, usage windows, daily averages, source metadata, and refresh timestamps
 
 #### Scenario: Operator refreshes group usage records
 - **GIVEN** operational snapshots exist

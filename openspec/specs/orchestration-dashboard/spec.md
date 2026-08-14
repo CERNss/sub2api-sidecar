@@ -10,7 +10,10 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 - **GIVEN** the operator has a valid admin session
 - **WHEN** the operator requests existing user, group, account, or user API key discovery APIs
 - **THEN** the system queries Sub2API admin APIs using the configured admin API key
-- **THEN** users include current group context when upstream or local assignment data provides it
+- **THEN** each user carries an `assignments` list with one entry per platform where the user holds exactly one group, each entry naming `platform`, `group_id`, and `group_name`
+- **THEN** platforms where the user holds several groups, or where the group's platform is unknown, produce no `assignments` entry
+- **THEN** the transitional single-group fields `current_group_id` and `current_group_name` report the `openai` entry of that list
+- **THEN** group discovery returns the groups of every platform, each carrying its own `platform` value, instead of being filtered to the configured provisioning platform
 - **THEN** groups identify whether they are supported for bulk replace-group orchestration
 - **THEN** upstream accounts are discovered from the Sub2API admin accounts API that backs `/admin/accounts`, not from the admin users API
 - **THEN** accounts include their upstream account identity and group binding ids when upstream metadata provides them
@@ -21,10 +24,12 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 #### Scenario: Operator migrates an existing user from one group to another
 - **GIVEN** the operator has selected an existing user, an old group, and a target group
 - **WHEN** the operator executes bulk user/group orchestration
+- **THEN** the system rejects the request when the old group and the target group serve different platforms
+- **THEN** the system requires the submitted old group to match the user's direct group on the target group's platform
 - **THEN** the system calls upstream `POST /api/v1/admin/users/{user_id}/replace-group`
 - **THEN** the request body includes `old_group_id` and `new_group_id`
 - **THEN** the system does not use a user `allowed_groups` update as the effective orchestration operation
-- **THEN** the system records the resulting local assignment and rotation event
+- **THEN** the system records the resulting local assignment and rotation event under the target group's platform
 
 #### Scenario: Operator moves a single API key to another group
 - **GIVEN** the operator has selected an existing user, one API key, and a target group
@@ -36,8 +41,11 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 #### Scenario: Operator migrates a group into another group
 - **GIVEN** the operator has selected a source group and a different target group
 - **WHEN** the operator executes group-to-group orchestration
-- **THEN** the system selects users whose direct group is the source group and users that own API keys routed to the source group
-- **THEN** the system migrates each selected user's full API key set to the target group
+- **THEN** the system rejects the request when the two groups serve different platforms
+- **THEN** the system selects users whose direct group on the source group's platform is the source group and users that own API keys routed to the source group
+- **THEN** the system hands the authorization over with `replace-group` whenever the user is authorized for the source group, including users that only hold it as an API key route
+- **THEN** the system grants the target group as an additional authorization only for users that do not hold the source group at all
+- **THEN** the system migrates each selected user's API keys on that platform to the target group and leaves keys of other platforms untouched
 - **THEN** existing users already in the target group remain in place and the run records merge mode when the target group was non-empty
 
 #### Scenario: Subscription groups are not used for bulk replace-group
@@ -52,7 +60,7 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 - **WHEN** the operator previews or executes the key transfer
 - **THEN** the system resolves `<email>` to exactly one existing Sub2API user by normalized email
 - **THEN** the system does not create users and does not fuzzy-match email values
-- **THEN** the system selects the first available group from the matched user's current or allowed groups
+- **THEN** the system selects a target group on the platform of the key's current group, preferring the target user's dedicated group on that platform and falling back to its other authorized groups on the same platform
 - **THEN** execution calls the Sub2API admin API to update the API key's `user_id`, `group_id`, and `quota`
 - **THEN** execution preserves the API key string value
 - **THEN** execution sets the API key quota limit to unlimited
@@ -63,6 +71,60 @@ The system SHALL expose authenticated APIs for discovering existing Sub2API user
 - **WHEN** a key name does not contain exactly one valid target email, the target user is missing, or the target user has no available group
 - **THEN** the system skips that key without making an upstream update call
 - **THEN** the response includes a reason for the skipped key
+- **WHEN** the target user has usable groups but none on the platform of the key's current group
+- **THEN** the skip reason names that platform instead of reporting the user as having no group at all
+
+### Requirement: Token-authenticated API key creation is scoped to one platform
+The system SHALL let callers of `POST /api/v1/apikey` name the upstream platform the new key must serve through an optional `platform` field, SHALL default that field to `openai`, and SHALL select the target group only among the target user's groups on that platform. The value is an opaque upstream string, not an enum.
+
+#### Scenario: Caller names the platform for a created key
+- **GIVEN** a caller has a valid sidecar API token
+- **AND** the request action is `create` with a `platform` value
+- **WHEN** the system selects the group for the new key
+- **THEN** only the target user's authorized groups whose upstream `platform` equals that value are selectable
+- **THEN** the group is never chosen by matching the platform against the group name
+
+#### Scenario: Omitted platform keeps pre-multi-platform callers working
+- **GIVEN** a caller has a valid sidecar API token
+- **AND** the request action is `create` without a `platform` field
+- **WHEN** the system selects the group for the new key
+- **THEN** the request is treated as `platform=openai`
+
+#### Scenario: No group on the requested platform is an explicit failure
+- **GIVEN** the resolved target user has no authorized group on the requested platform
+- **WHEN** the system tries to create the key
+- **THEN** the system returns a client error whose message names the requested platform
+- **THEN** the system does not create an upstream API key
+- **THEN** the system does not fall back to a group on another platform
+
+### Requirement: Upstream group writes preserve unrelated bindings
+The system SHALL write user and account group bindings through the upstream routes that actually exist, and SHALL treat the upstream's declarative list fields as unions so an orchestration step never silently revokes a binding it was not asked to touch.
+
+#### Scenario: Authorizing a user for one more group keeps its other authorizations
+- **GIVEN** the system needs a user to gain access to an additional group
+- **WHEN** it writes the authorization through the upstream user update endpoint
+- **THEN** the request body contains `allowed_groups` holding the union of the user's current groups and the new group
+- **THEN** the request body does not contain a top-level `group_id`, because the upstream user update has no such field
+- **THEN** the user's keys in its other groups keep working instead of being orphaned by a wholesale `allowed_groups` overwrite
+
+#### Scenario: Moving a user off a group uses the transactional replace endpoint
+- **GIVEN** the system needs a user to leave one group and land in another
+- **WHEN** it executes that move
+- **THEN** it calls `POST /api/v1/admin/users/{user_id}/replace-group` with the old and new group ids
+- **THEN** it does not attempt the move by rewriting `allowed_groups`, which would revoke the grant without migrating the keys
+
+#### Scenario: Binding an account to a group goes through the account update endpoint
+- **GIVEN** the system needs an upstream account to serve one more group
+- **WHEN** it writes the binding
+- **THEN** it reads the account, then sends `PUT /api/v1/admin/accounts/{account_id}` with `group_ids` holding the union of the account's current groups and the new group
+- **THEN** it acknowledges the upstream mixed-channel guard so the wider group set is accepted
+- **THEN** it does not call `POST /api/v1/admin/groups/{group_id}/accounts`, because that route does not exist upstream and always returns 404
+
+#### Scenario: Re-configuring an existing account does not unbind its other groups
+- **GIVEN** provisioning updates an already existing upstream account
+- **WHEN** the configuration payload is built
+- **THEN** `group_ids` is the union of the account's current bindings and the flow's target group
+- **THEN** a rename or credential refresh therefore does not detach the account from the other groups it serves
 
 ### Requirement: Authenticated flow inspection API
 The system SHALL expose authenticated read-only APIs for listing provisioning flows and retrieving a single flow with its orchestration timeline.
@@ -144,7 +206,7 @@ The system SHALL redact secrets and provider tokens from orchestration dashboard
 - **THEN** the response payload and rendered UI do not expose the Sub2API admin API key, default user password, or browser session access key
 
 ### Requirement: React dashboard renders orchestration state
-The React UI SHALL provide an authenticated orchestration workspace for moving existing users or keys between groups, browsing provisioning flows, managing balances, transferring encoded admin API keys, and configuring webhook alert routing for operational signals.
+The React UI SHALL provide an authenticated orchestration workspace for moving existing users or keys between groups, browsing provisioning flows, managing balances, transferring encoded admin API keys, and configuring webhook alert routing for operational signals. The workspace SHALL render a user's dedicated group per platform and SHALL keep every group operation inside one platform, treating the platform as an opaque upstream string.
 
 #### Scenario: Authenticated operator opens the dashboard
 - **GIVEN** the operator has a valid admin session
@@ -159,8 +221,19 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **THEN** groups are connected to upstream account nodes when account group binding data is available
 - **THEN** upstream account nodes display whether the account is unavailable and show current account capacity with compact 5-hour and 7-day usage percentages
 - **THEN** selecting a user or key in the graph updates the operator selection controls
+- **THEN** selecting a user focuses the canvas on every group that user holds across platforms, not on a single group
 - **THEN** the dashboard displays flow summary rows with status, external OAuth account email, group id, account id, and update time
 - **THEN** the dashboard does not present OAuth provisioning flows as Sub2API user creation records
+
+#### Scenario: User rows and nodes carry one badge per platform
+- **GIVEN** the orchestration view has loaded users from the discovery API
+- **WHEN** it renders a user in the selector list or as a graph node
+- **THEN** it renders one badge per platform where the user holds a dedicated group, labelled with the platform and that group's name
+- **THEN** a user assigned on several platforms renders several badges
+- **THEN** platforms where the user holds no dedicated group render no badge
+- **THEN** badge colors come from hashing the platform string into a fixed palette, so no list of known platforms is hardcoded in the UI
+- **THEN** the UI reads the payload's `assignments` list and only falls back to the transitional single-platform fields when `assignments` is absent
+- **THEN** a user graph node carries its direct group ids as a list, and the ungrouped-user filter selects nodes whose list is empty
 
 #### Scenario: External Sub2API launch exchanges token before rendering
 - **GIVEN** the sidecar is opened as a standalone page with a `token` query parameter
@@ -177,6 +250,34 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **THEN** the UI treats source-group routed API keys as part of the group migration scope and shows merge mode when the target group already has users
 - **WHEN** the operator selects single-key mode and executes
 - **THEN** the UI submits the selected API key and target group to the authenticated API key group update API
+
+#### Scenario: Replace-group picks the target first and derives the source from its platform
+- **GIVEN** the operator is using bulk replace-group mode with a user selected
+- **WHEN** the operator opens the target group dropdown
+- **THEN** the options are bucketed into one section per platform, each option carrying its platform badge
+- **WHEN** the operator picks a target group
+- **THEN** the UI derives the source group from that user's assignment on the target group's platform and re-derives it whenever the target changes
+- **THEN** the source control is read-only in this mode, so the operator cannot pair a source from another platform by hand
+- **THEN** the `（当前）` marker and the disabled state of each option are evaluated against that option's own platform
+- **WHEN** the selected user is assigned on several platforms and no target group is chosen yet
+- **THEN** the source control shows a placeholder telling the operator that the source will be matched by platform once a target is picked
+- **WHEN** the user holds no group on the chosen target's platform
+- **THEN** the source control states that the user has no group on that platform and that the operation will assign one directly
+
+#### Scenario: Group migration keeps both ends on one platform
+- **GIVEN** the operator is using group-to-group migration mode with a source group selected
+- **WHEN** the UI builds the target group options
+- **THEN** it offers only groups that do not conflict with the source group's platform, treating two platforms as conflicting only when both are known and differ, matching the backend rule
+- **THEN** an empty result states that the source group's platform has no other usable group
+- **THEN** the migration preview counts resolve each user through its assignment on the group's own platform
+
+#### Scenario: Cross-platform selections are refused before the request
+- **GIVEN** the operator picks a group by clicking a group or account node on the canvas, bypassing the dropdown
+- **WHEN** that group's platform conflicts with the platform the current operation is fixed on
+- **THEN** the UI refuses the selection and shows an error naming both platforms
+- **THEN** the selection is not applied
+- **WHEN** the operator submits an orchestration request
+- **THEN** the UI runs a final same-platform check on the resolved source and target and blocks the submission with an error naming both platforms when they conflict
 
 #### Scenario: Operator filters and refreshes dashboard data
 - **GIVEN** the operator is viewing the flow dashboard
@@ -204,6 +305,20 @@ The React UI SHALL provide an authenticated orchestration workspace for moving e
 - **THEN** the UI shows moved, skipped, and failed counts and per-key reasons returned by the authenticated API
 - **WHEN** the operator executes admin key transfer
 - **THEN** the UI submits to the authenticated execution API and refreshes orchestration data after completion
+
+#### Scenario: API token dialog builds a platform-aware key creation snippet
+- **GIVEN** the operator opens the API token dialog on the key management page
+- **WHEN** the dialog renders the `POST /api/v1/apikey` create example
+- **THEN** it offers a target-platform selector whose options are the de-duplicated `platform` values of the groups returned by `GET /orchestration/groups`, with no platform list hardcoded in the UI
+- **THEN** leaving the selector empty omits the `platform` field from the snippet so the backend default `openai` applies
+- **THEN** choosing a platform rewrites the copyable `create` payload in place
+- **THEN** the field explains that the key lands in the target user's group on that platform and that a user without a group there gets a `400` naming the platform
+- **THEN** the dialog only renders the snippet and does not call the key creation endpoint itself
+
+#### Scenario: Backend rejection text reaches the operator unchanged
+- **GIVEN** an orchestration request is rejected by the backend with a client error
+- **WHEN** the UI handles the response
+- **THEN** it surfaces the backend's `detail` message verbatim instead of replacing it with a generic failure string
 
 ### Requirement: Persist webhook alert configuration server-side
 The system SHALL expose authenticated APIs that read and write the webhook alert center configuration document to durable local storage. The configuration document contains only `webhooks` and `rules`; any unsupported top-level, rule, or webhook field is rejected on write and is not part of the persisted runtime contract.
@@ -383,7 +498,7 @@ The system SHALL periodically evaluate enabled notification rules at the configu
 - **GIVEN** the service is running with operational data enabled
 - **WHEN** a scheduler tick begins
 - **THEN** the collection stage fetches Sub2API accounts from `Sub2APIClient.list_openai_accounts()`
-- **THEN** the collection stage fetches Sub2API groups from `Sub2APIClient.list_groups(platform="openai")`
+- **THEN** the collection stage fetches Sub2API groups from `Sub2APIClient.list_groups()` without a platform filter, so the snapshot is the platform index every consumer reads
 - **THEN** the collection stage fetches Sub2API users from `Sub2APIClient.list_users()`
 - **THEN** the collection stage fetches per-user API keys and user usage where needed by consumers
 - **THEN** the collection stage fetches current-day and previous-day usage from `Sub2APIClient.list_usage_logs(...)`
