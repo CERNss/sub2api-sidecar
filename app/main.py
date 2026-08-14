@@ -168,7 +168,11 @@ from app.models.schemas import (
     UserUsageSegmentsEnvelope,
 )
 from app.models.usage_segmentation import UsageSegment, UserUsageSegmentRecord
-from app.services.api_key_automation import ApiKeyAutomationService, ApiKeyCreateTargetError
+from app.services.api_key_automation import (
+    DEFAULT_KEY_PLATFORM,
+    ApiKeyAutomationService,
+    ApiKeyCreateTargetError,
+)
 from app.services.dashboard import flow_detail_response, flow_summary_response
 from app.services.credit_control import CreditControlError, CreditControlService
 from app.services.credit_scheduler import CreditControlScheduler
@@ -1203,6 +1207,7 @@ def api_key_automation(
         create_result = service.create_named_key(
             name=payload.name,
             target=payload.target,
+            platform=payload.platform or DEFAULT_KEY_PLATFORM,
             key_options=key_options,
         )
         if isinstance(create_result, ApiKeyCreateTargetError):

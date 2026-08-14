@@ -2079,16 +2079,21 @@ class RotationService:
         self,
         *,
         user_id: Any,
+        platform: str,
         email: str,
         group_id: Any,
         assignment_mode: AssignmentMode,
         reason: str | None,
         group_name: str | None = None,
     ) -> UserGroupAssignment:
+        # Bindings are keyed by (user, platform); the provisioning caller knows
+        # which platform it just provisioned for, so it passes it in rather than
+        # letting the store fall back to its transitional default.
         now = datetime.now(timezone.utc)
-        existing = self.store.get_user_assignment(user_id)
+        existing = self.store.get_user_assignment(user_id, platform)
         assignment = UserGroupAssignment(
             user_id=user_id,
+            platform=platform,
             email=email,
             current_group_id=group_id,
             current_group_name=group_name,
@@ -2537,12 +2542,10 @@ class RotationService:
         self.store.upsert_user_assignment(refreshed)
         return refreshed
 
-    def _available_groups_by_key(self) -> dict[str, dict[str, Any]]:
-        # Provisioning's configured platform still gates this view; the callers
-        # that must span platforms use _active_groups_by_key() instead.
-        return self._active_groups_by_key(
-            self.sub2api_client.provisioning_defaults.group_platform
-        )
+    def _available_groups_by_key(self, platform: str) -> dict[str, dict[str, Any]]:
+        # The caller says which platform it is selecting for; the callers that must
+        # span platforms use _active_groups_by_key() with no platform instead.
+        return self._active_groups_by_key(platform)
 
     def _active_groups_by_key(self, platform: str | None = None) -> dict[str, dict[str, Any]]:
         groups = self.sub2api_client.list_groups(platform=platform)
@@ -2707,11 +2710,19 @@ class RotationService:
                 return current
         return None
 
-    def first_available_group_id_for_user(self, user: dict[str, Any]) -> Any | None:
-        return self._first_available_user_group_id(user, self._available_groups_by_key())
+    def first_available_group_id_for_user(
+        self,
+        user: dict[str, Any],
+        platform: str,
+    ) -> Any | None:
+        return self._first_available_user_group_id(
+            user,
+            self._available_groups_by_key(platform),
+            platform=platform,
+        )
 
-    def available_groups_by_key(self) -> dict[str, dict[str, Any]]:
-        return self._available_groups_by_key()
+    def available_groups_by_key(self, platform: str) -> dict[str, dict[str, Any]]:
+        return self._available_groups_by_key(platform)
 
     def _resolve_admin_user_id(self) -> Any:
         candidates: list[dict[str, Any]] = []

@@ -13,6 +13,10 @@ from app.services.rotation import ParsedKeyName, RotationService
 
 logger = logging.getLogger(__name__)
 
+# Callers that predate multi-platform keys send no platform at all; they mean the
+# platform every existing key already lives on.
+DEFAULT_KEY_PLATFORM = "openai"
+
 
 @dataclass(frozen=True)
 class ApiKeyCreateResult:
@@ -54,6 +58,7 @@ class ApiKeyAutomationService:
         *,
         name: str,
         target: str | None = None,
+        platform: str = DEFAULT_KEY_PLATFORM,
         key_options: dict[str, Any] | None = None,
     ) -> ApiKeyCreateResult | ApiKeyCreateTargetError:
         parsed_name = self.rotation_service.parse_transfer_key_name(name)
@@ -71,9 +76,15 @@ class ApiKeyAutomationService:
         if target_error is not None:
             return target_error
 
-        target_group_id = self._select_group_id_for_user(target_user)
+        selected_platform = (platform or "").strip() or DEFAULT_KEY_PLATFORM
+        target_group_id = self._select_group_id_for_user(
+            target_user,
+            platform=selected_platform,
+        )
         if target_group_id in (None, ""):
-            raise RotationExecutionError("Target user has no available group")
+            raise RotationExecutionError(
+                f"Target user has no available group on platform {selected_platform}"
+            )
 
         target_user_id = target_user.get("id")
         if target_user_id in (None, ""):
@@ -133,14 +144,30 @@ class ApiKeyAutomationService:
             )
         return items
 
-    def _select_group_id_for_user(self, user: dict[str, Any]) -> Any | None:
-        available_groups_by_key = self.rotation_service.available_groups_by_key()
+    def _select_group_id_for_user(
+        self,
+        user: dict[str, Any],
+        *,
+        platform: str,
+    ) -> Any | None:
+        """Pick one of the user's authorized groups that serves `platform`.
+
+        Which platform a group serves is read from the upstream group's own
+        `platform` field, never from its name.
+        """
+        available_groups_by_key = self.rotation_service.available_groups_by_key(platform)
         candidate_group_ids = self.rotation_service.candidate_group_ids_for_user(user)
-        selectable_group_ids = [
-            group_id
-            for group_id in candidate_group_ids
-            if self.rotation_service.normalize_key_value(group_id) in available_groups_by_key
-        ]
+        wanted_platform = platform.strip().lower()
+        selectable_group_ids: list[Any] = []
+        for group_id in candidate_group_ids:
+            group = available_groups_by_key.get(
+                self.rotation_service.normalize_key_value(group_id)
+            )
+            if group is None:
+                continue
+            if str(group.get("platform") or "").strip().lower() != wanted_platform:
+                continue
+            selectable_group_ids.append(group_id)
         if not selectable_group_ids:
             return None
         if self.group_selection == API_KEY_GROUP_SELECTION_RANDOM:

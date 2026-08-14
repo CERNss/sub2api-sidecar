@@ -55,6 +55,7 @@ class ProvisioningService:
         sub2api_client: Sub2APIClient | None = None,
     ) -> ProvisionStartResponse:
         client = sub2api_client or self.sub2api_client
+        platform = self._default_platform(client)
         logger.info("Starting provisioning flow for email=%s", email)
         flow_id = str(uuid.uuid4())
         requested_state = secrets.token_urlsafe(24)
@@ -63,12 +64,13 @@ class ProvisioningService:
             event_type=ProvisionEventType.start_requested,
             status=ProvisionEventStatus.info,
             message="Provisioning flow requested",
-            details={"email": email},
+            details={"email": email, "platform": platform},
         )
         try:
             group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(
                 email,
                 upstream_id=upstream_id,
+                platform=platform,
                 sub2api_client=client,
             )
             self._record_event(
@@ -80,6 +82,7 @@ class ProvisioningService:
                     "group_id": group_id,
                     "assignment_mode": assignment_mode.value,
                     "reason": assignment_reason,
+                    "platform": platform,
                 },
             )
             existing_account = self._find_oauth_account(email, sub2api_client=client)
@@ -232,6 +235,7 @@ class ProvisioningService:
         sub2api_client: Sub2APIClient | None = None,
     ) -> ProvisionApiKeyStartResponse:
         client = sub2api_client or self.sub2api_client
+        platform = self._default_platform(client)
         logger.info("Starting API key provisioning flow for name=%s", name)
         flow_id = str(uuid.uuid4())
         state = secrets.token_urlsafe(24)
@@ -240,12 +244,13 @@ class ProvisioningService:
             event_type=ProvisionEventType.start_requested,
             status=ProvisionEventStatus.info,
             message="API key provisioning flow requested",
-            details={"name": name},
+            details={"name": name, "platform": platform},
         )
         try:
             group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(
                 name,
                 upstream_id=upstream_id,
+                platform=platform,
                 sub2api_client=client,
             )
             self._record_event(
@@ -257,6 +262,7 @@ class ProvisioningService:
                     "group_id": group_id,
                     "assignment_mode": assignment_mode.value,
                     "reason": assignment_reason,
+                    "platform": platform,
                 },
             )
             account, account_action = self._resolve_apikey_account(
@@ -505,19 +511,42 @@ class ProvisioningService:
         )
         return flow
 
-    def _build_group_name(self, email: str) -> str:
-        return email[:128]
+    def _default_platform(self, client: Sub2APIClient) -> str:
+        """The upstream's configured provisioning platform.
+
+        This is the single place the configured default is read; every helper
+        below takes the platform as an explicit argument so a caller can drive a
+        different platform without the deep layers reaching back into config.
+        """
+        return str(client.provisioning_defaults.group_platform or "").strip() or "openai"
+
+    def _build_group_name(self, email: str, platform: str) -> str:
+        """`{email}_{platform}`, capped at the upstream's 128-char group name limit.
+
+        The suffix is what tells operators which platform a dedicated group serves,
+        so an over-long email loses its tail rather than the suffix. Platform is
+        still never parsed back out of the name; `group.platform` is the truth.
+        """
+        suffix = f"_{platform}"
+        if len(suffix) >= 128:
+            return suffix[:128]
+        return f"{email[: 128 - len(suffix)]}{suffix}"
 
     def _resolve_group_assignment(
         self,
         email: str,
         *,
         upstream_id: str,
+        platform: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[object, AssignmentMode, str]:
         client = sub2api_client or self.sub2api_client
-        group_name = self._build_group_name(email)
-        existing_group = self._find_group_by_name(group_name, sub2api_client=client)
+        group_name = self._build_group_name(email, platform)
+        existing_group = self._find_group_by_name(
+            group_name,
+            platform=platform,
+            sub2api_client=client,
+        )
         if existing_group is not None:
             return (
                 existing_group["id"],
@@ -525,7 +554,7 @@ class ProvisioningService:
                 "existing dedicated provisioning group",
             )
         if upstream_id == self.default_upstream_id:
-            landing_group = self._select_landing_pool_group()
+            landing_group = self._select_landing_pool_group(platform)
             if landing_group is not None:
                 return (
                     landing_group.group_id,
@@ -535,11 +564,14 @@ class ProvisioningService:
         group = client.create_group(group_name)
         return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
 
-    def _select_landing_pool_group(self) -> RotationPoolGroup | None:
+    def _select_landing_pool_group(self, platform: str) -> RotationPoolGroup | None:
+        # A landing group only works for the platform its upstream group serves,
+        # so a pool that mixes platforms still yields one candidate set per platform.
         groups = [
             group
             for group in self.flow_store.list_rotation_pool_groups(RotationPoolKind.landing)
             if not group.is_subscription
+            and str(group.platform or "").strip().lower() == platform.strip().lower()
         ]
         if not groups:
             return None
@@ -556,15 +588,22 @@ class ProvisioningService:
         self,
         group_name: str,
         *,
+        platform: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> dict[str, object] | None:
         client = sub2api_client or self.sub2api_client
-        groups = client.list_groups(
-            platform=client.provisioning_defaults.group_platform
-        )
+        groups = client.list_groups(platform=platform)
+        needle = group_name.strip().lower()
+        wanted_platform = platform.strip().lower()
         for group in groups:
-            if str(group.get("name") or "").strip().lower() == group_name.strip().lower():
-                return group
+            if str(group.get("name") or "").strip().lower() != needle:
+                continue
+            # The upstream list is already filtered server-side, but a same-named
+            # group on another platform is a different dedicated slot, never a reuse
+            # candidate — decided on the platform field, never on the name suffix.
+            if str(group.get("platform") or "").strip().lower() != wanted_platform:
+                continue
+            return group
         return None
 
     def _resolve_oauth_account(
@@ -620,7 +659,7 @@ class ProvisioningService:
             self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "created"
 
-        account_id = existing["id"]
+        had_group = self._account_has_group(existing, group_id)
         account = client.configure_existing_openai_apikey_account(
             account=existing,
             name=name,
@@ -628,12 +667,11 @@ class ProvisioningService:
             api_key=api_key,
             group_id=group_id,
         )
-        if not self._account_has_group(existing, group_id):
-            client.bind_account_to_group(account_id, group_id)
-            self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
-            return account, "configured_and_bound"
+        # The configure PUT sends the union of the account's current groups and the
+        # target group, so the binding already landed; a follow-up bind would only
+        # re-send the identical group_ids as a second equivalent PUT.
         self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
-        return account, "configured_existing"
+        return account, "configured_existing" if had_group else "configured_and_bound"
 
     def _find_apikey_account(
         self,
@@ -663,18 +701,16 @@ class ProvisioningService:
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
         client = sub2api_client or self.sub2api_client
+        had_group = self._account_has_group(existing_account, group_id)
         account = client.configure_existing_openai_oauth_account(
             account=existing_account,
             name=email,
             group_id=group_id,
         )
-        account_id = existing_account["id"]
-        if not self._account_has_group(existing_account, group_id):
-            client.bind_account_to_group(account_id, group_id)
-            self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
-            return account, "configured_and_bound"
+        # See _resolve_apikey_account: configure already writes the union of the
+        # existing group_ids and the target group, so no follow-up bind is needed.
         self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
-        return account, "configured_existing"
+        return account, "configured_existing" if had_group else "configured_and_bound"
 
     def _ensure_default_scheduled_test_plan(
         self,

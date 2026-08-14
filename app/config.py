@@ -109,6 +109,10 @@ DEFAULT_ACCOUNT_MODEL_WHITELIST: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class Sub2APIProvisioningDefaults:
+    # Default platform for provisioning and for key creation when the caller names
+    # none. Deliberately a free-form string, not an enum: the platform set is
+    # whatever the upstream groups declare (today openai and grok), and every
+    # platform decision downstream reads `group.platform` rather than this value.
     group_platform: str = "openai"
     account_provider: str = "openai"
     account_platform: str = "openai"

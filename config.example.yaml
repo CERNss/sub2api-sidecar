@@ -53,6 +53,8 @@ sub2api:
 
   provisioning_defaults:
     account_concurrency: 6
+    # Default platform for provisioning and for key creation when the request
+    # names none. Any platform the upstream groups declare is valid.
     group_platform: openai
     account_provider: openai
     account_platform: openai

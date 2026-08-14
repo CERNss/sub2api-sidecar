@@ -671,6 +671,10 @@ class ApiKeyAutomationRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     target: str | None = None
     email: EmailStr | None = None
+    # Which upstream platform the new key's group must serve. Opaque string, not an
+    # enum: the platform set is whatever the upstream groups declare. Omitted means
+    # "openai", so callers written before multi-platform keys keep working.
+    platform: str | None = Field(default=None, min_length=1)
     options: dict[str, Any] = Field(default_factory=dict)
 
 

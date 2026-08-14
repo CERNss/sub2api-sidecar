@@ -2802,7 +2802,7 @@ sub2api:
     assert payload["group_id"] == 77
     assert payload["assignment_mode"] == "dedicated"
     assert payload["assignment_reason"] == "dedicated provisioning group"
-    assert create_group_payloads[0]["name"] == "secondary-new@example.com"
+    assert create_group_payloads[0]["name"] == "secondary-new@example.com_openai"
 
     monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
     clear_caches()
@@ -2977,7 +2977,7 @@ def test_provision_start_uses_openai_group_defaults(client) -> None:
     assert response.json()["group_id"] == "g-1"
 
 
-def test_provision_start_uses_email_as_dedicated_group_name(client) -> None:
+def test_provision_start_uses_email_and_platform_as_dedicated_group_name(client) -> None:
     create_group_payloads: list[dict[str, object]] = []
     email = "testqtest@outlook.my"
 
@@ -2994,7 +2994,31 @@ def test_provision_start_uses_email_as_dedicated_group_name(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["account_name"] == email
-    assert create_group_payloads[0]["name"] == email
+    assert create_group_payloads[0]["name"] == f"{email}_openai"
+
+
+def test_provision_start_group_name_truncation_keeps_the_platform_suffix(client) -> None:
+    create_group_payloads: list[dict[str, object]] = []
+    email = f"{'a' * 64}@{'b' * 50}.example.com"
+    assert len(email) > 128 - len("_openai")
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        if method == "POST" and urlparse(url).path == "/api/v1/admin/groups":
+            create_group_payloads.append(json)
+        return fake_sub2api_request(self, method, url, json=json, params=params, timeout=timeout)
+
+    login(client)
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        response = client.post("/provision/start", json={"email": email})
+
+    assert response.status_code == 200
+    group_name = create_group_payloads[0]["name"]
+    # The upstream cap is 128 chars; the email loses its tail so the suffix that
+    # identifies the platform stays intact.
+    assert len(group_name) == 128
+    assert group_name.endswith("_openai")
+    assert group_name == f"{email[:121]}_openai"
 
 
 def test_sub2api_client_builds_apikey_account_payload() -> None:
@@ -5576,6 +5600,91 @@ def test_token_apikey_api_creates_key_for_matching_email_user(client) -> None:
     ]
 
 
+def test_token_apikey_api_creates_key_in_the_requested_platform_group(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "username": "admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users.append(
+        {
+            "id": 303,
+            "email": "target@example.com",
+            "name": "Target",
+            "status": "active",
+            # Authorized on both platforms; group 71 is the grok one.
+            "allowed_groups": [22, 11, 71],
+        }
+    )
+    access_key = login(client)["access_key"]
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/api/v1/apikey",
+            headers={"Authorization": f"Bearer {access_key}"},
+            json={
+                "action": "create",
+                "name": "svc:prod:obj:v1:target@example.com",
+                "platform": "grok",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["item"]["user_id"] == 303
+    assert payload["item"]["group_id"] == 71
+    assert backend.api_key_create_calls[0]["json"]["group_id"] == 71
+
+
+def test_token_apikey_api_reports_the_platform_when_the_user_has_no_group_there(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users.insert(
+        0,
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "username": "admin",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        },
+    )
+    backend.users.append(
+        {
+            "id": 303,
+            "email": "target@example.com",
+            "name": "Target",
+            "status": "active",
+            "allowed_groups": [22, 11],
+        }
+    )
+    access_key = login(client)["access_key"]
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/api/v1/apikey",
+            headers={"Authorization": f"Bearer {access_key}"},
+            json={
+                "action": "create",
+                "name": "svc:prod:obj:v1:target@example.com",
+                "platform": "grok",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Target user has no available group on platform grok"
+    assert backend.api_key_create_calls == []
+
+
 def test_token_apikey_api_falls_back_to_admin_when_email_account_missing(client) -> None:
     backend = FakeRotationSub2API()
     backend.users.insert(
@@ -6015,7 +6124,7 @@ def test_provision_start_prefers_existing_email_group_over_landing_pool(client) 
     backend.groups.append(
         {
             "id": 77,
-            "name": "repeat@example.com",
+            "name": "repeat@example.com_openai",
             "type": "standard",
             "platform": "openai",
             "status": "active",
@@ -6052,7 +6161,7 @@ def test_provision_start_reuses_existing_email_named_group(client) -> None:
     backend.groups.append(
         {
             "id": 77,
-            "name": "repeat@example.com",
+            "name": "repeat@example.com_openai",
             "type": "standard",
             "platform": "openai",
             "status": "active",
@@ -6069,12 +6178,82 @@ def test_provision_start_reuses_existing_email_named_group(client) -> None:
     assert backend.create_group_calls == 0
 
 
+def test_provision_start_ignores_same_named_group_on_another_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    # Same name, wrong platform: a name collision across platforms is not a reuse
+    # candidate, and the decision is made on the platform field alone.
+    backend.groups.append(
+        {
+            "id": 88,
+            "name": "repeat@example.com_openai",
+            "type": "standard",
+            "platform": "grok",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/provision/start", json={"email": "repeat@example.com"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["group_id"] == 999
+    assert payload["assignment_reason"] == "dedicated provisioning group"
+    assert backend.create_group_calls == 1
+
+
+def test_provision_start_landing_pool_only_considers_same_platform_groups(client) -> None:
+    backend = FakeRotationSub2API()
+
+    with started_test_client() as managed_client:
+        login(managed_client)
+        store = main.get_flow_store()
+        # A grok group sits at the front of the landing pool; the openai
+        # provisioning flow must still land on the openai pool group behind it.
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=71,
+                pool_kind=RotationPoolKind.landing,
+                group_name="grok-low",
+                platform="grok",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=22,
+                pool_kind=RotationPoolKind.landing,
+                group_name="rotation-high",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=5,
+            )
+        )
+
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = managed_client.post(
+                "/provision/start", json={"email": "mixed-pool@example.com"}
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["group_id"] == "22"
+    assert payload["assignment_mode"] == "managed_pool"
+    assert payload["assignment_reason"] == "landing pool assignment"
+    assert backend.create_group_calls == 0
+
+
 def test_provision_start_configures_existing_oauth_account_without_authorization(client) -> None:
     backend = FakeRotationSub2API()
     backend.groups.append(
         {
             "id": 77,
-            "name": "repeat@example.com",
+            "name": "repeat@example.com_openai",
             "type": "standard",
             "platform": "openai",
             "status": "active",
@@ -6142,7 +6321,7 @@ def test_provision_start_configures_existing_oauth_account_and_binds_missing_gro
     backend.groups.append(
         {
             "id": 77,
-            "name": "repeat@example.com",
+            "name": "repeat@example.com_openai",
             "type": "standard",
             "platform": "openai",
             "status": "active",
@@ -6174,20 +6353,15 @@ def test_provision_start_configures_existing_oauth_account_and_binds_missing_gro
     assert payload["oauth_account_id"] == "acct-repeat"
     assert backend.generate_auth_url_calls == 0
     assert backend.create_account_calls == 0
-    # The configure PUT already unions the missing group in, and the follow-up
-    # bind (provisioning still issues one against its pre-update snapshot) is a
-    # second PUT re-sending the same union rather than a group-side POST.
+    # The configure PUT already unions the missing group in, so it is the only
+    # write: no follow-up bind re-sending the identical group_ids.
     assert [call["path"] for call in backend.update_account_calls] == [
         "/api/v1/admin/accounts/acct-repeat",
-        "/api/v1/admin/accounts/acct-repeat",
     ]
-    configure_payload, bind_payload = (
-        call["json"] for call in backend.update_account_calls
-    )
+    configure_payload = backend.update_account_calls[0]["json"]
     assert configure_payload["name"] == "repeat@example.com"
     assert configure_payload["group_ids"] == [11, 77]
     assert configure_payload["confirm_mixed_channel_risk"] is True
-    assert bind_payload == {"group_ids": [11, 77], "confirm_mixed_channel_risk": True}
     # The original group survives the write instead of being silently unbound.
     assert backend.accounts[-1]["group_ids"] == [11, 77]
 
