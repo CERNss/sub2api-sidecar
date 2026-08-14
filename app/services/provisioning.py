@@ -561,7 +561,7 @@ class ProvisioningService:
                     AssignmentMode.managed_pool,
                     "landing pool assignment",
                 )
-        group = client.create_group(group_name)
+        group = client.create_group(group_name, platform=platform)
         return group["id"], AssignmentMode.dedicated, "dedicated provisioning group"
 
     def _select_landing_pool_group(self, platform: str) -> RotationPoolGroup | None:

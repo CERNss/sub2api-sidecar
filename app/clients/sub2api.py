@@ -169,8 +169,8 @@ class Sub2APIClient:
 
         return profile
 
-    def create_group(self, name: str) -> dict[str, Any]:
-        payload = self._build_group_payload(name)
+    def create_group(self, name: str, platform: str | None = None) -> dict[str, Any]:
+        payload = self._build_group_payload(name, platform=platform)
         data = self._request("POST", self.CREATE_GROUP_PATH, json=payload)
         body = self._unwrap_data(data)
         group_id = self._extract_id(
@@ -1170,11 +1170,21 @@ class Sub2APIClient:
         plan = body if isinstance(body, dict) else {"raw": body}
         return {"account_id": account_id, "created": True, "plan": plan, "raw": data}
 
-    def _build_group_payload(self, name: str) -> dict[str, Any]:
+    def _build_group_payload(
+        self,
+        name: str,
+        *,
+        platform: str | None = None,
+    ) -> dict[str, Any]:
+        # An explicit platform wins; the configured default is only the fallback,
+        # so callers that already resolved a platform never get silently overridden.
+        effective_platform = (
+            str(platform).strip() if platform is not None and str(platform).strip() else None
+        ) or self.provisioning_defaults.group_platform
         payload: dict[str, Any] = {
             "name": name,
             "description": "",
-            "platform": self.provisioning_defaults.group_platform,
+            "platform": effective_platform,
             "rate_multiplier": 1,
             "rpm_limit": 0,
             "is_exclusive": True,
@@ -1205,7 +1215,7 @@ class Sub2APIClient:
             "mcp_xml_inject": True,
             "copy_accounts_from_group_ids": [],
         }
-        if self.provisioning_defaults.group_platform == "openai":
+        if effective_platform == "openai":
             payload["messages_dispatch_model_config"] = {
                 "opus_mapped_model": "gpt-5.4",
                 "sonnet_mapped_model": "gpt-5.3-codex",

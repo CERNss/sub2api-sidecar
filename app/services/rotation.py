@@ -2075,37 +2075,6 @@ class RotationService:
             new_user_candidates=new_user_candidates,
         )
 
-    def sync_assignment_after_provision(
-        self,
-        *,
-        user_id: Any,
-        platform: str,
-        email: str,
-        group_id: Any,
-        assignment_mode: AssignmentMode,
-        reason: str | None,
-        group_name: str | None = None,
-    ) -> UserGroupAssignment:
-        # Bindings are keyed by (user, platform); the provisioning caller knows
-        # which platform it just provisioned for, so it passes it in rather than
-        # letting the store fall back to its transitional default.
-        now = datetime.now(timezone.utc)
-        existing = self.store.get_user_assignment(user_id, platform)
-        assignment = UserGroupAssignment(
-            user_id=user_id,
-            platform=platform,
-            email=email,
-            current_group_id=group_id,
-            current_group_name=group_name,
-            assignment_mode=assignment_mode,
-            last_rotation_at=existing.last_rotation_at if existing else None,
-            last_decision_reason=reason,
-            has_api_keys=existing.has_api_keys if existing else None,
-            created_at=existing.created_at if existing else now,
-            updated_at=now,
-        )
-        return self.store.upsert_user_assignment(assignment)
-
     def list_orchestration_runs(self, limit: int = 50) -> list[OrchestrationRunRecord]:
         return self.store.list_orchestration_runs(limit=limit)
 

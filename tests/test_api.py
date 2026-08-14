@@ -2125,6 +2125,80 @@ def test_sub2api_client_create_group_uses_upstream_group_form_payload() -> None:
         assert dead_field not in payload
 
 
+def test_sub2api_client_create_group_honours_explicit_platform() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": 321}})
+
+    # The configured default is openai; the explicit argument must win so the
+    # caller's already-resolved platform is what the group is created on.
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(group_platform="openai"),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.create_group("user@example.com_grok", platform="grok")
+
+    payload = calls[0]["json"]
+    assert result["id"] == 321
+    assert payload["name"] == "user@example.com_grok"
+    assert payload["platform"] == "grok"
+    # The nested dispatch mapping is openai-only, and it keys off the platform
+    # actually in effect rather than the configured default.
+    assert "messages_dispatch_model_config" not in payload
+
+
+def test_sub2api_client_create_group_explicit_openai_adds_dispatch_config() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": 322}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(group_platform="grok"),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_group("user@example.com_openai", platform="openai")
+
+    payload = calls[0]["json"]
+    assert payload["platform"] == "openai"
+    assert payload["messages_dispatch_model_config"] == {
+        "opus_mapped_model": "gpt-5.4",
+        "sonnet_mapped_model": "gpt-5.3-codex",
+        "haiku_mapped_model": "gpt-5.4-mini",
+        "exact_model_mappings": {},
+    }
+
+
+def test_sub2api_client_create_group_falls_back_to_configured_platform() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": 323}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(group_platform="grok"),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_group("legacy-caller-group")
+
+    payload = calls[0]["json"]
+    assert payload["platform"] == "grok"
+    assert "messages_dispatch_model_config" not in payload
+
+
 def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:
     calls: list[dict[str, object]] = []
 
