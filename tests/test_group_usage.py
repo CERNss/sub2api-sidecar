@@ -105,3 +105,60 @@ def test_group_usage_refresh_calculates_and_persists_records(app_env: dict[str, 
     assert high is not None
     assert high.member_count == 2
     assert high.usage_by_window["30d"] == 15.0
+
+
+def test_group_usage_member_counts_include_multi_group_users(app_env: dict[str, str]) -> None:
+    store = PostgresFlowStore(app_env["database_url"])
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key=SOURCE_GROUPS,
+            observed_at=now,
+            collected_at=now,
+            payload=[
+                {"id": 11, "name": "openai-low", "platform": "openai", "is_exclusive": True},
+                {"id": 71, "name": "grok-low", "platform": "grok", "is_exclusive": True},
+            ],
+        )
+    )
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key=SOURCE_USERS,
+            observed_at=now,
+            collected_at=now,
+            payload=[
+                # A multi-platform user holds one group per platform, which leaves
+                # `current_group_id` empty: counting that field alone loses them.
+                {
+                    "id": 101,
+                    "email": "dual@example.com",
+                    "current_group_id": None,
+                    "group_ids": [11, 71],
+                },
+                # A single-group user still counts once, and duplicate entries
+                # across the authorization fields must not double-count.
+                {
+                    "id": 202,
+                    "email": "single@example.com",
+                    "current_group_id": 11,
+                    "group_ids": [11],
+                    "allowed_groups": [11],
+                },
+            ],
+        )
+    )
+    store.save_operational_data_snapshot(
+        OperationalDataSnapshot(
+            source_key=SOURCE_GROUP_USAGE,
+            observed_at=now,
+            collected_at=now,
+            payload={},
+        )
+    )
+
+    GroupUsageService(store).refresh(now=now)
+
+    openai_group = store.get_group_usage_segment(11)
+    grok_group = store.get_group_usage_segment(71)
+    assert openai_group is not None and openai_group.member_count == 2
+    assert grok_group is not None and grok_group.member_count == 1

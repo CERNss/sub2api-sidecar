@@ -5284,20 +5284,44 @@ function ExistingOrchestrationView({
         .filter((entry) => Boolean(idValue(entry.group.group_id))),
     [groupsById, selectedUser]
   );
-  const selectedKeyPrimaryGroup = useMemo(() => {
-    if (mode !== "api_key" || selectedKeys.length === 0) {
-      return null;
+  // The routing group of every selected key, resolved against the group list so each
+  // one carries a real platform. A multi-key move is submitted key by key, so the whole
+  // selection — not just the first key — decides what the operation is allowed to do.
+  const selectedKeyGroups = useMemo(() => {
+    if (mode !== "api_key") {
+      return [];
     }
-    const key = selectedKeys[0];
-    const keyGroupValue = idValue(key.group_id);
-    if (!keyGroupValue) {
-      return null;
-    }
-    return (
-      groupsById.get(keyGroupValue) ??
-      syntheticGroup(key.group_id, key.group_name?.trim() || keyGroupValue, null)
-    );
+    return selectedKeys.map((key) => {
+      const keyGroupValue = idValue(key.group_id);
+      if (!keyGroupValue) {
+        return null;
+      }
+      return (
+        groupsById.get(keyGroupValue) ??
+        syntheticGroup(key.group_id, key.group_name?.trim() || keyGroupValue, null)
+      );
+    });
   }, [groupsById, mode, selectedKeys]);
+  const selectedKeyPrimaryGroup = useMemo(
+    () => (selectedKeyGroups.length > 0 ? selectedKeyGroups[0] : null),
+    [selectedKeyGroups]
+  );
+  // Every platform the selection currently spans. Keys with no group (or a group of
+  // unknown platform) contribute nothing: unknown is never treated as a platform.
+  const selectedKeyPlatforms = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          selectedKeyGroups
+            .map((group) => groupPlatform(group))
+            .filter((platform): platform is string => Boolean(platform))
+        )
+      ).sort(),
+    [selectedKeyGroups]
+  );
+  // Two or more known platforms in one selection cannot be satisfied by a single target
+  // group, and the backend rejects the offending keys one by one. Block it up front.
+  const selectedKeyPlatformConflict = mode === "api_key" && selectedKeyPlatforms.length > 1;
   const selectedGroupMigrationSourceGroup = useMemo(() => {
     if (mode !== "group_migration" || !sourceGroupId) {
       return null;
@@ -5313,13 +5337,15 @@ function ExistingOrchestrationView({
   // dedicated groups is the source, and it is the same rule the backend enforces.
   const activePlatform = useMemo(() => {
     if (mode === "api_key") {
-      return groupPlatform(selectedKeyPrimaryGroup);
+      // Only a selection that agrees on one platform names an active platform;
+      // a split selection is ambiguous, so nothing is claimed.
+      return selectedKeyPlatforms.length === 1 ? selectedKeyPlatforms[0] : null;
     }
     if (mode === "group_migration") {
       return groupPlatform(selectedGroupMigrationSourceGroup);
     }
     return groupPlatform(selectedTargetGroup);
-  }, [mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup, selectedTargetGroup]);
+  }, [mode, selectedGroupMigrationSourceGroup, selectedKeyPlatforms, selectedTargetGroup]);
   const selectedUserPlatformTags = useMemo(
     () => (selectedUser ? userDirectGroupTags(selectedUser) : []),
     [selectedUser]
@@ -5362,11 +5388,15 @@ function ExistingOrchestrationView({
   const targetPlatformConstraint = useMemo(
     () =>
       mode === "api_key"
-        ? groupPlatform(selectedKeyPrimaryGroup)
+        ? // The whole selection has to fit one target, so the constraint is the
+          // selection's single known platform — never just the first key's.
+          selectedKeyPlatforms.length === 1
+          ? selectedKeyPlatforms[0]
+          : null
         : mode === "group_migration"
         ? groupPlatform(selectedGroupMigrationSourceGroup)
         : null,
-    [mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup]
+    [mode, selectedGroupMigrationSourceGroup, selectedKeyPlatforms]
   );
   const targetGroups = useMemo(() => {
     if (mode !== "group_migration" && !selectedUser) {
@@ -6153,6 +6183,27 @@ function ExistingOrchestrationView({
       });
       return;
     }
+    if (mode === "api_key") {
+      // Keys are submitted one by one, so a selection spanning platforms would send
+      // some of them across — refuse the whole batch instead of half-applying it.
+      if (selectedKeyPlatformConflict) {
+        setStatus({
+          message: `所选 Key 分布在多个平台（${selectedKeyPlatforms.join("、")}），请按平台分批编排。`,
+          tone: "error"
+        });
+        return;
+      }
+      const crossingPlatform = selectedKeyPlatforms.find((platform) =>
+        platformsConflict(platform, submitTargetPlatform)
+      );
+      if (crossingPlatform) {
+        setStatus({
+          message: `不能跨平台操作：所选 Key 在平台 ${crossingPlatform}，目标分组在平台 ${submitTargetPlatform}。`,
+          tone: "error"
+        });
+        return;
+      }
+    }
 
     const knownGroupIds = groups.map((group) => group.group_id);
     const sourceGroupValue = resolveKnownId(sourceGroupId, knownGroupIds);
@@ -6649,6 +6700,15 @@ function ExistingOrchestrationView({
                 />
               </div>
 
+              {selectedKeyPlatformConflict ? (
+                <Alert
+                  className="manual-status-alert"
+                  showIcon
+                  type="error"
+                  message={`所选 Key 分布在多个平台（${selectedKeyPlatforms.join("、")}），无法用同一个目标分组编排，请按平台分批选择。`}
+                />
+              ) : null}
+
               {status.message ? (
                 <Alert
                   className="manual-status-alert"
@@ -6666,7 +6726,8 @@ function ExistingOrchestrationView({
                 loading={submitting}
                 disabled={
                   loading ||
-                  targetGroups.length === 0
+                  targetGroups.length === 0 ||
+                  selectedKeyPlatformConflict
                 }
                 onClick={() => void runExistingOrchestration()}
                 block

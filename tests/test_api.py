@@ -3759,6 +3759,44 @@ def test_credit_control_lists_filters_and_details_users(client) -> None:
     assert detail_payload["item"]["api_keys"][0]["usage"] == 1.0
 
 
+def test_credit_control_group_filter_matches_every_group_a_user_holds(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 707,
+            "email": "dual@example.com",
+            "name": "dual@example.com",
+            "status": "active",
+            # Multi-platform: no single "current" group, one group per platform.
+            "allowed_groups": [11, 71],
+            "balance": 5.0,
+        },
+        {
+            "id": 202,
+            "email": "idle@example.com",
+            "name": "idle@example.com",
+            "status": "active",
+            "group_id": 22,
+            "balance": 3.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        openai_response = client.get("/api/credit-control/users?group_id=11&limit=10")
+        grok_response = client.get("/api/credit-control/users?group_id=71&limit=10")
+        other_response = client.get("/api/credit-control/users?group_id=22&limit=10")
+
+    # Same rule the group-scoped recharge policies use: holding the group counts.
+    assert openai_response.status_code == 200
+    assert [item["user_id"] for item in openai_response.json()["items"]] == [707]
+    assert grok_response.status_code == 200
+    assert [item["user_id"] for item in grok_response.json()["items"]] == [707]
+    assert other_response.status_code == 200
+    assert [item["user_id"] for item in other_response.json()["items"]] == [202]
+
+
 def test_usage_segmentation_apis_require_auth_and_refresh(client) -> None:
     backend = FakeRotationSub2API()
     unauthenticated = client.get("/api/usage-segmentation/users")
@@ -4687,6 +4725,317 @@ def test_first_platform_assignment_leaves_other_platform_keys_alone(client) -> N
     assert payload["migrated_keys"] == 1
     store = main.get_flow_store()
     assert store.get_user_assignment(707, "openai").current_group_id == 22
+
+
+def test_platform_assignment_does_not_bind_other_platform_accounts(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 707,
+            "email": "openai-only@example.com",
+            "name": "openai-only@example.com",
+            "status": "active",
+            "group_id": 11,
+            "group_name": "rotation-low",
+        }
+    ]
+    backend.user_api_keys[707] = [
+        {"id": "key-openai", "name": "openai-key", "group_id": 11},
+        {"id": "key-orphan", "name": "no-group-yet", "group_id": None},
+    ]
+    # An openai account named after the user. Nothing but the name links it to the
+    # grok assignment below, and a name is not a platform.
+    backend.accounts.append(
+        {
+            "id": "acct-x",
+            "name": "openai-only@example.com",
+            "email": "openai-only@example.com",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "available": True,
+            "group_ids": [11],
+        }
+    )
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 707,
+                "email": "openai-only@example.com",
+                "source_group_id": None,
+                "target_group_id": 72,
+                "reason": "first grok assignment",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "moved"
+    # The user gains the grok group and their unassigned key follows.
+    assert backend.user_update_calls == [{"user_id": 707, "allowed_groups": [11, 72]}]
+    assert backend.api_key_group_calls == [{"key_id": "key-orphan", "group_id": 72}]
+    # The openai account must not be dragged into a grok group just because it
+    # carries the user's email.
+    assert backend.update_account_calls == []
+    assert payload["metadata"]["bound_accounts"] == 0
+    assert backend.accounts[-1]["group_ids"] == [11]
+
+
+def test_platform_assignment_binds_only_the_same_platform_account(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 707,
+            "email": "shared-name@example.com",
+            "name": "shared-name@example.com",
+            "status": "active",
+        }
+    ]
+    backend.user_api_keys[707] = [
+        {"id": "key-orphan", "name": "no-group-yet", "group_id": None},
+    ]
+    # Two accounts share the user's email and differ only by platform.
+    backend.accounts.append(
+        {
+            "id": "acct-openai-twin",
+            "name": "shared-name@example.com",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "available": True,
+            "group_ids": [],
+        }
+    )
+    backend.accounts.append(
+        {
+            "id": "acct-grok-twin",
+            "name": "shared-name@example.com",
+            "provider": "grok",
+            "platform": "grok",
+            "type": "oauth",
+            "status": "active",
+            "available": True,
+            "group_ids": [],
+        }
+    )
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 707,
+                "email": "shared-name@example.com",
+                "source_group_id": None,
+                "target_group_id": 72,
+                "reason": "grok assignment",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "moved"
+    assert payload["metadata"]["bound_accounts"] == 1
+    # Only the grok twin is written; the openai twin is left untouched.
+    assert backend.update_account_calls == [
+        {
+            "account_id": "acct-grok-twin",
+            "path": "/api/v1/admin/accounts/acct-grok-twin",
+            "json": {"group_ids": [72], "confirm_mixed_channel_risk": True},
+        }
+    ]
+
+
+def test_platform_less_target_group_adopts_only_ungrouped_keys(client) -> None:
+    backend = FakeRotationSub2API()
+    # A legacy upstream group that never got a platform field.
+    backend.groups.append(
+        {
+            "id": 88,
+            "name": "legacy-no-platform",
+            "type": "standard",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.users = [
+        {
+            "id": 909,
+            "email": "orphan-target@example.com",
+            "name": "orphan-target@example.com",
+            "status": "active",
+        }
+    ]
+    backend.user_api_keys[909] = [
+        {"id": "key-909-openai", "name": "already-routed", "group_id": 11},
+        {"id": "key-909-orphan", "name": "no-group-yet", "group_id": None},
+    ]
+    backend.accounts.append(
+        {
+            "id": "acct-909",
+            "name": "orphan-target@example.com",
+            "provider": "openai",
+            "platform": "openai",
+            "type": "oauth",
+            "status": "active",
+            "available": True,
+            "group_ids": [11],
+        }
+    )
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 909,
+                "email": "orphan-target@example.com",
+                "source_group_id": None,
+                "target_group_id": 88,
+                "reason": "legacy group assignment",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "moved"
+    assert backend.user_update_calls == [{"user_id": 909, "allowed_groups": [88]}]
+    # A platform-less target cannot claim a key that already serves a platform;
+    # orphan adoption is the only move that stays safe.
+    assert backend.api_key_group_calls == [{"key_id": "key-909-orphan", "group_id": 88}]
+    assert payload["migrated_keys"] == 1
+    # Account binding needs a platform to compare against, so it is skipped whole.
+    assert backend.update_account_calls == []
+    assert payload["metadata"]["bound_accounts"] == 0
+
+
+def test_single_api_key_group_change_rejects_cross_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.user_api_keys[101] = [
+        {"id": "key-101", "name": "primary", "group_id": 11},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/update-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "key_id": "key-101",
+                "source_group_id": 11,
+                "target_group_id": 72,
+                "reason": "single key must not cross platforms",
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "openai" in detail and "grok" in detail
+    assert backend.api_key_group_calls == []
+
+
+def test_single_api_key_group_change_reads_the_keys_real_group(client) -> None:
+    backend = FakeRotationSub2API()
+    # The key actually lives on grok; the caller-supplied source group is a stale
+    # openai hint, which must not be what the platform check trusts.
+    backend.user_api_keys[101] = [
+        {"id": "key-101", "name": "primary", "group_id": 71},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/update-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "key_id": "key-101",
+                "source_group_id": 11,
+                "target_group_id": 22,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "grok" in response.json()["detail"]
+    assert backend.api_key_group_calls == []
+
+
+def test_single_api_key_group_change_allows_same_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.user_api_keys[101] = [
+        {"id": "key-101", "name": "primary", "group_id": 71},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/update-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "key_id": "key-101",
+                "source_group_id": 71,
+                "target_group_id": 72,
+                "reason": "grok to grok",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "moved"
+    assert backend.api_key_group_calls == [{"key_id": "key-101", "group_id": 72}]
+
+
+def test_unknown_group_platform_warns_once_per_group(client, caplog) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 88,
+            "name": "legacy-no-platform",
+            "type": "standard",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    backend.users = [
+        {
+            "id": 707 + index,
+            "email": f"legacy{index}@example.com",
+            "name": f"legacy{index}@example.com",
+            "status": "active",
+            "allowed_groups": [88],
+        }
+        for index in range(4)
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.rotation"):
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = client.get("/orchestration/users?email=legacy")
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 4
+    # Four users x the same platform-less group: one warning, not four.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "has no upstream platform" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "88" in warnings[0].getMessage()
 
 
 def test_multiple_groups_on_one_platform_report_no_direct_group(client, caplog) -> None:
@@ -6250,6 +6599,97 @@ def test_provision_start_reuses_existing_email_named_group(client) -> None:
     assert response.status_code == 200
     assert response.json()["group_id"] == 77
     assert backend.create_group_calls == 0
+
+
+def test_provision_start_reuses_legacy_bare_email_group_on_the_same_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    # Pre-suffix naming: the dedicated group is just the email. It is still this
+    # user's openai slot, so provisioning reuses it instead of opening a second one.
+    backend.groups.append(
+        {
+            "id": 77,
+            "name": "Repeat@Example.com",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/provision/start", json={"email": "repeat@example.com"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["group_id"] == 77
+    assert payload["assignment_reason"] == "existing dedicated provisioning group"
+    assert backend.create_group_calls == 0
+
+
+def test_provision_start_ignores_legacy_bare_email_group_on_another_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 88,
+            "name": "repeat@example.com",
+            "type": "standard",
+            "platform": "grok",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/provision/start", json={"email": "repeat@example.com"})
+
+    assert response.status_code == 200
+    assert response.json()["group_id"] == 999
+    assert backend.create_group_calls == 1
+
+
+def test_provision_start_does_not_reuse_an_account_from_another_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.groups.append(
+        {
+            "id": 77,
+            "name": "hijack@example.com_openai",
+            "type": "standard",
+            "platform": "openai",
+            "status": "active",
+            "is_exclusive": True,
+        }
+    )
+    # A grok account already carries this email. Reusing it would PUT the openai
+    # provisioning defaults over it and hijack a grok account.
+    backend.accounts.append(
+        {
+            "id": "acct-grok-hijack",
+            "name": "hijack@example.com",
+            "email": "hijack@example.com",
+            "provider": "grok",
+            "platform": "grok",
+            "type": "oauth",
+            "status": "active",
+            "group_ids": [71],
+        }
+    )
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post("/provision/start", json={"email": "hijack@example.com"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    # No reuse: the flow falls through to the normal OAuth handoff.
+    assert payload["status"] == "pending_oauth"
+    assert payload["oauth_required"] is True
+    assert backend.generate_auth_url_calls == 1
+    # The grok account is never written to.
+    assert backend.update_account_calls == []
+    assert backend.accounts[-1]["platform"] == "grok"
+    assert backend.accounts[-1]["group_ids"] == [71]
 
 
 def test_provision_start_ignores_same_named_group_on_another_platform(client) -> None:

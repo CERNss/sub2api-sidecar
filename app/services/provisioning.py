@@ -85,7 +85,11 @@ class ProvisioningService:
                     "platform": platform,
                 },
             )
-            existing_account = self._find_oauth_account(email, sub2api_client=client)
+            existing_account = self._find_oauth_account(
+                email,
+                platform=platform,
+                sub2api_client=client,
+            )
             if existing_account is not None:
                 account, account_action = self._configure_existing_oauth_account(
                     existing_account=existing_account,
@@ -271,6 +275,7 @@ class ProvisioningService:
                 api_key=api_key,
                 group_id=group_id,
                 flow_id=flow_id,
+                platform=platform,
                 sub2api_client=client,
             )
             self._record_event(
@@ -403,6 +408,7 @@ class ProvisioningService:
                 oauth_payload=exchange["exchange"],
                 group_id=flow.group_id,
                 flow_id=flow.flow_id,
+                platform=self._default_platform(client),
                 sub2api_client=client,
             )
             if account_action == "created":
@@ -542,8 +548,13 @@ class ProvisioningService:
     ) -> tuple[object, AssignmentMode, str]:
         client = sub2api_client or self.sub2api_client
         group_name = self._build_group_name(email, platform)
+        # `{email}_{platform}` is what provisioning writes today; the bare
+        # `{email}` is the pre-suffix legacy name. A legacy group is still this
+        # user's dedicated slot as long as its platform matches, so reuse it
+        # rather than creating a second dedicated group beside it.
         existing_group = self._find_group_by_name(
             group_name,
+            email,
             platform=platform,
             sub2api_client=client,
         )
@@ -586,24 +597,31 @@ class ProvisioningService:
 
     def _find_group_by_name(
         self,
-        group_name: str,
-        *,
+        *group_names: str,
         platform: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> dict[str, object] | None:
+        """First group on ``platform`` whose name matches, in candidate order.
+
+        Several names are accepted so a caller can spell out its preferred name
+        plus legacy spellings without paying for a second upstream list call.
+        """
         client = sub2api_client or self.sub2api_client
         groups = client.list_groups(platform=platform)
-        needle = group_name.strip().lower()
         wanted_platform = platform.strip().lower()
-        for group in groups:
-            if str(group.get("name") or "").strip().lower() != needle:
+        for group_name in group_names:
+            needle = group_name.strip().lower()
+            if not needle:
                 continue
-            # The upstream list is already filtered server-side, but a same-named
-            # group on another platform is a different dedicated slot, never a reuse
-            # candidate — decided on the platform field, never on the name suffix.
-            if str(group.get("platform") or "").strip().lower() != wanted_platform:
-                continue
-            return group
+            for group in groups:
+                if str(group.get("name") or "").strip().lower() != needle:
+                    continue
+                # The upstream list is already filtered server-side, but a same-named
+                # group on another platform is a different dedicated slot, never a reuse
+                # candidate — decided on the platform field, never on the name suffix.
+                if str(group.get("platform") or "").strip().lower() != wanted_platform:
+                    continue
+                return group
         return None
 
     def _resolve_oauth_account(
@@ -613,10 +631,11 @@ class ProvisioningService:
         oauth_payload: dict[str, object],
         group_id: object,
         flow_id: str,
+        platform: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
         client = sub2api_client or self.sub2api_client
-        existing = self._find_oauth_account(email, sub2api_client=client)
+        existing = self._find_oauth_account(email, platform=platform, sub2api_client=client)
         if existing is None:
             account = client.create_openai_account_from_oauth(
                 name=email,
@@ -645,10 +664,11 @@ class ProvisioningService:
         api_key: str,
         group_id: object,
         flow_id: str,
+        platform: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
         client = sub2api_client or self.sub2api_client
-        existing = self._find_apikey_account(name, sub2api_client=client)
+        existing = self._find_apikey_account(name, platform=platform, sub2api_client=client)
         if existing is None:
             account = client.create_openai_account_from_apikey(
                 name=name,
@@ -677,10 +697,11 @@ class ProvisioningService:
         self,
         name: str,
         *,
+        platform: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> dict[str, object] | None:
         client = sub2api_client or self.sub2api_client
-        candidate = self._find_oauth_account(name, sub2api_client=client)
+        candidate = self._find_oauth_account(name, platform=platform, sub2api_client=client)
         if candidate is None:
             return None
         # Only reuse an existing account if it is already an API key account; never
@@ -738,11 +759,25 @@ class ProvisioningService:
         self,
         email: str,
         *,
+        platform: str,
         sub2api_client: Sub2APIClient | None = None,
     ) -> dict[str, object] | None:
+        """The existing account for this name/email *on this platform*.
+
+        Reuse means the caller will PUT the provisioning defaults over the
+        account — platform, provider and type included. Doing that to a match
+        from another platform would hijack it, so a known mismatch is treated as
+        "not found" and the caller creates a fresh account instead. An account
+        that carries no platform at all is still a match: it predates the field
+        and the provisioning PUT is what gives it one.
+        """
         client = sub2api_client or self.sub2api_client
         needle = email.strip().lower()
+        wanted_platform = platform.strip().lower()
         for account in client.list_openai_accounts():
+            account_platform = str(account.get("platform") or "").strip().lower()
+            if account_platform and account_platform != wanted_platform:
+                continue
             candidates = [
                 account.get("name"),
                 account.get("email"),

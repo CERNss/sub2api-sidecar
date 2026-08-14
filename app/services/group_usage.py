@@ -146,15 +146,45 @@ class GroupUsageService:
 
 
 def _member_counts_by_group(users: list[Any]) -> dict[str, int]:
+    """Count every group a user actually holds, not just their "current" one.
+
+    A multi-platform user holds one dedicated group per platform, which leaves
+    ``current_group_id`` empty because no single group is *the* one. Counting
+    only that field drops those users from every group they belong to, so the
+    authorization list (``group_ids`` / ``allowed_groups``) is the source of
+    truth and each held group gets the member.
+    """
     counts: dict[str, int] = {}
     for user in users:
         if not isinstance(user, dict):
             continue
-        group_id = user.get("current_group_id", user.get("group_id"))
-        if group_id in (None, ""):
-            continue
-        counts[str(group_id)] = counts.get(str(group_id), 0) + 1
+        for group_id in _user_group_ids(user):
+            counts[group_id] = counts.get(group_id, 0) + 1
     return counts
+
+
+def _user_group_ids(user: dict[str, Any]) -> list[str]:
+    group_ids: list[str] = []
+
+    def add(value: Any) -> None:
+        if value in (None, "") or isinstance(value, bool):
+            return
+        if isinstance(value, dict):
+            value = value.get("id", value.get("group_id", value.get("groupId")))
+            if value in (None, ""):
+                return
+        key = str(value)
+        if key not in group_ids:
+            group_ids.append(key)
+
+    for field_name in ("group_ids", "groupIds", "allowed_groups", "allowedGroups", "groups"):
+        raw = user.get(field_name)
+        if isinstance(raw, list):
+            for value in raw:
+                add(value)
+    add(user.get("current_group_id"))
+    add(user.get("group_id"))
+    return group_ids
 
 
 def _usage_by_window(group_usage: Any) -> dict[str, float | None]:

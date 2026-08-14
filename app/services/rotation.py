@@ -196,6 +196,10 @@ class RotationService:
         self.sub2api_client = sub2api_client
         self.settings = settings
         self.operational_data_refresher = operational_data_refresher
+        # Groups whose upstream platform could not be resolved. Kept per service
+        # instance so the per-user x per-group loops warn once per group instead
+        # of flooding the log with the same line on every lookup.
+        self._unknown_platform_group_ids: set[str] = set()
 
     def list_pool_candidates(self) -> list[dict[str, Any]]:
         rotation_selected = {
@@ -925,6 +929,7 @@ class RotationService:
             api_keys=api_keys,
             email=email,
             target_group_id=target_group_id,
+            target_platform=target_platform,
         )
         migrated_keys = self._move_api_keys_to_group(
             api_keys=api_keys,
@@ -947,6 +952,11 @@ class RotationService:
         A key belongs to whatever platform its current group serves, so only keys
         already on the target's platform (plus keys sitting in no group at all,
         which serve no platform yet) may follow the user into the target group.
+
+        When the target group itself has no platform we cannot tell which keys
+        belong to it, so the only safe move is the orphan adoption case: keys
+        that sit in no group at all. Every key that already lives somewhere is
+        left alone rather than swept into an unidentifiable group.
         """
         moved = 0
         if target_platform is not None:
@@ -959,6 +969,14 @@ class RotationService:
                 continue
             key_group_id = self._api_key_group_id(api_key)
             if self._normalize_key(key_group_id) == self._normalize_key(target_group_id):
+                continue
+            if target_platform is None and key_group_id not in (None, ""):
+                logger.info(
+                    "Skipping api key %s: target group %s has no upstream platform, "
+                    "so only keys without a group are adopted",
+                    self._normalize_key(key_id),
+                    self._normalize_key(target_group_id),
+                )
                 continue
             if target_platform is not None and key_group_id not in (None, ""):
                 key_platform = self._group_platform(key_group_id, group_index)
@@ -985,8 +1003,23 @@ class RotationService:
         api_keys: list[dict[str, Any]],
         email: str,
         target_group_id: Any,
+        target_platform: str | None = None,
     ) -> int:
+        """Bind the accounts behind the user's keys into the target group.
+
+        Accounts carry their own platform, and binding one into a group of a
+        different platform hands that platform's traffic to the wrong upstream.
+        So a candidate is bound only when its platform is known and equal to the
+        target group's platform; an unknown platform on either side is a
+        "cannot tell", which is a skip, never a pass.
+        """
         if not api_keys:
+            return 0
+        if target_platform is None:
+            logger.info(
+                "Skipping account binding for group %s: the target group has no upstream platform",
+                self._normalize_key(target_group_id),
+            )
             return 0
 
         accounts = self.sub2api_client.list_openai_accounts()
@@ -1027,6 +1060,18 @@ class RotationService:
             seen_account_keys.add(account_key)
             account = accounts_by_key.get(account_key)
             account_id = account.get("id") if account else account_key
+            account_platform = (
+                self._text_or_none(account.get("platform")) if account else None
+            )
+            if account_platform != target_platform:
+                logger.info(
+                    "Skipping account %s: its platform is %s, target group %s is on platform %s",
+                    self._normalize_key(account_id),
+                    account_platform,
+                    self._normalize_key(target_group_id),
+                    target_platform,
+                )
+                continue
             if account and self._account_has_group(account, target_group_id):
                 continue
             try:
@@ -1266,10 +1311,13 @@ class RotationService:
         group = group_index.get(self._normalize_key(group_id))
         platform = self._text_or_none(group.get("platform")) if group else None
         if platform is None:
-            logger.warning(
-                "Group %s has no upstream platform; platform-aware checks fall back to the legacy path",
-                self._normalize_key(group_id),
-            )
+            group_key = self._normalize_key(group_id)
+            if group_key not in self._unknown_platform_group_ids:
+                self._unknown_platform_group_ids.add(group_key)
+                logger.warning(
+                    "Group %s has no upstream platform; platform-aware checks fall back to the legacy path",
+                    group_key,
+                )
         return platform
 
     def _group_name_from_index(
@@ -1405,10 +1453,33 @@ class RotationService:
             raise RotationTargetValidationError("Target group is required")
         self._refresh_operational_data_before_mutation()
 
+        group_index = self._upstream_group_index()
         target_group = self._get_upstream_group(target_group_id)
-        assignment_platform = (
-            self._text_or_none(target_group.get("platform")) or DEFAULT_PLATFORM
+        target_platform = self._text_or_none(target_group.get("platform"))
+        # A key belongs to whatever platform its current group serves. Moving it
+        # into a group of another platform silently re-points that traffic, so it
+        # is rejected the same way a whole-user group change is.
+        current_group_id = self._current_api_key_group_id(
+            user_id=user_id,
+            key_id=key_id,
+            fallback_group_id=source_group_id,
         )
+        if current_group_id not in (None, ""):
+            current_platform = self._group_platform(current_group_id, group_index)
+            if (
+                target_platform is not None
+                and current_platform is not None
+                and current_platform != target_platform
+            ):
+                raise RotationTargetValidationError(
+                    "Cross-platform api key group changes are not allowed: api key "
+                    f"{self._normalize_key(key_id)} currently sits in group "
+                    f"{self._normalize_key(current_group_id)} on platform '{current_platform}' "
+                    f"while target group {self._normalize_key(target_group_id)} is on platform "
+                    f"'{target_platform}'"
+                )
+
+        assignment_platform = target_platform or DEFAULT_PLATFORM
         existing = self.store.get_user_assignment(user_id, assignment_platform)
         assignment = UserGroupAssignment(
             user_id=user_id,
@@ -1454,6 +1525,38 @@ class RotationService:
             },
         )
         return result
+
+    def _current_api_key_group_id(
+        self,
+        *,
+        user_id: Any,
+        key_id: Any,
+        fallback_group_id: Any | None = None,
+    ) -> Any | None:
+        """The group the key actually sits in upstream right now.
+
+        The caller-supplied source group is only a UI hint; the upstream key
+        payload is the truth. If the key cannot be resolved we fall back to the
+        hint rather than pretending the key has no group.
+        """
+        key_key = self._normalize_key(key_id)
+        try:
+            api_keys = self.sub2api_client.get_user_api_keys(user_id)["items"]
+        except Sub2APIError:
+            logger.warning(
+                "Unable to load api keys for user %s while resolving the current group of key %s",
+                self._normalize_key(user_id),
+                key_key,
+            )
+            return fallback_group_id
+        for api_key in api_keys:
+            if not isinstance(api_key, dict):
+                continue
+            candidate_id = api_key.get("id") or api_key.get("key_id")
+            if self._normalize_key(candidate_id) != key_key:
+                continue
+            return self._api_key_group_id(api_key)
+        return fallback_group_id
 
     def transfer_admin_api_keys(
         self,

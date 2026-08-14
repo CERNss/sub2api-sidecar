@@ -774,7 +774,12 @@ class CreditControlService:
                 return False
         if status and str(item.status or "") != status:
             return False
-        if group_id is not None and str(item.current_group_id) != str(group_id):
+        # Same rule the group-scoped policies use to pick their targets: a user
+        # counts as "in" a group when they hold it, not only when it happens to
+        # be their single current group (a multi-platform user has none).
+        if group_id is not None and not any(
+            str(user_group_id) == str(group_id) for user_group_id in item.group_ids
+        ):
             return False
         if balance_min is not None and (item.balance is None or item.balance < balance_min):
             return False
