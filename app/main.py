@@ -142,6 +142,7 @@ from app.models.schemas import (
     KeyTransferEnvelope,
     KeyTransferItemResponse,
     KeyTransferRequest,
+    OrchestrationUserAssignmentResponse,
     OrchestrationUserResponse,
     OrchestrationUsersEnvelope,
     ProvisionApiKeyStartRequest,
@@ -189,7 +190,14 @@ from app.services.operational_data import (
 )
 from app.services.notification_scheduler import NotificationScheduler
 from app.services.provisioning import ProvisioningService
-from app.services.rotation import GroupMigrationRun, KeyTransferRun, RotationExecutionResult, RotationService, parse_key_name
+from app.services.rotation import (
+    DEFAULT_PLATFORM as LEGACY_PLATFORM,
+    GroupMigrationRun,
+    KeyTransferRun,
+    RotationExecutionResult,
+    RotationService,
+    parse_key_name,
+)
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.services.usage_segmentation import UsageSegmentationService
 from app.services.usage_segmentation_scheduler import UsageSegmentationScheduler
@@ -1802,15 +1810,24 @@ def orchestration_users(
 ) -> JSONResponse:
     selected_upstream_id = normalize_upstream_id(upstream_id)
     upstream_users = get_sub2api_client(selected_upstream_id).list_users(email=email)
+    rotation_service = get_rotation_service_for_upstream(selected_upstream_id)
+    group_index = rotation_service.upstream_group_index()
     local_assignments = {
-        str(assignment.user_id): assignment
+        (str(assignment.user_id), assignment.platform): assignment
         for assignment in get_flow_store().list_user_assignments()
     }
     items: list[OrchestrationUserResponse] = []
     for user in upstream_users:
-        local_assignment = local_assignments.get(str(user["id"]))
+        # The transitional single-group fields keep reporting the openai platform
+        # until the frontend reads `assignments` instead.
+        local_assignment = local_assignments.get((str(user["id"]), LEGACY_PLATFORM))
         username = user.get("username")
         display_name = user.get("display_name")
+        assignments = rotation_service.user_platform_assignments(user, group_index)
+        legacy_assignment = next(
+            (item for item in assignments if item["platform"] == LEGACY_PLATFORM),
+            None,
+        )
         items.append(
             OrchestrationUserResponse(
                 upstream_id=selected_upstream_id,
@@ -1820,8 +1837,12 @@ def orchestration_users(
                 username=str(username) if username is not None else None,
                 display_name=str(display_name) if display_name is not None else None,
                 status=user.get("status"),
-                current_group_id=user.get("current_group_id"),
-                current_group_name=user.get("current_group_name"),
+                assignments=[
+                    OrchestrationUserAssignmentResponse(**assignment)
+                    for assignment in assignments
+                ],
+                current_group_id=legacy_assignment["group_id"] if legacy_assignment else None,
+                current_group_name=legacy_assignment["group_name"] if legacy_assignment else None,
                 group_ids=list(user.get("group_ids") or []),
                 local_group_id=local_assignment.current_group_id if local_assignment else None,
                 local_group_name=local_assignment.current_group_name if local_assignment else None,
@@ -2588,9 +2609,9 @@ def orchestration_groups(
 ) -> JSONResponse:
     selected_upstream_id = normalize_upstream_id(upstream_id)
     client = get_sub2api_client(selected_upstream_id)
-    groups = client.list_groups(
-        platform=client.provisioning_defaults.group_platform
-    )
+    # Orchestration spans every platform: the response carries each group's
+    # platform so the caller can bucket them itself.
+    groups = client.list_groups()
     items = [
         group_response(group).model_copy(update={"upstream_id": selected_upstream_id})
         for group in groups

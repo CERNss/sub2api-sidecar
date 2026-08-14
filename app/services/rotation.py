@@ -37,6 +37,10 @@ from app.stores.postgres import PostgresFlowStore
 logger = logging.getLogger(__name__)
 _DEFAULT_SOURCE_GROUP = object()
 KEY_NAME_PATTERN = "service:environment:object:version:email"
+# Transitional platform for assignments whose group carries no upstream platform.
+# Platforms are opaque strings coming from the upstream group objects; nothing in
+# this module may enumerate or parse them (group names are never parsed either).
+DEFAULT_PLATFORM = "openai"
 
 
 @dataclass
@@ -295,7 +299,15 @@ class RotationService:
         target_group_id: Any,
         reason: str | None = None,
     ) -> RotationExecutionResult:
-        assignment = self.store.get_user_assignment(user_id)
+        # The rotation happens inside the target group's platform, so the binding
+        # that gets rotated is the user's binding on that same platform.
+        target_platform = self._text_or_none(
+            self._get_upstream_group(target_group_id).get("platform")
+        )
+        assignment = self.store.get_user_assignment(
+            user_id,
+            target_platform or DEFAULT_PLATFORM,
+        )
         if assignment is None:
             raise RotationExecutionError("No stored assignment found for the user")
         self._refresh_operational_data_before_mutation()
@@ -354,6 +366,7 @@ class RotationService:
         now = datetime.now(timezone.utc)
         updated_assignment = UserGroupAssignment(
             user_id=assignment.user_id,
+            platform=assignment.platform,
             email=assignment.email,
             current_group_id=target_group_id,
             current_group_name=target_group["name"],
@@ -392,21 +405,61 @@ class RotationService:
             raise RotationTargetValidationError("Target group is required")
         self._refresh_operational_data_before_mutation()
 
-        direct_group_id, direct_group_name = self._get_direct_user_group(user_id)
+        group_index = self._upstream_group_index()
+        target_group = self._get_upstream_group(target_group_id)
+        target_platform = self._text_or_none(target_group.get("platform"))
+        if source_group_id not in (None, ""):
+            source_platform = self._group_platform(source_group_id, group_index)
+            if (
+                target_platform is not None
+                and source_platform is not None
+                and source_platform != target_platform
+            ):
+                raise RotationTargetValidationError(
+                    "Cross-platform group changes are not allowed: source group "
+                    f"{self._normalize_key(source_group_id)} is on platform '{source_platform}' "
+                    f"while target group {self._normalize_key(target_group_id)} is on platform "
+                    f"'{target_platform}'"
+                )
+
+        platform_label = f" on platform '{target_platform}'" if target_platform else ""
+        direct_group_id, direct_group_name = self._get_direct_user_group(
+            user_id,
+            platform=target_platform,
+            group_index=group_index,
+        )
         effective_source_group_id = source_group_id
         if direct_group_id not in (None, ""):
             if source_group_id in (None, ""):
                 effective_source_group_id = direct_group_id
             elif self._normalize_key(source_group_id) != self._normalize_key(direct_group_id):
                 raise RotationTargetValidationError(
-                    "Source group must match the selected user's direct current group"
+                    f"Source group must match the selected user's direct current group{platform_label}"
                 )
         elif source_group_id not in (None, ""):
             raise RotationTargetValidationError(
-                "Selected user does not have a direct current group; source group cannot be inferred"
+                f"Selected user does not have a direct current group{platform_label}; "
+                "source group cannot be inferred"
             )
+        elif target_platform is not None:
+            # First assignment on this platform: only safe while the platform slot
+            # is really empty. A user already holding several groups there is a
+            # rule violation that has to be resolved with an explicit replace.
+            existing_platform_groups = self._user_platform_group_ids(
+                user_id,
+                target_platform,
+                group_index=group_index,
+            )
+            if existing_platform_groups:
+                raise RotationTargetValidationError(
+                    f"Selected user is already bound to {len(existing_platform_groups)} groups"
+                    f"{platform_label} ("
+                    + ", ".join(
+                        self._normalize_key(group_id) for group_id in existing_platform_groups
+                    )
+                    + "); pick the group to replace instead of assigning a new one"
+                )
 
-        target_group = self._get_upstream_group(target_group_id)
         rotation_supported, unsupported_reason = self._rotation_support(target_group)
         if not rotation_supported:
             if target_group.get("is_subscription", False):
@@ -418,9 +471,11 @@ class RotationService:
             )
 
         now = datetime.now(timezone.utc)
-        existing = self.store.get_user_assignment(user_id)
+        assignment_platform = target_platform or DEFAULT_PLATFORM
+        existing = self.store.get_user_assignment(user_id, assignment_platform)
         assignment = UserGroupAssignment(
             user_id=user_id,
+            platform=assignment_platform,
             email=email,
             current_group_id=effective_source_group_id,
             current_group_name=direct_group_name or (existing.current_group_name if existing else None),
@@ -439,6 +494,8 @@ class RotationService:
                     user_id=user_id,
                     email=email,
                     target_group_id=target_group_id,
+                    target_platform=target_platform,
+                    group_index=group_index,
                 )
             except Sub2APIError as exc:
                 logger.exception("Existing assignment resource sync failed for user_id=%s", user_id)
@@ -490,6 +547,8 @@ class RotationService:
                     email=email,
                     target_group_id=target_group_id,
                     exclude_source_group_id=source_group_id,
+                    target_platform=target_platform,
+                    group_index=group_index,
                 )
                 migrated_keys = resource_sync["migrated_keys"]
                 metadata = {"bound_accounts": resource_sync["bound_accounts"]}
@@ -504,6 +563,8 @@ class RotationService:
                     email=email,
                     target_group_id=target_group_id,
                     only_unassigned_keys=True,
+                    target_platform=target_platform,
+                    group_index=group_index,
                 )
                 migrated_keys = int(response.get("migrated_keys") or 0) + resource_sync["migrated_keys"]
                 metadata = {
@@ -553,8 +614,22 @@ class RotationService:
             raise RotationTargetValidationError("Source and target groups must be different")
         self._refresh_operational_data_before_mutation()
 
+        group_index = self._upstream_group_index()
         source_group = self._get_upstream_group(source_group_id)
         target_group = self._get_upstream_group(target_group_id)
+        source_platform = self._text_or_none(source_group.get("platform"))
+        target_platform = self._text_or_none(target_group.get("platform"))
+        if (
+            source_platform is not None
+            and target_platform is not None
+            and source_platform != target_platform
+        ):
+            raise RotationTargetValidationError(
+                "Cross-platform group migration is not allowed: source group "
+                f"{self._normalize_key(source_group_id)} is on platform '{source_platform}' "
+                f"while target group {self._normalize_key(target_group_id)} is on platform "
+                f"'{target_platform}'"
+            )
         rotation_supported, unsupported_reason = self._rotation_support(target_group)
         if not rotation_supported:
             if target_group.get("is_subscription", False):
@@ -570,11 +645,15 @@ class RotationService:
         target_direct_user_count_before = self._direct_user_count_for_group(
             users,
             target_group_id,
+            platform=target_platform,
+            group_index=group_index,
         )
         migration_mode = "merge" if target_direct_user_count_before > 0 else "move"
         source_candidates = self._group_migration_candidates(
             users,
             source_group_id,
+            platform=source_platform,
+            group_index=group_index,
         )
         source_candidates.sort(
             key=lambda candidate: (
@@ -587,6 +666,7 @@ class RotationService:
         skipped: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
         request_reason = reason or "group to group orchestration"
+        assignment_platform = target_platform or source_platform or DEFAULT_PLATFORM
         now = datetime.now(timezone.utc)
         for candidate in source_candidates:
             user = candidate.user
@@ -596,6 +676,7 @@ class RotationService:
                 result = self._record_result(
                     assignment=UserGroupAssignment(
                         user_id=user_id or "",
+                        platform=assignment_platform,
                         email=email.strip() or "unknown@example.com",
                         current_group_id=source_group_id,
                         current_group_name=source_group.get("name"),
@@ -614,11 +695,12 @@ class RotationService:
                 skipped.append(self._serialize_result(result))
                 continue
 
-            existing = self.store.get_user_assignment(user_id)
+            existing = self.store.get_user_assignment(user_id, assignment_platform)
             direct_group_id = candidate.direct_group_id
             direct_group_name = candidate.direct_group_name
             assignment = UserGroupAssignment(
                 user_id=user_id,
+                platform=assignment_platform,
                 email=email,
                 current_group_id=direct_group_id or source_group_id,
                 current_group_name=direct_group_name or source_group.get("name"),
@@ -632,15 +714,27 @@ class RotationService:
 
             try:
                 direct_source_match = self._normalize_key(direct_group_id) == source_group_key
-                if direct_source_match:
+                holds_source_group = any(
+                    self._normalize_key(group_id) == source_group_key
+                    for group_id in self._candidate_user_group_ids(user)
+                )
+                if direct_source_match or holds_source_group:
+                    # Whenever the user is authorized for the source group — as its
+                    # dedicated group or only as a route for its keys — replace-group
+                    # is the transactional way to hand that authorization over: it
+                    # migrates the source group's keys and revokes only that one
+                    # grant, where a bare grant would leave the stale authorization
+                    # behind.
                     response = self.sub2api_client.replace_exclusive_user_group(
                         user_id=user_id,
                         old_group_id=source_group_id,
                         new_group_id=target_group_id,
                     )
                     upstream_migrated_keys = int(response.get("migrated_keys") or 0)
-                    source_match = "direct_group"
+                    source_match = "direct_group" if direct_source_match else "api_key_route"
                 else:
+                    # Nothing to hand over — only the keys need to move, so the
+                    # user simply gains the target group.
                     self.sub2api_client.add_user_allowed_group(
                         user_id=user_id,
                         group_id=target_group_id,
@@ -651,6 +745,8 @@ class RotationService:
                     user_id=user_id,
                     email=email,
                     target_group_id=target_group_id,
+                    target_platform=target_platform,
+                    group_index=group_index,
                 )
             except Sub2APIError as exc:
                 logger.exception("Group assignment migration failed for user_id=%s", user_id)
@@ -671,6 +767,7 @@ class RotationService:
 
             updated_assignment = UserGroupAssignment(
                 user_id=user_id,
+                platform=assignment_platform,
                 email=email,
                 current_group_id=target_group_id,
                 current_group_name=target_group.get("name"),
@@ -733,23 +830,38 @@ class RotationService:
         self,
         users: list[dict[str, Any]],
         group_id: Any,
+        platform: str | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> int:
         group_key = self._normalize_key(group_id)
         return sum(
             1
             for user in users
-            if self._normalize_key(self._direct_user_group_from_item(user)[0]) == group_key
+            if self._normalize_key(
+                self._direct_user_group_from_item(
+                    user,
+                    platform=platform,
+                    group_index=group_index,
+                )[0]
+            )
+            == group_key
         )
 
     def _group_migration_candidates(
         self,
         users: list[dict[str, Any]],
         source_group_id: Any,
+        platform: str | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> list[_GroupMigrationCandidate]:
         source_group_key = self._normalize_key(source_group_id)
         candidates: list[_GroupMigrationCandidate] = []
         for user in users:
-            direct_group_id, direct_group_name = self._direct_user_group_from_item(user)
+            direct_group_id, direct_group_name = self._direct_user_group_from_item(
+                user,
+                platform=platform,
+                group_index=group_index,
+            )
             direct_source_match = self._normalize_key(direct_group_id) == source_group_key
             source_api_key_count = 0
             if direct_source_match:
@@ -790,6 +902,8 @@ class RotationService:
         target_group_id: Any,
         only_unassigned_keys: bool = False,
         exclude_source_group_id: Any | None = None,
+        target_platform: str | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, int]:
         api_keys = self.sub2api_client.get_user_api_keys(user_id)["items"]
         if only_unassigned_keys:
@@ -815,6 +929,8 @@ class RotationService:
         migrated_keys = self._move_api_keys_to_group(
             api_keys=api_keys,
             target_group_id=target_group_id,
+            target_platform=target_platform,
+            group_index=group_index,
         )
         return {"migrated_keys": migrated_keys, "bound_accounts": bound_accounts}
 
@@ -823,16 +939,39 @@ class RotationService:
         *,
         api_keys: list[dict[str, Any]],
         target_group_id: Any,
+        target_platform: str | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> int:
+        """Move the user's keys into the target group, never across platforms.
+
+        A key belongs to whatever platform its current group serves, so only keys
+        already on the target's platform (plus keys sitting in no group at all,
+        which serve no platform yet) may follow the user into the target group.
+        """
         moved = 0
+        if target_platform is not None:
+            group_index = group_index if group_index is not None else self._upstream_group_index()
         for api_key in api_keys:
             if not isinstance(api_key, dict):
                 continue
             key_id = api_key.get("id") or api_key.get("key_id")
             if key_id in (None, ""):
                 continue
-            if self._normalize_key(self._api_key_group_id(api_key)) == self._normalize_key(target_group_id):
+            key_group_id = self._api_key_group_id(api_key)
+            if self._normalize_key(key_group_id) == self._normalize_key(target_group_id):
                 continue
+            if target_platform is not None and key_group_id not in (None, ""):
+                key_platform = self._group_platform(key_group_id, group_index)
+                if key_platform != target_platform:
+                    logger.info(
+                        "Skipping api key %s: its group %s is on platform %s, target group %s is on platform %s",
+                        self._normalize_key(key_id),
+                        self._normalize_key(key_group_id),
+                        key_platform,
+                        self._normalize_key(target_group_id),
+                        target_platform,
+                    )
+                    continue
             self.sub2api_client.update_api_key_group(
                 key_id=key_id,
                 group_id=target_group_id,
@@ -890,7 +1029,19 @@ class RotationService:
             account_id = account.get("id") if account else account_key
             if account and self._account_has_group(account, target_group_id):
                 continue
-            self.sub2api_client.bind_account_to_group(account_id, target_group_id)
+            try:
+                self.sub2api_client.bind_account_to_group(account_id, target_group_id)
+            except Sub2APIError as exc:
+                # A key can reference an account that no longer resolves upstream
+                # (deleted, or owned by another platform's admin). One unbindable
+                # account must not sink the whole rotation.
+                logger.warning(
+                    "Skipping account %s while binding to group %s: %s",
+                    self._normalize_key(account_id),
+                    self._normalize_key(target_group_id),
+                    exc,
+                )
+                continue
             bound_accounts += 1
         return bound_accounts
 
@@ -1086,13 +1237,118 @@ class RotationService:
             current = current.get(part)
         return current
 
-    def _get_direct_user_group(self, user_id: Any) -> tuple[Any | None, str | None]:
+    def _upstream_group_index(self) -> dict[str, dict[str, Any]]:
+        """Every upstream group keyed by id, across *all* platforms.
+
+        The platform of a group is the only thing that says which dedicated slot
+        a user/key belongs to, so every platform decision in this service reads
+        it from here instead of guessing from group names.
+        """
+        groups = self._latest_groups_snapshot()
+        if not groups:
+            groups = self.sub2api_client.list_groups()
+        index: dict[str, dict[str, Any]] = {}
+        for group in groups:
+            group_id = group.get("id")
+            if group_id in (None, ""):
+                continue
+            index.setdefault(self._normalize_key(group_id), group)
+        return index
+
+    def _group_platform(
+        self,
+        group_id: Any,
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> str | None:
+        if group_id in (None, ""):
+            return None
+        group_index = group_index if group_index is not None else self._upstream_group_index()
+        group = group_index.get(self._normalize_key(group_id))
+        platform = self._text_or_none(group.get("platform")) if group else None
+        if platform is None:
+            logger.warning(
+                "Group %s has no upstream platform; platform-aware checks fall back to the legacy path",
+                self._normalize_key(group_id),
+            )
+        return platform
+
+    def _group_name_from_index(
+        self,
+        group_id: Any,
+        group_index: dict[str, dict[str, Any]],
+    ) -> str | None:
+        group = group_index.get(self._normalize_key(group_id))
+        if not group:
+            return None
+        return self._text_or_none(group.get("name"))
+
+    def _user_groups_by_platform(
+        self,
+        user: dict[str, Any],
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str | None, list[Any]]:
+        """Bucket a user's authorized groups by the platform each group serves.
+
+        Upstream users only carry ``allowed_groups``; the per-platform dedicated
+        group is whatever bucket happens to hold exactly one entry.
+        """
+        group_index = group_index if group_index is not None else self._upstream_group_index()
+        buckets: dict[str | None, list[Any]] = {}
+        for group_id in self._candidate_user_group_ids(user):
+            platform = self._group_platform(group_id, group_index)
+            buckets.setdefault(platform, []).append(group_id)
+        return buckets
+
+    def _user_platform_group_ids(
+        self,
+        user_id: Any,
+        platform: str,
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> list[Any]:
+        group_index = group_index if group_index is not None else self._upstream_group_index()
         for user in self._latest_users_snapshot():
             if self._normalize_key(user.get("id")) == self._normalize_key(user_id):
-                return user.get("current_group_id"), user.get("current_group_name")
+                return self._user_groups_by_platform(user, group_index).get(platform, [])
+        return []
+
+    def _get_direct_user_group(
+        self,
+        user_id: Any,
+        platform: str | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[Any | None, str | None]:
+        for user in self._latest_users_snapshot():
+            if self._normalize_key(user.get("id")) == self._normalize_key(user_id):
+                return self._direct_user_group_from_item(
+                    user,
+                    platform=platform,
+                    group_index=group_index,
+                )
         return None, None
 
-    def _direct_user_group_from_item(self, user: dict[str, Any]) -> tuple[Any | None, str | None]:
+    def _direct_user_group_from_item(
+        self,
+        user: dict[str, Any],
+        platform: str | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[Any | None, str | None]:
+        if platform is not None:
+            group_index = group_index if group_index is not None else self._upstream_group_index()
+            bucket = self._user_groups_by_platform(user, group_index).get(platform, [])
+            if not bucket:
+                return None, None
+            if len(bucket) > 1:
+                logger.warning(
+                    "User %s is bound to %d groups on platform %s (%s); the rule allows one, treating it as no direct group",
+                    self._normalize_key(user.get("id")),
+                    len(bucket),
+                    platform,
+                    ", ".join(self._normalize_key(group_id) for group_id in bucket),
+                )
+                return None, None
+            group_id = bucket[0]
+            return group_id, self._group_name_from_index(group_id, group_index)
+
         raw = user.get("raw")
         if isinstance(raw, dict):
             for field_name in (
@@ -1150,9 +1406,13 @@ class RotationService:
         self._refresh_operational_data_before_mutation()
 
         target_group = self._get_upstream_group(target_group_id)
-        existing = self.store.get_user_assignment(user_id)
+        assignment_platform = (
+            self._text_or_none(target_group.get("platform")) or DEFAULT_PLATFORM
+        )
+        existing = self.store.get_user_assignment(user_id, assignment_platform)
         assignment = UserGroupAssignment(
             user_id=user_id,
+            platform=assignment_platform,
             email=email,
             current_group_id=source_group_id if source_group_id not in (None, "") else target_group_id,
             current_group_name=existing.current_group_name if existing else None,
@@ -1247,7 +1507,11 @@ class RotationService:
             if parsed is not None
         }
         users_by_email, duplicate_emails = self._users_by_exact_emails(target_emails)
-        available_groups_by_key = self._available_groups_by_key()
+        # Transferred keys can live on any platform, so the candidate target groups
+        # are not narrowed to the provisioning platform here; each key is matched
+        # against its own platform below.
+        available_groups_by_key = self._active_groups_by_key()
+        group_index = self._upstream_group_index()
         items: list[KeyTransferItem] = []
         for key_item in source_keys:
             item = self._plan_key_transfer(
@@ -1257,6 +1521,7 @@ class RotationService:
                 users_by_email=users_by_email,
                 duplicate_emails=duplicate_emails,
                 available_groups_by_key=available_groups_by_key,
+                group_index=group_index,
             )
             if item.status == RotationResultStatus.planned and not dry_run:
                 item = self._execute_key_transfer(item)
@@ -1382,15 +1647,20 @@ class RotationService:
             runtime_config=runtime_config,
             persist=not dry_run,
         )
-        assignments_by_user_id = {
-            self._normalize_key(assignment.user_id): assignment
+        group_index = self._upstream_group_index()
+        # Keyed per (user, platform): one user can hold a dedicated group on each
+        # platform, and those bindings rotate independently of one another.
+        assignments_by_key = {
+            (self._normalize_key(assignment.user_id), assignment.platform): assignment
             for assignment in self.store.list_user_assignments()
             if self._assignment_in_pool(assignment, pool_groups)
             and self._normalize_key(assignment.user_id) not in sync_result.seen_user_keys
         }
         for assignment in sync_result.assignments:
-            assignments_by_user_id[self._normalize_key(assignment.user_id)] = assignment
-        assignments = list(assignments_by_user_id.values())
+            assignments_by_key[
+                (self._normalize_key(assignment.user_id), assignment.platform)
+            ] = assignment
+        assignments = list(assignments_by_key.values())
         ordered_candidates: list[UsageRotationCandidate] = []
         for assignment in assignments:
             usage_snapshot = self._build_usage_snapshot(assignment.user_id)
@@ -1419,6 +1689,13 @@ class RotationService:
         skipped: list[RotationExecutionResult] = []
         failed: list[RotationExecutionResult] = []
         sorted_pool = sorted(pool_groups, key=lambda group: (group.priority, group.created_at))
+        # Load balancing happens strictly inside a platform: a grok group is never
+        # a valid landing spot for an openai binding, however idle it looks.
+        pool_by_platform: dict[str | None, list[RotationPoolGroup]] = {}
+        for pool_group in sorted_pool:
+            pool_by_platform.setdefault(
+                self._pool_group_platform(pool_group, group_index), []
+            ).append(pool_group)
         group_load_state = self._initial_pool_group_loads(sorted_pool, ordered_candidates)
         target_loads = group_load_state.loads
         target_availability = self._target_group_availability()
@@ -1428,7 +1705,22 @@ class RotationService:
                 usage_snapshot = self._build_usage_snapshot(assignment.user_id)
                 usage_value = float(usage_snapshot["usage_value"])
                 assignment.has_api_keys = usage_snapshot["has_api_keys"]
-                target_group = self._select_least_loaded_usage_group(sorted_pool, target_loads)
+                platform = self._assignment_platform(assignment, group_index)
+                platform_pool = pool_by_platform.get(platform, [])
+                if not platform_pool:
+                    skipped.append(
+                        self._skipped_result(
+                            assignment=assignment,
+                            trigger_type=trigger_type,
+                            reason=f"No rotation pool groups are available on platform {platform}",
+                            usage_window=usage_snapshot["usage_window"],
+                            usage_value=usage_value,
+                            usage_snapshot=usage_snapshot,
+                            persist=not dry_run,
+                        )
+                    )
+                    continue
+                target_group = self._select_least_loaded_usage_group(platform_pool, target_loads)
                 target_key = self._normalize_key(target_group.group_id)
                 reason = f"auto assign new user by usage load window={usage_snapshot['usage_window'].value} usage={usage_value}"
                 group_loads_before = self._group_load_metadata(
@@ -1454,6 +1746,7 @@ class RotationService:
                         usage_value=usage_value,
                         usage_snapshot=usage_snapshot,
                         metadata=metadata,
+                        group_index=group_index,
                     )
                 else:
                     result = self._execute_rotation(
@@ -1466,6 +1759,7 @@ class RotationService:
                         usage_value=usage_value,
                         usage_snapshot=usage_snapshot,
                         metadata=metadata,
+                        group_index=group_index,
                     )
                 if result.status == RotationResultStatus.moved:
                     target_loads[target_key] += usage_value
@@ -1482,16 +1776,38 @@ class RotationService:
         improvement_delta = max(0.0, float(runtime_config.improvement_delta))
         dead_band_skipped = False
         for candidate in ordered_candidates:
-            if imbalance_epsilon > 0 and target_loads:
-                spread = max(target_loads.values()) - min(target_loads.values())
+            assignment = candidate.assignment
+            platform = self._assignment_platform(assignment, group_index)
+            platform_pool = pool_by_platform.get(platform, [])
+            if not platform_pool:
+                skipped.append(
+                    self._skipped_result(
+                        assignment=assignment,
+                        trigger_type=trigger_type,
+                        reason=f"No rotation pool groups are available on platform {platform}",
+                        usage_window=candidate.usage_snapshot["usage_window"],
+                        usage_value=candidate.usage_value,
+                        usage_snapshot=candidate.usage_snapshot,
+                        persist=not dry_run,
+                    )
+                )
+                continue
+            platform_loads = {
+                self._normalize_key(pool_group.group_id): target_loads[
+                    self._normalize_key(pool_group.group_id)
+                ]
+                for pool_group in platform_pool
+                if self._normalize_key(pool_group.group_id) in target_loads
+            }
+            if imbalance_epsilon > 0 and platform_loads:
+                spread = max(platform_loads.values()) - min(platform_loads.values())
                 if spread <= imbalance_epsilon:
                     dead_band_skipped = True
-                    break
-            assignment = candidate.assignment
+                    continue
             source_key = self._normalize_key(assignment.current_group_id)
             target_group, selection = self._select_usage_balancing_target_group(
                 candidate,
-                sorted_pool,
+                platform_pool,
                 target_loads,
                 improvement_delta=improvement_delta,
             )
@@ -1538,6 +1854,7 @@ class RotationService:
                     usage_value=candidate.usage_value,
                     usage_snapshot=candidate.usage_snapshot,
                     metadata=metadata,
+                    group_index=group_index,
                 )
             else:
                 result = self._execute_rotation(
@@ -1550,6 +1867,7 @@ class RotationService:
                     usage_value=candidate.usage_value,
                     usage_snapshot=candidate.usage_snapshot,
                     metadata=metadata,
+                    group_index=group_index,
                 )
             if source_key != target_key and result.status in {
                 RotationResultStatus.moved,
@@ -1673,7 +1991,10 @@ class RotationService:
             "skipped_without_current_group": 0,
             "skipped_outside_schedule_range": 0,
             "skipped_outside_pool": 0,
+            "skipped_multiple_groups_on_platform": 0,
+            "skipped_unknown_group_platform": 0,
         }
+        group_index = self._upstream_group_index()
         assignments: list[UserGroupAssignment] = []
         new_user_candidates: list[UserGroupAssignment] = []
         seen_user_keys: set[str] = set()
@@ -1682,53 +2003,71 @@ class RotationService:
             user_id = user.get("id")
             seen_user_keys.add(self._normalize_key(user_id))
             email = str(user.get("email") or "")
-            current_group_id = user.get("current_group_id")
-            current_group_key = self._normalize_key(current_group_id) if current_group_id not in (None, "") else ""
-            if not current_group_key:
+            platform_buckets = self._user_groups_by_platform(user, group_index)
+            if not platform_buckets:
                 summary["skipped_without_current_group"] += 1
                 continue
-            if current_group_key in pool_group_names:
-                existing = self.store.get_user_assignment(user_id)
-                assignment = UserGroupAssignment(
-                    user_id=user_id,
-                    email=email,
-                    current_group_id=current_group_id,
-                    current_group_name=user.get("current_group_name") or pool_group_names[current_group_key],
-                    assignment_mode=existing.assignment_mode if existing else AssignmentMode.managed_pool,
-                    last_rotation_at=existing.last_rotation_at if existing else None,
-                    last_decision_reason=existing.last_decision_reason if existing else "synced from upstream current user group",
-                    has_api_keys=existing.has_api_keys if existing else None,
-                    created_at=existing.created_at if existing else now,
-                    updated_at=now,
-                )
-                assignments.append(assignment)
-                if persist:
-                    self.store.upsert_user_assignment(assignment)
-                summary["synced"] += 1
-                continue
+            # One dedicated group per platform: every platform bucket produces its
+            # own assignment row, and a bucket that is not a single group is a rule
+            # violation this sync refuses to guess about.
+            for platform in sorted(
+                platform_buckets,
+                key=lambda value: (value is None, str(value)),
+            ):
+                group_ids = platform_buckets[platform]
+                if platform is None:
+                    summary["skipped_unknown_group_platform"] += 1
+                    continue
+                if len(group_ids) != 1:
+                    summary["skipped_multiple_groups_on_platform"] += 1
+                    continue
+                current_group_id = group_ids[0]
+                current_group_key = self._normalize_key(current_group_id)
+                group_name = self._group_name_from_index(current_group_id, group_index)
+                if current_group_key in pool_group_names:
+                    existing = self.store.get_user_assignment(user_id, platform)
+                    assignment = UserGroupAssignment(
+                        user_id=user_id,
+                        platform=platform,
+                        email=email,
+                        current_group_id=current_group_id,
+                        current_group_name=group_name or pool_group_names[current_group_key],
+                        assignment_mode=existing.assignment_mode if existing else AssignmentMode.managed_pool,
+                        last_rotation_at=existing.last_rotation_at if existing else None,
+                        last_decision_reason=existing.last_decision_reason if existing else "synced from upstream current user group",
+                        has_api_keys=existing.has_api_keys if existing else None,
+                        created_at=existing.created_at if existing else now,
+                        updated_at=now,
+                    )
+                    assignments.append(assignment)
+                    if persist:
+                        self.store.upsert_user_assignment(assignment)
+                    summary["synced"] += 1
+                    continue
 
-            if current_group_key not in landing_group_names:
-                summary["skipped_outside_schedule_range"] += 1
-                continue
+                if current_group_key not in landing_group_names:
+                    summary["skipped_outside_schedule_range"] += 1
+                    continue
 
-            if runtime_config.auto_assign_new_users:
-                existing = self.store.get_user_assignment(user_id)
-                assignment = UserGroupAssignment(
-                    user_id=user_id,
-                    email=email,
-                    current_group_id=current_group_id,
-                    current_group_name=user.get("current_group_name") or landing_group_names[current_group_key],
-                    assignment_mode=existing.assignment_mode if existing else AssignmentMode.managed_pool,
-                    last_rotation_at=existing.last_rotation_at if existing else None,
-                    last_decision_reason=existing.last_decision_reason if existing else "discovered outside dynamic target pool",
-                    has_api_keys=existing.has_api_keys if existing else None,
-                    created_at=existing.created_at if existing else now,
-                    updated_at=now,
-                )
-                new_user_candidates.append(assignment)
-                summary["new_user_candidates"] += 1
-            else:
-                summary["skipped_outside_pool"] += 1
+                if runtime_config.auto_assign_new_users:
+                    existing = self.store.get_user_assignment(user_id, platform)
+                    assignment = UserGroupAssignment(
+                        user_id=user_id,
+                        platform=platform,
+                        email=email,
+                        current_group_id=current_group_id,
+                        current_group_name=group_name or landing_group_names[current_group_key],
+                        assignment_mode=existing.assignment_mode if existing else AssignmentMode.managed_pool,
+                        last_rotation_at=existing.last_rotation_at if existing else None,
+                        last_decision_reason=existing.last_decision_reason if existing else "discovered outside dynamic target pool",
+                        has_api_keys=existing.has_api_keys if existing else None,
+                        created_at=existing.created_at if existing else now,
+                        updated_at=now,
+                    )
+                    new_user_candidates.append(assignment)
+                    summary["new_user_candidates"] += 1
+                else:
+                    summary["skipped_outside_pool"] += 1
         return UpstreamAssignmentSyncResult(
             summary=summary,
             assignments=assignments,
@@ -1837,6 +2176,7 @@ class RotationService:
         assignment: UserGroupAssignment,
         target_group_id: Any,
         availability: TargetGroupAvailability | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[RotationPoolGroup | None, _PreconditionBlock | None]:
         target_group = self.store.get_rotation_pool_group(target_group_id)
         if target_group is None or not target_group.is_exclusive:
@@ -1848,6 +2188,19 @@ class RotationService:
             return target_group, _PreconditionBlock(
                 RotationResultStatus.failed,
                 "Target group is a subscription group; replace-group supports only dedicated standard groups",
+            )
+        group_index = group_index if group_index is not None else self._upstream_group_index()
+        target_platform = self._pool_group_platform(target_group, group_index)
+        assignment_platform = self._assignment_platform(assignment, group_index)
+        if (
+            target_platform is not None
+            and assignment_platform is not None
+            and target_platform != assignment_platform
+        ):
+            return target_group, _PreconditionBlock(
+                RotationResultStatus.failed,
+                f"Target group is on platform '{target_platform}' while the user's binding is "
+                f"on platform '{assignment_platform}'",
             )
         if self.store.has_pending_flow_for_user(assignment.user_id):
             return target_group, _PreconditionBlock(
@@ -1887,11 +2240,13 @@ class RotationService:
         usage_value: float | None = None,
         usage_snapshot: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> RotationExecutionResult:
         target_group, block = self._evaluate_rotation_preconditions(
             assignment=assignment,
             target_group_id=target_group_id,
             availability=availability,
+            group_index=group_index,
         )
         if block is not None:
             return self._record_result(
@@ -1927,6 +2282,7 @@ class RotationService:
         now = datetime.now(timezone.utc)
         updated_assignment = UserGroupAssignment(
             user_id=assignment.user_id,
+            platform=assignment.platform,
             email=assignment.email,
             current_group_id=target_group_id,
             current_group_name=target_group.group_name,
@@ -1969,11 +2325,13 @@ class RotationService:
         usage_value: float | None = None,
         usage_snapshot: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> RotationExecutionResult:
         target_group, block = self._evaluate_rotation_preconditions(
             assignment=assignment,
             target_group_id=target_group_id,
             availability=availability,
+            group_index=group_index,
         )
         result_metadata = metadata.copy() if metadata else None
         if result_metadata is not None and target_group is not None:
@@ -2077,6 +2435,7 @@ class RotationService:
         now = datetime.now(timezone.utc)
         updated_assignment = UserGroupAssignment(
             user_id=assignment.user_id,
+            platform=self._text_or_none(target_group.get("platform")) or assignment.platform,
             email=assignment.email,
             current_group_id=target_group_id,
             current_group_name=target_group["name"],
@@ -2148,7 +2507,12 @@ class RotationService:
         self,
         assignment: UserGroupAssignment,
     ) -> UserGroupAssignment:
-        direct_group_id, direct_group_name = self._get_direct_user_group(assignment.user_id)
+        group_index = self._upstream_group_index()
+        direct_group_id, direct_group_name = self._get_direct_user_group(
+            assignment.user_id,
+            platform=self._assignment_platform(assignment, group_index),
+            group_index=group_index,
+        )
         if direct_group_id in (None, ""):
             return assignment
         if self._normalize_key(direct_group_id) == self._normalize_key(assignment.current_group_id):
@@ -2159,6 +2523,7 @@ class RotationService:
             return assignment
         refreshed = UserGroupAssignment(
             user_id=assignment.user_id,
+            platform=assignment.platform,
             email=assignment.email,
             current_group_id=direct_group_id,
             current_group_name=direct_group_name,
@@ -2173,9 +2538,14 @@ class RotationService:
         return refreshed
 
     def _available_groups_by_key(self) -> dict[str, dict[str, Any]]:
-        groups = self.sub2api_client.list_groups(
-            platform=self.sub2api_client.provisioning_defaults.group_platform
+        # Provisioning's configured platform still gates this view; the callers
+        # that must span platforms use _active_groups_by_key() instead.
+        return self._active_groups_by_key(
+            self.sub2api_client.provisioning_defaults.group_platform
         )
+
+    def _active_groups_by_key(self, platform: str | None = None) -> dict[str, dict[str, Any]]:
+        groups = self.sub2api_client.list_groups(platform=platform)
         available: dict[str, dict[str, Any]] = {}
         for group in groups:
             group_id = group.get("id")
@@ -2190,9 +2560,7 @@ class RotationService:
     def _target_group_availability(self) -> TargetGroupAvailability:
         groups = self._latest_groups_snapshot()
         if not groups:
-            groups = self.sub2api_client.list_groups(
-                platform=self.sub2api_client.provisioning_defaults.group_platform
-            )
+            groups = self.sub2api_client.list_groups()
         accounts = self._latest_accounts_snapshot()
         if not accounts:
             accounts = self.sub2api_client.list_openai_accounts()
@@ -2382,6 +2750,7 @@ class RotationService:
         users_by_email: dict[str, dict[str, Any]],
         duplicate_emails: set[str],
         available_groups_by_key: dict[str, dict[str, Any]],
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> KeyTransferItem:
         key_id = key_item.get("id") or key_item.get("key_id")
         key_name = self._text_or_none(key_item.get("name"))
@@ -2491,9 +2860,14 @@ class RotationService:
                 reason="TARGET_USER_ID_NOT_FOUND",
             )
 
+        # A key serves the platform of the group it currently sits in, so it may
+        # only land in a group of that same platform.
+        source_platform = self._group_platform(source_group_id, group_index)
         target_group_id = self._first_available_user_group_id(
             target_user,
             available_groups_by_key,
+            platform=source_platform,
+            group_index=group_index,
         )
         if target_group_id in (None, ""):
             return KeyTransferItem(
@@ -2506,7 +2880,11 @@ class RotationService:
                 target_email=target_email,
                 target_group_id=None,
                 status=RotationResultStatus.skipped,
-                reason="TARGET_USER_GROUP_NOT_FOUND",
+                reason=self._missing_transfer_target_group_reason(
+                    target_user,
+                    available_groups_by_key,
+                    source_platform,
+                ),
             )
 
         if self._normalize_key(source_key_user_id) == self._normalize_key(target_user_id):
@@ -2536,6 +2914,23 @@ class RotationService:
             reason="Ready to transfer API key to target email user",
             quota=0.0,
         )
+
+    def _missing_transfer_target_group_reason(
+        self,
+        target_user: dict[str, Any],
+        available_groups_by_key: dict[str, dict[str, Any]],
+        platform: str | None,
+    ) -> str:
+        """Tell "user has no usable group" apart from "none on this platform"."""
+        if platform is None:
+            return "TARGET_USER_GROUP_NOT_FOUND"
+        has_any_group = self._first_available_user_group_id(
+            target_user,
+            available_groups_by_key,
+        ) not in (None, "")
+        if not has_any_group:
+            return "TARGET_USER_GROUP_NOT_FOUND"
+        return f"TARGET_USER_GROUP_NOT_FOUND_ON_PLATFORM_{platform.upper()}"
 
     def _normalize_selected_key_ids(self, key_ids: list[Any] | None) -> set[str] | None:
         if key_ids is None:
@@ -2671,8 +3066,34 @@ class RotationService:
         self,
         user: dict[str, Any],
         available_groups_by_key: dict[str, dict[str, Any]],
+        platform: str | None = None,
+        group_index: dict[str, dict[str, Any]] | None = None,
     ) -> Any | None:
-        for group_id in self._candidate_user_group_ids(user):
+        candidate_group_ids = self._candidate_user_group_ids(user)
+        if platform is not None:
+            group_index = group_index if group_index is not None else self._upstream_group_index()
+            direct_group_id, _ = self._direct_user_group_from_item(
+                user,
+                platform=platform,
+                group_index=group_index,
+            )
+            candidate_group_ids = [
+                group_id
+                for group_id in candidate_group_ids
+                if self._group_platform(group_id, group_index) == platform
+            ]
+            # The user's dedicated group on that platform is the natural landing
+            # spot; the remaining authorizations are only a fallback.
+            if direct_group_id not in (None, ""):
+                candidate_group_ids = [
+                    direct_group_id,
+                    *(
+                        group_id
+                        for group_id in candidate_group_ids
+                        if self._normalize_key(group_id) != self._normalize_key(direct_group_id)
+                    ),
+                ]
+        for group_id in candidate_group_ids:
             if self._normalize_key(group_id) in available_groups_by_key:
                 return group_id
         return None
@@ -2726,6 +3147,42 @@ class RotationService:
 
     def candidate_group_ids_for_user(self, user: dict[str, Any]) -> list[Any]:
         return self._candidate_user_group_ids(user)
+
+    def user_platform_assignments(
+        self,
+        user: dict[str, Any],
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """The user's dedicated group on each platform, one entry per platform.
+
+        Platforms where the rule is violated (more than one group) or where the
+        group carries no platform are left out: there is no single dedicated
+        group to report for them.
+        """
+        group_index = group_index if group_index is not None else self._upstream_group_index()
+        buckets = self._user_groups_by_platform(user, group_index)
+        assignments: list[dict[str, Any]] = []
+        for platform in sorted(
+            buckets,
+            key=lambda value: (value is None, str(value)),
+        ):
+            if platform is None:
+                continue
+            group_ids = buckets[platform]
+            if len(group_ids) != 1:
+                continue
+            group_id = group_ids[0]
+            assignments.append(
+                {
+                    "platform": platform,
+                    "group_id": group_id,
+                    "group_name": self._group_name_from_index(group_id, group_index),
+                }
+            )
+        return assignments
+
+    def upstream_group_index(self) -> dict[str, dict[str, Any]]:
+        return self._upstream_group_index()
 
     def _save_orchestration_run(
         self,
@@ -2799,7 +3256,9 @@ class RotationService:
         for group in self._latest_groups_snapshot():
             if self._normalize_key(group["id"]) == target_key:
                 return group
-        for group in self.sub2api_client.list_groups(platform="openai"):
+        # Unfiltered: orchestration spans every platform, so a platform filter here
+        # would make groups of other platforms look like they do not exist.
+        for group in self.sub2api_client.list_groups():
             if self._normalize_key(group["id"]) == target_key:
                 return group
         raise RotationTargetValidationError("Group was not found in upstream Sub2API")
@@ -2823,7 +3282,7 @@ class RotationService:
     ) -> list[dict[str, Any]]:
         groups = self._latest_groups_snapshot()
         if not groups:
-            groups = self.sub2api_client.list_groups(platform="openai")
+            groups = self.sub2api_client.list_groups()
 
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -3115,6 +3574,63 @@ class RotationService:
 
     def _window_enum(self) -> AutoRotationUsageWindow:
         return self.get_auto_rotation_config().usage_window
+
+    def _pool_group_platform(
+        self,
+        pool_group: RotationPoolGroup,
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> str | None:
+        group_index = group_index if group_index is not None else self._upstream_group_index()
+        group = group_index.get(self._normalize_key(pool_group.group_id))
+        platform = self._text_or_none(group.get("platform")) if group else None
+        # The pool row keeps the platform it was added with, which is the only
+        # hint left when the upstream group snapshot has gone stale.
+        return platform or self._text_or_none(pool_group.platform)
+
+    def _assignment_platform(
+        self,
+        assignment: UserGroupAssignment,
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> str | None:
+        group_index = group_index if group_index is not None else self._upstream_group_index()
+        group = group_index.get(self._normalize_key(assignment.current_group_id))
+        platform = self._text_or_none(group.get("platform")) if group else None
+        return platform or self._text_or_none(assignment.platform)
+
+    def _skipped_result(
+        self,
+        *,
+        assignment: UserGroupAssignment,
+        trigger_type: RotationTrigger,
+        reason: str,
+        usage_window: AutoRotationUsageWindow | None = None,
+        usage_value: float | None = None,
+        usage_snapshot: dict[str, Any] | None = None,
+        persist: bool,
+    ) -> RotationExecutionResult:
+        if persist:
+            return self._record_result(
+                assignment=assignment,
+                target_group_id=None,
+                trigger_type=trigger_type,
+                status=RotationResultStatus.skipped,
+                reason=reason,
+                usage_window=usage_window,
+                usage_value=usage_value,
+                usage_snapshot=usage_snapshot,
+            )
+        return RotationExecutionResult(
+            user_id=assignment.user_id,
+            email=assignment.email,
+            source_group_id=assignment.current_group_id,
+            target_group_id=None,
+            trigger_type=trigger_type,
+            status=RotationResultStatus.skipped,
+            reason=reason,
+            usage_window=usage_window,
+            usage_value=usage_value,
+            usage_snapshot=usage_snapshot,
+        )
 
     def _assignment_in_pool(
         self,

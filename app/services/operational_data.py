@@ -188,7 +188,10 @@ class OperationalDataCollector:
             groups_future = executor.submit(
                 self._fetch_source,
                 SOURCE_GROUPS,
-                lambda: self.client.list_groups(platform="openai"),
+                # Unfiltered: the snapshot is the platform index every consumer
+                # reads, so narrowing it to one platform would hide the groups of
+                # every other platform (and with them their platform field).
+                self.client.list_groups,
                 item_count=lambda value: len(value),
             )
             users_future = executor.submit(

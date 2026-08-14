@@ -603,7 +603,9 @@ def test_operational_data_collector_collects_all_sources_and_persists_samples(cl
     # depend on them, and per-source call sequences keep their order.
     phase_one_calls = [
         "accounts",
-        "groups:openai",
+        # Unfiltered: the groups snapshot is the platform index, so it must carry
+        # the groups of every platform, not just the provisioning one.
+        "groups:None",
         "users",
         "usage_logs:None:2026-05-10:2026-05-10",
         "usage_logs:None:2026-05-09:2026-05-09",

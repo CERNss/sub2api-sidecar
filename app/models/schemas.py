@@ -161,6 +161,12 @@ class ProvisionFlowsEnvelope(BaseModel):
     offset: int
 
 
+class OrchestrationUserAssignmentResponse(BaseModel):
+    platform: str
+    group_id: Any
+    group_name: str | None = None
+
+
 class OrchestrationUserResponse(BaseModel):
     upstream_id: str
     user_id: Any
@@ -169,6 +175,10 @@ class OrchestrationUserResponse(BaseModel):
     username: str | None = None
     display_name: str | None = None
     status: str | None = None
+    # One dedicated group per platform; `assignments` is the full picture.
+    assignments: list[OrchestrationUserAssignmentResponse] = Field(default_factory=list)
+    # Transitional single-platform view kept for the current frontend: both carry
+    # the "openai" platform entry until the UI switches to `assignments`.
     current_group_id: Any | None = None
     current_group_name: str | None = None
     group_ids: list[Any] = Field(default_factory=list)

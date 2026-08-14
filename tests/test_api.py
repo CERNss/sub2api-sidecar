@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -165,6 +166,24 @@ class FakeRotationSub2API:
                 "is_exclusive": True,
                 "subscription_id": "sub-1",
             },
+            # A second platform lives in the same upstream: group names mean
+            # nothing, only the platform field does.
+            {
+                "id": 71,
+                "name": "grok-low",
+                "type": "standard",
+                "platform": "grok",
+                "status": "active",
+                "is_exclusive": True,
+            },
+            {
+                "id": 72,
+                "name": "grok-high",
+                "type": "standard",
+                "platform": "grok",
+                "status": "active",
+                "is_exclusive": True,
+            },
         ]
         self.accounts = [
             {
@@ -224,6 +243,28 @@ class FakeRotationSub2API:
                 "available": True,
                 "groupIds": [33],
                 "binding": {"id": "binding-1", "groupId": 44, "groupName": "subscription-dedicated"},
+            },
+            {
+                "id": "acct-grok-low",
+                "name": "grok-account-low",
+                "provider": "grok",
+                "platform": "grok",
+                "type": "oauth",
+                "status": "active",
+                "available": True,
+                "schedulable": True,
+                "group_ids": [71],
+            },
+            {
+                "id": "acct-grok-high",
+                "name": "grok-account-high",
+                "provider": "grok",
+                "platform": "grok",
+                "type": "oauth",
+                "status": "active",
+                "available": True,
+                "schedulable": True,
+                "group_ids": [72],
             },
         ]
         self.user_api_keys: dict[int, list[dict[str, object]]] = {}
@@ -1049,12 +1090,19 @@ def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
     for user in backend.users:
         current_group_id = user.get("current_group_id", user.get("group_id"))
         current_group_name = user.get("current_group_name", user.get("group_name"))
+        # Mirror the client parser: every authorization the user holds survives
+        # into the snapshot, which is what the per-platform bucketing reads.
+        group_ids = list(user.get("group_ids") or user.get("allowed_groups") or [])
+        if current_group_id not in (None, "") and not any(
+            str(existing) == str(current_group_id) for existing in group_ids
+        ):
+            group_ids.insert(0, current_group_id)
         users.append(
             {
                 **user,
                 "current_group_id": current_group_id,
                 "current_group_name": current_group_name,
-                "group_ids": [current_group_id] if current_group_id not in (None, "") else [],
+                "group_ids": group_ids,
             }
         )
     user_usage: dict[str, dict[str, dict[str, float]]] = {}
@@ -1063,6 +1111,8 @@ def save_operational_snapshots(backend: FakeRotationSub2API) -> None:
         costs = {
             101: {"5h": 1.5, "1d": 2.5, "7d": 6.0, "30d": 20.0},
             202: {"5h": 0.2, "1d": 0.5, "7d": 1.2, "30d": 4.0},
+            808: {"5h": 1.0, "1d": 2.0, "7d": 5.0, "30d": 15.0},
+            909: {"5h": 0.1, "1d": 0.3, "7d": 0.8, "30d": 3.0},
         }.get(user_id, {})
         user_usage[str(user_id)] = {
             window: {"total_cost": cost, "total_actual_cost": cost}
@@ -2536,6 +2586,9 @@ sub2api:
     assert payload["upstream_id"] == "secondary"
     assert payload["items"][0]["upstream_id"] == "secondary"
     assert payload["items"][0]["email"] == "secondary@example.com"
+    # The users view resolves each user's per-platform group, which needs the
+    # selected upstream's group list too (served from the operational snapshot
+    # once one exists).
     assert calls == [
         {
             "method": "GET",
@@ -2543,13 +2596,20 @@ sub2api:
             "path": "/api/v1/admin/users",
             "api_key": "secondary-key",
             "timeout": 18,
-        }
+        },
+        {
+            "method": "GET",
+            "host": "secondary-sub2api.local",
+            "path": "/api/v1/admin/groups/all",
+            "api_key": "secondary-key",
+            "timeout": 18,
+        },
     ]
 
     missing_response = client.get("/orchestration/users?upstream_id=missing")
     assert missing_response.status_code == 422
     assert "Unknown Sub2API upstream_id: missing" in missing_response.json()["detail"]
-    assert len(calls) == 1
+    assert len(calls) == 2
 
     monkeypatch.setenv("CONFIG_PATH", "__missing_test_config__.yaml")
     clear_caches()
@@ -3293,6 +3353,27 @@ def test_rotation_pool_candidates_and_exclusive_selection(client) -> None:
     assert selected[44]["rotation_supported"] is False
 
 
+def test_rotation_pool_stores_the_upstream_platform_of_the_group(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        openai_group = client.post("/rotation/pool/groups", json={"group_id": 11})
+        grok_group = client.post("/rotation/pool/groups", json={"group_id": 72})
+
+    assert openai_group.status_code == 200
+    assert grok_group.status_code == 200
+    # Pool rows carry the platform they were added with, which is what buckets
+    # the balancing decisions later on.
+    stored = {
+        group.group_id: group.platform
+        for group in main.get_flow_store().list_rotation_pool_groups()
+    }
+    assert stored["11"] == "openai"
+    assert stored["72"] == "grok"
+
+
 def test_landing_and_rotation_pools_are_independent(client) -> None:
     backend = FakeRotationSub2API()
     login(client)
@@ -3407,7 +3488,9 @@ def test_pool_candidates_fallback_to_upstream_groups_without_snapshot(client) ->
     assert response.status_code == 200
     items = response.json()["items"]
     selected = {item["group_id"]: item for item in items}
-    assert set(selected) == {11, 22, 33, 44}
+    # Candidates span every platform; the caller picks by the platform field.
+    assert set(selected) == {11, 22, 33, 44, 71, 72}
+    assert selected[71]["platform"] == "grok"
     assert selected[33]["is_exclusive"] is False
     assert selected[33]["is_subscription"] is False
     assert selected[33]["rotation_supported"] is False
@@ -3609,11 +3692,12 @@ def test_group_usage_apis_require_auth_and_refresh(client) -> None:
 
     assert unauthenticated.status_code == 401
     assert refresh.status_code == 200
-    assert refresh.json()["group_count"] == 4
+    # Six groups now: the four openai ones plus the two grok ones.
+    assert refresh.json()["group_count"] == 6
     assert refresh.json()["window_counts"]["5h"] >= 2
     assert groups.status_code == 200
     payload = groups.json()
-    assert payload["total"] == 4
+    assert payload["total"] == 6
     by_id = {str(item["group_id"]): item for item in payload["items"]}
     assert by_id["11"]["group_name"] == "rotation-low"
     assert by_id["11"]["usage_by_window"]["5h"] == 0.2
@@ -4270,21 +4354,22 @@ def test_group_migration_moves_users_with_source_group_keys_without_direct_group
     assert payload["moved"][0]["migrated_keys"] == 2
     assert payload["moved"][0]["metadata"]["source_match"] == "api_key_route"
     assert payload["moved"][0]["metadata"]["source_api_key_count"] == 1
-    # A user without a direct source group is only *granted* the target group;
-    # the upstream user PUT migrates no keys, so revoking group 11 here would
-    # strand every key still routed through it. The keys move on their own below.
-    assert next(user for user in backend.users if user["id"] == 404)["allowed_groups"] == [
-        11,
-        22,
-    ]
+    # The user has no *direct* source group but is still authorized for group 11,
+    # so replace-group hands that authorization over transactionally: it moves the
+    # keys sitting in group 11 and revokes only that grant, leaving no stale
+    # authorization behind.
+    assert next(user for user in backend.users if user["id"] == 404)["allowed_groups"] == [22]
     assert next(user for user in backend.users if user["id"] == 505)["group_id"] == 22
     assert backend.user_api_keys[505] == [
         {"id": "key-505-target", "name": "target-key", "group_id": 22},
     ]
-    assert backend.replace_calls == []
-    assert backend.user_update_calls == [{"user_id": 404, "allowed_groups": [11, 22]}]
+    assert backend.replace_calls == [
+        {"user_id": 404, "old_group_id": 11, "new_group_id": 22}
+    ]
+    assert backend.user_update_calls == []
+    # key-404 travelled with replace-group; only the key routed through group 33
+    # still needs an explicit move (same platform, so it may follow).
     assert backend.api_key_group_calls == [
-        {"key_id": "key-404", "group_id": 22},
         {"key_id": "key-404-extra", "group_id": 22},
     ]
 
@@ -4321,8 +4406,13 @@ def test_group_migration_does_not_treat_ambiguous_allowed_groups_as_direct_sourc
     assert payload["status"] == "moved"
     assert payload["moved"][0]["user_id"] == 404
     assert payload["moved"][0]["metadata"]["source_match"] == "api_key_route"
-    assert backend.replace_calls == []
-    assert backend.user_update_calls == [{"user_id": 404, "allowed_groups": [11, 22]}]
+    # Two groups on the same platform is a rule violation, so neither counts as
+    # the direct group; the source authorization is still handed over with
+    # replace-group rather than left behind.
+    assert backend.replace_calls == [
+        {"user_id": 404, "old_group_id": 11, "new_group_id": 22}
+    ]
+    assert backend.user_update_calls == []
 
 
 def test_group_migration_rejects_same_source_and_target(client) -> None:
@@ -4342,6 +4432,244 @@ def test_group_migration_rejects_same_source_and_target(client) -> None:
     assert response.status_code == 400
     assert "different" in response.json()["detail"]
     assert backend.replace_calls == []
+
+
+def test_existing_user_group_orchestration_rejects_cross_platform_target(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 101,
+                "email": "rotate@example.com",
+                "source_group_id": 11,
+                "target_group_id": 72,
+                "reason": "openai user must not land in a grok group",
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "openai" in detail and "grok" in detail
+    assert backend.replace_calls == []
+    assert backend.user_update_calls == []
+    assert backend.api_key_group_calls == []
+
+
+def test_group_migration_rejects_cross_platform_target(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/groups/migrate",
+            json={
+                "source_group_id": 11,
+                "target_group_id": 72,
+                "reason": "whole group must not cross platforms",
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "openai" in detail and "grok" in detail
+    assert backend.replace_calls == []
+    assert backend.user_update_calls == []
+
+
+def test_dual_platform_user_group_changes_stay_inside_their_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 707,
+            "email": "dual@example.com",
+            "name": "dual@example.com",
+            "status": "active",
+            "allowed_groups": [11, 71],
+        }
+    ]
+    backend.user_api_keys[707] = [
+        {"id": "key-openai", "name": "openai-key", "group_id": 11},
+        {"id": "key-grok", "name": "grok-key", "group_id": 71},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        openai_move = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 707,
+                "email": "dual@example.com",
+                "source_group_id": 11,
+                "target_group_id": 22,
+                "reason": "openai rebalance",
+            },
+        )
+        grok_move = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 707,
+                "email": "dual@example.com",
+                "source_group_id": 71,
+                "target_group_id": 72,
+                "reason": "grok rebalance",
+            },
+        )
+
+    assert openai_move.status_code == 200
+    assert openai_move.json()["status"] == "moved"
+    assert grok_move.status_code == 200
+    assert grok_move.json()["status"] == "moved"
+    # Each change replaces only the binding of its own platform, and the upstream
+    # moves only the keys that lived in the replaced group.
+    assert backend.replace_calls == [
+        {"user_id": 707, "old_group_id": 11, "new_group_id": 22},
+        {"user_id": 707, "old_group_id": 71, "new_group_id": 72},
+    ]
+    assert backend.user_update_calls == []
+    assert backend.api_key_group_calls == []
+    assert backend.users[0]["allowed_groups"] == [22, 72]
+    keys_by_id = {key["id"]: key for key in backend.user_api_keys[707]}
+    assert keys_by_id["key-openai"]["group_id"] == 22
+    assert keys_by_id["key-grok"]["group_id"] == 72
+    store = main.get_flow_store()
+    assert store.get_user_assignment(707, "openai").current_group_id == 22
+    assert store.get_user_assignment(707, "grok").current_group_id == 72
+    assert {
+        assignment.platform for assignment in store.list_user_assignments(707)
+    } == {"openai", "grok"}
+
+
+def test_first_platform_assignment_leaves_other_platform_keys_alone(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 707,
+            "email": "grok-only@example.com",
+            "name": "grok-only@example.com",
+            "status": "active",
+            "group_id": 71,
+            "group_name": "grok-low",
+        }
+    ]
+    backend.user_api_keys[707] = [
+        {"id": "key-grok", "name": "grok-key", "group_id": 71},
+        {"id": "key-orphan", "name": "no-group-yet", "group_id": None},
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/assignments/replace-group",
+            json={
+                "user_id": 707,
+                "email": "grok-only@example.com",
+                "source_group_id": None,
+                "target_group_id": 22,
+                "reason": "first openai assignment",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "moved"
+    assert payload["source_group_id"] is None
+    # The openai slot was empty, so the user only *gains* group 22 and keeps grok.
+    assert backend.replace_calls == []
+    assert backend.user_update_calls == [{"user_id": 707, "allowed_groups": [71, 22]}]
+    # The grok key stays where it is; only the key that serves no platform yet
+    # follows the user into the new openai group.
+    assert backend.api_key_group_calls == [{"key_id": "key-orphan", "group_id": 22}]
+    assert payload["migrated_keys"] == 1
+    store = main.get_flow_store()
+    assert store.get_user_assignment(707, "openai").current_group_id == 22
+
+
+def test_multiple_groups_on_one_platform_report_no_direct_group(client, caplog) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 404,
+            "email": "two-openai@example.com",
+            "name": "two-openai@example.com",
+            "status": "active",
+            "allowed_groups": [11, 22, 71],
+        }
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.rotation"):
+        with patch.object(requests.Session, "request", new=backend.request):
+            users_response = client.get("/orchestration/users?email=two-openai")
+            rejected = client.post(
+                "/orchestration/assignments/replace-group",
+                json={
+                    "user_id": 404,
+                    "email": "two-openai@example.com",
+                    "source_group_id": 11,
+                    "target_group_id": 22,
+                },
+            )
+
+    assert users_response.status_code == 200
+    user_payload = users_response.json()["items"][0]
+    # The grok slot is still a clean single binding, the openai one is not.
+    assert user_payload["assignments"] == [
+        {"platform": "grok", "group_id": 71, "group_name": "grok-low"}
+    ]
+    assert user_payload["current_group_id"] is None
+    assert rejected.status_code == 400
+    assert "direct current group" in rejected.json()["detail"]
+    assert backend.replace_calls == []
+    assert backend.user_update_calls == []
+    assert any(
+        "bound to 2 groups on platform openai" in record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    )
+
+
+def test_orchestration_users_report_one_assignment_per_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 707,
+            "email": "dual@example.com",
+            "name": "dual@example.com",
+            "status": "active",
+            "allowed_groups": [11, 71],
+        }
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.get("/orchestration/users?email=dual")
+        groups_response = client.get("/orchestration/groups")
+
+    assert response.status_code == 200
+    payload = response.json()["items"][0]
+    assert payload["assignments"] == [
+        {"platform": "grok", "group_id": 71, "group_name": "grok-low"},
+        {"platform": "openai", "group_id": 11, "group_name": "rotation-low"},
+    ]
+    # Transitional fields keep reporting the openai binding.
+    assert payload["current_group_id"] == 11
+    assert payload["current_group_name"] == "rotation-low"
+    assert groups_response.status_code == 200
+    platforms = {
+        item["group_id"]: item["platform"] for item in groups_response.json()["items"]
+    }
+    # The group list is no longer narrowed to the provisioning platform.
+    assert platforms[11] == "openai"
+    assert platforms[71] == "grok"
 
 
 def test_key_transfer_moves_matching_admin_keys_and_preserves_key_value(client) -> None:
@@ -7460,6 +7788,230 @@ def test_auto_rotation_empty_schedule_range_does_not_auto_assign_new_users(
     assert backend.replace_calls == []
 
 
+def test_auto_rotation_balances_inside_each_platform_only(client, monkeypatch) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 101,
+            "email": "openai-busy@example.com",
+            "name": "openai-busy@example.com",
+            "status": "active",
+            "group_id": 22,
+            "group_name": "rotation-high",
+        },
+        {
+            "id": 202,
+            "email": "openai-idle@example.com",
+            "name": "openai-idle@example.com",
+            "status": "active",
+            "group_id": 22,
+            "group_name": "rotation-high",
+        },
+        {
+            "id": 808,
+            "email": "grok-busy@example.com",
+            "name": "grok-busy@example.com",
+            "status": "active",
+            "group_id": 72,
+            "group_name": "grok-high",
+        },
+        {
+            "id": 909,
+            "email": "grok-idle@example.com",
+            "name": "grok-idle@example.com",
+            "status": "active",
+            "group_id": 72,
+            "group_name": "grok-high",
+        },
+    ]
+    backend.user_api_keys[101] = [{"id": "key-101", "group_id": 22}]
+    backend.user_api_keys[202] = [{"id": "key-202", "group_id": 22}]
+    backend.user_api_keys[808] = [{"id": "key-808", "group_id": 72}]
+    backend.user_api_keys[909] = [{"id": "key-909", "group_id": 72}]
+    # Each platform carries its own load: openai 1.5/0.2 in group 22, grok 1.0/0.1
+    # in group 72, while groups 11 and 71 are idle.
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=22, actual_cost=1.5),
+        usage_log_item(user_id=202, group_id=22, actual_cost=0.2),
+        usage_log_item(user_id=808, group_id=72, actual_cost=1.0),
+        usage_log_item(user_id=909, group_id=72, actual_cost=0.1),
+    ]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        for priority, (group_id, group_name, platform) in enumerate(
+            [
+                (11, "rotation-low", "openai"),
+                (22, "rotation-high", "openai"),
+                (71, "grok-low", "grok"),
+                (72, "grok-high", "grok"),
+            ]
+        ):
+            store.upsert_rotation_pool_group(
+                RotationPoolGroup(
+                    group_id=group_id,
+                    group_name=group_name,
+                    platform=platform,
+                    status="active",
+                    is_exclusive=True,
+                    priority=priority,
+                )
+            )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    # The busiest user of each platform moves to that platform's idle group; the
+    # idle users stay put. No decision ever looks at the other platform's load.
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 22, "new_group_id": 11},
+        {"user_id": 808, "old_group_id": 72, "new_group_id": 71},
+    ]
+    platform_of = {11: "openai", 22: "openai", 71: "grok", 72: "grok"}
+    assert all(
+        platform_of[call["old_group_id"]] == platform_of[call["new_group_id"]]
+        for call in backend.replace_calls
+    )
+    assert {str(item["user_id"]) for item in payload["moved"]} == {"101", "808"}
+    assert len(payload["skipped"]) == 2
+    store = main.get_flow_store()
+    assert str(store.get_user_assignment(101, "openai").current_group_id) == "11"
+    assert str(store.get_user_assignment(808, "grok").current_group_id) == "71"
+    assert store.get_user_assignment(101, "grok") is None
+
+
+def test_auto_rotation_syncs_one_assignment_per_platform(client, monkeypatch) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 707,
+            "email": "dual@example.com",
+            "name": "dual@example.com",
+            "status": "active",
+            "allowed_groups": [11, 71],
+        }
+    ]
+    backend.user_api_keys[707] = [
+        {"id": "key-openai", "group_id": 11},
+        {"id": "key-grok", "group_id": 71},
+    ]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=11,
+                group_name="rotation-low",
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=0,
+            )
+        )
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=71,
+                group_name="grok-low",
+                platform="grok",
+                status="active",
+                is_exclusive=True,
+                priority=1,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    # One user, two platform bindings, two synced assignment rows.
+    assert payload["synced"]["seen"] == 1
+    assert payload["synced"]["synced"] == 2
+    assert payload["synced"]["skipped_multiple_groups_on_platform"] == 0
+    assert backend.replace_calls == []
+    store = main.get_flow_store()
+    assignments = {
+        assignment.platform: assignment
+        for assignment in store.list_user_assignments(707)
+    }
+    assert set(assignments) == {"openai", "grok"}
+    assert str(assignments["openai"].current_group_id) == "11"
+    assert str(assignments["grok"].current_group_id) == "71"
+
+
+def test_key_transfer_rejects_target_group_on_another_platform(client) -> None:
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 1,
+            "email": "admin@example.com",
+            "name": "Admin",
+            "status": "active",
+            "group_id": 71,
+        },
+        {
+            "id": 2,
+            "email": "target@example.com",
+            "name": "Target",
+            "status": "active",
+            "group_id": 11,
+        },
+    ]
+    backend.user_api_keys[1] = [
+        {
+            "id": "grok-key",
+            "user_id": 1,
+            "key": "sk-grok-key",
+            "name": "rotom:prod:codex:v1:target@example.com",
+            "group_id": 71,
+            "quota": 10.0,
+        },
+        {
+            "id": "openai-key",
+            "user_id": 1,
+            "key": "sk-openai-key",
+            "name": "rotom:prod:codex:v1:target@example.com",
+            "group_id": 11,
+            "quota": 10.0,
+        },
+    ]
+    login(client)
+    save_operational_snapshots(backend)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/orchestration/api-keys/transfer",
+            json={"source_user_id": 1, "dry_run": False},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    items = {item["key_id"]: item for item in payload["items"]}
+    # The target user has no grok group, so the grok key stays with the admin.
+    assert items["grok-key"]["status"] == "skipped"
+    assert items["grok-key"]["reason"] == "TARGET_USER_GROUP_NOT_FOUND_ON_PLATFORM_GROK"
+    assert items["grok-key"]["target_group_id"] is None
+    assert items["openai-key"]["status"] == "moved"
+    assert items["openai-key"]["target_group_id"] == 11
+    assert backend.api_key_owner_calls == [
+        {
+            "key_id": "openai-key",
+            "user_id": 2,
+            "group_id": 11,
+            "quota": 0.0,
+            "reset_quota": True,
+        }
+    ]
+
+
 def test_auto_rotation_skips_ambiguous_and_outside_pool_current_upstream_users(
     client, monkeypatch
 ) -> None:
@@ -7527,7 +8079,11 @@ def test_auto_rotation_skips_ambiguous_and_outside_pool_current_upstream_users(
     payload = response.json()
     assert payload["synced"]["seen"] == 2
     assert payload["synced"]["synced"] == 0
-    assert payload["synced"]["skipped_without_current_group"] == 1
+    # Two openai groups on one user is a rule violation, counted on its own now
+    # that "no group at all" and "an ambiguous platform bucket" are different
+    # situations.
+    assert payload["synced"]["skipped_without_current_group"] == 0
+    assert payload["synced"]["skipped_multiple_groups_on_platform"] == 1
     assert payload["synced"]["skipped_outside_schedule_range"] == 1
     assert payload["synced"]["skipped_outside_pool"] == 0
     assert payload["planned"] == []
