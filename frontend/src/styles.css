@@ -967,6 +967,25 @@ pre {
   margin: 0;
 }
 
+/* The create-key card carries one extra row for the platform picker. */
+.api-token-api-item:has(.api-token-platform-field) {
+  grid-template-rows: auto minmax(48px, auto) auto 1fr;
+}
+
+.api-token-platform-field {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.api-token-platform-field .ant-typography {
+  font-size: 12px;
+}
+
+.api-token-platform-select {
+  width: 100%;
+}
+
 .api-token-api-item pre {
   height: 160px;
   margin: 0;
@@ -3084,6 +3103,31 @@ pre {
   color: oklch(0.55 0.02 250);
 }
 
+/* One badge per platform the selected user holds a dedicated group on. */
+.manual-user-platforms {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.manual-user-platforms > .ant-typography {
+  font-size: 12px;
+}
+
+.manual-user-platforms .ant-tag {
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-platform-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: oklch(0.55 0.02 250);
+}
+
 .manual-group-migration-summary,
 .manual-group-migration-panel {
   min-width: 0;
@@ -3382,11 +3426,64 @@ pre {
   font-size: 12px;
 }
 
+.user-option-platforms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.user-option-platforms .ant-tag {
+  margin: 0;
+}
+
+/* Platform is an opaque upstream string, so the badge is plain text with no icon or
+   per-platform styling of its own. */
+.platform-tag {
+  margin: 0;
+  font-size: 11px;
+  line-height: 18px;
+  text-transform: none;
+}
+
 .group-option {
   min-width: 0;
   display: grid;
   gap: 2px;
   line-height: 1.35;
+}
+
+.group-option-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-option-title .group-option-name {
+  flex: 0 1 auto;
+}
+
+.group-option-title .platform-tag {
+  flex: 0 0 auto;
+}
+
+.group-select-label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-select-label-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-select-label .platform-tag {
+  flex: 0 0 auto;
 }
 
 .group-option-name,
@@ -4052,6 +4149,23 @@ pre {
 .graph-node > .ant-tag {
   grid-column: 1 / -1;
   width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Multi-badge slot: one badge per platform on user and group nodes. */
+.graph-node-tags {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.graph-node-tags .ant-tag {
   max-width: 100%;
   margin: 0;
   overflow: hidden;

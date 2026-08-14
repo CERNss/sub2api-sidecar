@@ -43,6 +43,8 @@ function devSpaRouteFallback(): Plugin {
   };
 }
 
+// `assignments` is the multi-platform shape the UI reads; current_group_* stays as the
+// transitional openai-only view so the fallback path keeps getting exercised too.
 const mockUsers = [
   {
     user_id: "admin-001",
@@ -51,6 +53,7 @@ const mockUsers = [
     username: "admin",
     display_name: "Key Transfer Admin",
     status: "active",
+    assignments: [{ platform: "openai", group_id: "grp-admin", group_name: "Admin Holding" }],
     current_group_id: "grp-admin",
     current_group_name: "Admin Holding",
     local_group_id: null,
@@ -64,8 +67,12 @@ const mockUsers = [
     username: "fengxinyang",
     display_name: "fengxinyang",
     status: "active",
+    assignments: [
+      { platform: "openai", group_id: "grp-codex-a", group_name: "fengxinyang@jihuanshe.com_openai" },
+      { platform: "grok", group_id: "grp-grok-a", group_name: "fengxinyang@jihuanshe.com_grok" }
+    ],
     current_group_id: "grp-codex-a",
-    current_group_name: "Codex 可用组 A",
+    current_group_name: "fengxinyang@jihuanshe.com_openai",
     local_group_id: null,
     local_group_name: null,
     has_local_assignment: false
@@ -77,6 +84,7 @@ const mockUsers = [
     username: "ungrouped",
     display_name: "Ungrouped User",
     status: "active",
+    assignments: [],
     current_group_id: null,
     current_group_name: null,
     local_group_id: null,
@@ -90,8 +98,9 @@ const mockUsers = [
     username: "qiao",
     display_name: "qiao",
     status: "active",
-    current_group_id: "grp-codex-b",
-    current_group_name: "Codex 可用组 B",
+    assignments: [{ platform: "grok", group_id: "grp-grok-b", group_name: "qiao@example.com_grok" }],
+    current_group_id: null,
+    current_group_name: null,
     local_group_id: null,
     local_group_name: null,
     has_local_assignment: false
@@ -352,6 +361,39 @@ function keyTransferMockApi(): Plugin {
                 platform: "openai",
                 status: "active",
                 is_exclusive: true,
+                is_subscription: false,
+                rotation_supported: true,
+                unsupported_reason: null
+              },
+              {
+                group_id: "grp-grok-a",
+                name: "fengxinyang@jihuanshe.com_grok",
+                group_kind: "exclusive",
+                platform: "grok",
+                status: "active",
+                is_exclusive: true,
+                is_subscription: false,
+                rotation_supported: true,
+                unsupported_reason: null
+              },
+              {
+                group_id: "grp-grok-b",
+                name: "qiao@example.com_grok",
+                group_kind: "exclusive",
+                platform: "grok",
+                status: "active",
+                is_exclusive: true,
+                is_subscription: false,
+                rotation_supported: true,
+                unsupported_reason: null
+              },
+              {
+                group_id: "grp-grok-pool",
+                name: "Grok 公共池",
+                group_kind: "shared",
+                platform: "grok",
+                status: "active",
+                is_exclusive: false,
                 is_subscription: false,
                 rotation_supported: true,
                 unsupported_reason: null

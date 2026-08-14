@@ -243,6 +243,15 @@ type GroupCapacityFallback = {
   concurrency: number | null;
 };
 
+// The user's dedicated group on one platform. `platform` is an opaque upstream string
+// (openai / grok / whatever ships next): never enumerate it, never parse it out of the
+// group name, always read it from here.
+type OrchestrationUserAssignment = {
+  platform: string;
+  group_id: unknown;
+  group_name: string | null;
+};
+
 type OrchestrationUser = {
   upstream_id?: string;
   user_id: unknown;
@@ -251,6 +260,10 @@ type OrchestrationUser = {
   username: string | null;
   display_name: string | null;
   status: string | null;
+  // One dedicated group per platform; this is the full picture and what the UI reads.
+  assignments: OrchestrationUserAssignment[];
+  // Transitional single-platform fields: they only ever describe the "openai" platform.
+  // Kept as a fallback for payloads that predate `assignments`.
   current_group_id: unknown | null;
   current_group_name: string | null;
   group_ids: unknown[];
@@ -289,8 +302,13 @@ type GroupSelectOption = {
   label: string;
   searchText: string;
   groupIdText: string;
+  platform: string | null;
   isVirtual?: boolean;
   disabled?: boolean;
+  // Present only on the platform headers produced by groupOptionsByPlatform. antd treats
+  // an entry as an option group purely by this key existing, so leaf options must never
+  // carry it, not even as undefined.
+  options?: GroupSelectOption[];
 };
 
 type UserSelectOption = {
@@ -298,6 +316,7 @@ type UserSelectOption = {
   label: string;
   searchText: string;
   emailText: string;
+  platforms: string[];
 };
 
 type OrchestrationGroupsPayload = ApiPayload & {
@@ -360,7 +379,8 @@ type OrchestrationGraphNodeData = Record<string, unknown> & {
   keyId?: string;
   groupId?: string;
   accountId?: string;
-  directGroupId?: string;
+  // A user can hold one dedicated group per platform, so this is a list, not a value.
+  directGroupIds?: string[];
   routeGroupId?: string;
   relatedGroupIds?: string[];
   directUserCount?: number;
@@ -730,6 +750,10 @@ const graphColumnGapY = 34;
 const graphDagreRankSep = 142;
 const graphDagreNodeSep = 72;
 const ungroupedGraphFilterValue = "__ungrouped__";
+// Platform values are opaque and open-ended, so badge colours are picked from this
+// palette by hashing the value instead of being mapped per known platform.
+const platformTagColors = ["blue", "purple", "geekblue", "magenta", "cyan", "orange", "volcano", "green"] as const;
+const unknownPlatformLabel = "未标注平台";
 const usageWindowOptions = [
   { label: "最近 5 小时", value: "5h" },
   { label: "最近 1 天", value: "1d" },
@@ -1162,6 +1186,107 @@ function idValue(value: unknown): string {
   return String(value);
 }
 
+// --- Platform helpers -------------------------------------------------------
+// A platform is an opaque upstream string. The UI never hardcodes the known values
+// and never derives one from a group name suffix; everything below reads the
+// `platform` field that groups and assignments carry.
+
+function normalizedPlatform(value: string | null | undefined): string | null {
+  const text = (value ?? "").trim();
+  return text || null;
+}
+
+function groupPlatform(group: { platform?: string | null } | null | undefined): string | null {
+  return normalizedPlatform(group?.platform ?? null);
+}
+
+// Two platforms clash only when both are known and differ. An unknown platform stays
+// permissive on purpose: that is exactly how the backend guards these operations, so
+// the UI must not be stricter than the rule it mirrors.
+function platformsConflict(first: string | null, second: string | null): boolean {
+  return Boolean(first && second && first !== second);
+}
+
+function platformTagColor(platform: string): string {
+  let hash = 0;
+  for (let index = 0; index < platform.length; index += 1) {
+    hash = (hash * 31 + platform.charCodeAt(index)) >>> 0;
+  }
+  return platformTagColors[hash % platformTagColors.length];
+}
+
+function PlatformTag({ platform }: { platform: string | null | undefined }) {
+  const value = normalizedPlatform(platform);
+  if (!value) {
+    return null;
+  }
+  return (
+    <Tag className="platform-tag" color={platformTagColor(value)}>
+      {value}
+    </Tag>
+  );
+}
+
+function userAssignments(user: OrchestrationUser | null | undefined): OrchestrationUserAssignment[] {
+  const assignments = user?.assignments;
+  return Array.isArray(assignments) ? assignments.filter((assignment) => Boolean(assignment)) : [];
+}
+
+function userAssignmentForPlatform(
+  user: OrchestrationUser | null | undefined,
+  platform: string | null
+): OrchestrationUserAssignment | null {
+  const wanted = normalizedPlatform(platform);
+  if (!wanted) {
+    return null;
+  }
+  return userAssignments(user).find((assignment) => normalizedPlatform(assignment.platform) === wanted) ?? null;
+}
+
+function userGroupIdForPlatform(user: OrchestrationUser | null | undefined, platform: string | null): string {
+  return idValue(userAssignmentForPlatform(user, platform)?.group_id);
+}
+
+// True when `groupId` is the user's dedicated group on `platform`. When the group
+// carries no platform (legacy upstream data) fall back to a plain id match.
+function userHoldsGroup(
+  user: OrchestrationUser | null | undefined,
+  groupId: string,
+  platform: string | null
+): boolean {
+  if (!user || !groupId) {
+    return false;
+  }
+  const wanted = normalizedPlatform(platform);
+  if (wanted) {
+    return userGroupIdForPlatform(user, wanted) === groupId;
+  }
+  return userDirectGroupIds(user).includes(groupId);
+}
+
+// A group placeholder for ids we only know from a user/key/account reference, i.e. the
+// group itself was not in the /orchestration/groups payload.
+function syntheticGroup(groupId: unknown, name: string, platform: string | null): OrchestrationGroup {
+  return {
+    group_id: groupId,
+    name,
+    group_kind: null,
+    platform,
+    status: null,
+    is_exclusive: true,
+    is_subscription: false,
+    rotation_supported: true,
+    unsupported_reason: null,
+    account_count: null,
+    active_account_count: null,
+    rpm_limit: null,
+    rate_multiplier: null,
+    daily_limit_usd: null,
+    weekly_limit_usd: null,
+    monthly_limit_usd: null
+  };
+}
+
 function average(values: number[], fallback: number) {
   if (values.length === 0) {
     return fallback;
@@ -1186,7 +1311,7 @@ function groupIdsForGraphNode(node: OrchestrationGraphNode): string[] {
     return [node.data.groupId];
   }
   const ids = [
-    node.data.directGroupId,
+    ...(Array.isArray(node.data.directGroupIds) ? node.data.directGroupIds : []),
     node.data.routeGroupId,
     ...(Array.isArray(node.data.relatedGroupIds) ? node.data.relatedGroupIds : [])
   ];
@@ -1297,7 +1422,7 @@ function findIncompleteGraphNodeIds(
     const hasGroup = componentNodes.some((node) => node.data.kind === "group");
     const hasAccount = componentNodes.some((node) => node.data.kind === "account");
     const hasUngroupedUser = componentNodes.some(
-      (node) => node.data.kind === "user" && !node.data.directGroupId
+      (node) => node.data.kind === "user" && (node.data.directGroupIds ?? []).length === 0
     );
     const hasGroupWithoutUsers = componentNodes.some(
       (node) => node.data.kind === "group" && (node.data.directUserCount ?? 0) === 0
@@ -1345,26 +1470,38 @@ function buildUserOption(user: OrchestrationUser): UserSelectOption {
   const displayName = userDisplayName(user);
   const emailText = userEmailText(user);
   const userIdText = unknownToText(user.user_id);
+  const platforms = userPlatforms(user);
   return {
     value: idValue(user.user_id),
     label: displayName,
-    searchText: `${displayName} ${emailText} ${userIdText}`,
-    emailText
+    searchText: `${displayName} ${emailText} ${userIdText} ${platforms.join(" ")}`.trim(),
+    emailText,
+    platforms
   };
 }
 
-function UserIdentity({ name, email }: { name: ReactNode; email: ReactNode }) {
+function UserIdentity({ name, email, extra }: { name: ReactNode; email: ReactNode; extra?: ReactNode }) {
   return (
     <div className="user-option">
       <span className="user-option-name">{name}</span>
       <span className="user-option-email">{email}</span>
+      {extra ? <span className="user-option-platforms">{extra}</span> : null}
     </div>
   );
 }
 
 function renderUserOption(option: { label?: ReactNode; data: UserSelectOption }) {
   const userOption = option.data;
-  return <UserIdentity name={option.label} email={userOption.emailText} />;
+  const platforms = userOption?.platforms ?? [];
+  return (
+    <UserIdentity
+      name={option.label}
+      email={userOption.emailText}
+      extra={platforms.map((platform) => (
+        <PlatformTag key={platform} platform={platform} />
+      ))}
+    />
+  );
 }
 
 function transferEmailFromKeyName(keyName: string | null): string | null {
@@ -1389,26 +1526,66 @@ function transferStatusColor(status: string): string {
 function buildGroupOption(group: OrchestrationGroup, disabled = false): GroupSelectOption {
   const groupIdText = unknownToText(group.group_id);
   const label = group.name || groupIdText;
+  const platform = groupPlatform(group);
   return {
     value: idValue(group.group_id),
     label,
-    searchText: `${label} ${groupIdText}`,
+    searchText: `${label} ${groupIdText}${platform ? ` ${platform}` : ""}`,
     groupIdText,
+    platform,
     disabled
   };
+}
+
+// Buckets flat group options into antd option groups, one per platform, so a dropdown
+// never mixes platforms in a single visual run.
+function groupOptionsByPlatform(options: GroupSelectOption[]): GroupSelectOption[] {
+  const buckets = new Map<string, GroupSelectOption[]>();
+  options.forEach((option) => {
+    const key = option.platform ?? "";
+    buckets.set(key, [...(buckets.get(key) ?? []), option]);
+  });
+  return Array.from(buckets.entries())
+    .sort(([first], [second]) => Number(!first) - Number(!second) || first.localeCompare(second))
+    .map(([platform, items]) => ({
+      value: `__platform__${platform}`,
+      label: platform ? `平台 ${platform}` : unknownPlatformLabel,
+      searchText: platform || unknownPlatformLabel,
+      groupIdText: "",
+      platform: platform || null,
+      options: items
+    }));
 }
 
 function renderGroupOption(option: { label?: ReactNode; data: GroupSelectOption }) {
   const groupOption = option.data;
   return (
     <div className="group-option">
-      <span className="group-option-name">{option.label}</span>
+      <span className="group-option-title">
+        <span className="group-option-name">{option.label}</span>
+        <PlatformTag platform={groupOption?.platform} />
+      </span>
       {groupOption?.groupIdText ? (
         <span className="group-option-id">
           {groupOption.isVirtual ? groupOption.groupIdText : `ID ${groupOption.groupIdText}`}
         </span>
       ) : null}
     </div>
+  );
+}
+
+// Renders the collapsed value of a group Select, keeping the platform badge visible
+// after the dropdown closes.
+function renderGroupSelectLabel(options: GroupSelectOption[], item: { value?: unknown; label?: ReactNode }) {
+  const option = options.find((candidate) => candidate.value === item.value);
+  if (!option) {
+    return item.label;
+  }
+  return (
+    <span className="group-select-label">
+      <span className="group-select-label-name">{option.label}</span>
+      <PlatformTag platform={option.platform} />
+    </span>
   );
 }
 
@@ -1425,14 +1602,54 @@ function apiKeyRouteLabel(key: OrchestrationApiKey): string {
   return groupName ? `路由组 ${groupName} (${groupId})` : `路由组 ${groupId}`;
 }
 
-function userDirectGroupIds(user: OrchestrationUser): string[] {
+// Every platform the user has a dedicated group on, in the order the backend reports.
+function userPlatforms(user: OrchestrationUser | null | undefined): string[] {
   return Array.from(
     new Set(
-      [
-        idValue(user.current_group_id)
-      ].filter(Boolean)
+      userAssignments(user)
+        .map((assignment) => normalizedPlatform(assignment.platform))
+        .filter((platform): platform is string => Boolean(platform))
     )
   );
+}
+
+// One entry per platform the user is assigned on. Falls back to the transitional
+// single-platform field only when `assignments` is absent (older payloads, or the
+// stub users the graph synthesizes).
+function userDirectGroupSummaries(
+  user: OrchestrationUser | null | undefined
+): { platform: string | null; groupId: string; groupName: string }[] {
+  if (!user) {
+    return [];
+  }
+  const assignments = userAssignments(user);
+  if (assignments.length > 0) {
+    return assignments
+      .map((assignment) => {
+        const groupId = idValue(assignment.group_id);
+        return {
+          platform: normalizedPlatform(assignment.platform),
+          groupId,
+          groupName: assignment.group_name?.trim() || `用户组 ${groupId}`
+        };
+      })
+      .filter((summary) => Boolean(summary.groupId));
+  }
+  const groupId = idValue(user.current_group_id);
+  if (!groupId) {
+    return [];
+  }
+  return [
+    {
+      platform: null,
+      groupId,
+      groupName: user.current_group_name?.trim() || `用户组 ${groupId}`
+    }
+  ];
+}
+
+function userDirectGroupIds(user: OrchestrationUser): string[] {
+  return Array.from(new Set(userDirectGroupSummaries(user).map((summary) => summary.groupId).filter(Boolean)));
 }
 
 function apiKeyOwnerLabel(key: OrchestrationApiKey): string {
@@ -1447,12 +1664,14 @@ function apiKeyOwnerLabel(key: OrchestrationApiKey): string {
   return userId ? `User ${userId}` : "未知用户";
 }
 
-function userDirectGroupLabel(user: OrchestrationUser): string {
-  const groupId = idValue(user.current_group_id);
-  if (!groupId) {
-    return "无直接用户组";
-  }
-  return user.current_group_name?.trim() || `用户组 ${groupId}`;
+// One badge per platform, e.g. "openai · Codex 可用组 A". Platforms the user has no
+// group on are simply absent.
+function userDirectGroupTags(user: OrchestrationUser): { key: string; text: string; color?: string }[] {
+  return userDirectGroupSummaries(user).map((summary) => ({
+    key: `${summary.platform ?? unknownPlatformLabel}-${summary.groupId}`,
+    text: summary.platform ? `${summary.platform} · ${summary.groupName}` : summary.groupName,
+    color: summary.platform ? platformTagColor(summary.platform) : undefined
+  }));
 }
 
 function accountDisplayName(account: OrchestrationAccount): string {
@@ -4358,9 +4577,27 @@ function KeyTransferView({
   const [apiTokenModalOpen, setApiTokenModalOpen] = useState(false);
   const [apiToken, setApiToken] = useState<ApiTokenPayload | null>(null);
   const [tokenBusy, setTokenBusy] = useState(false);
+  const [groups, setGroups] = useState<OrchestrationGroup[]>([]);
+  const [createKeyPlatform, setCreateKeyPlatform] = useState("");
   const apiTokenValue = apiToken?.access_key || "$SIDECAR_API_TOKEN";
   const apiKeyEndpointUrl = `${window.location.origin}${apiUrl("/api/v1/apikey")}`;
-  const createApiKeyPayload = '{"action":"create","name":"service:prod:object:v1:user@example.com","target":"user@example.com","quota":0}';
+  // The choices are whatever platforms the loaded groups declare; nothing is hardcoded.
+  const platformOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(groups.map(groupPlatform).filter((platform): platform is string => Boolean(platform)))
+      )
+        .sort()
+        .map((platform) => ({ value: platform, label: platform })),
+    [groups]
+  );
+  const createApiKeyPayload = JSON.stringify({
+    action: "create",
+    name: "service:prod:object:v1:user@example.com",
+    target: "user@example.com",
+    ...(createKeyPlatform ? { platform: createKeyPlatform } : {}),
+    quota: 0
+  });
   const listApiKeyPayload = '{"action":"list","email":"user@example.com"}';
   const createApiKeyExample = `curl -sS -X POST ${apiKeyEndpointUrl}
 -H "Authorization: Bearer ${apiTokenValue}"
@@ -4488,6 +4725,26 @@ function KeyTransferView({
     }
   }
 
+  // Groups are loaded only to learn which platforms exist, so the create-key snippet can
+  // offer real values instead of a hardcoded list.
+  async function loadPlatformGroups() {
+    if (!selectedUpstreamId) {
+      return;
+    }
+    try {
+      const payload = await requestJson<OrchestrationGroupsPayload>(
+        `/orchestration/groups?${compactParams({ upstream_id: selectedUpstreamId })}`,
+        { method: "GET" },
+        "加载分组失败"
+      );
+      setGroups(payload.items);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setGroups([]);
+      }
+    }
+  }
+
   useEffect(() => {
     setSourceSearch(DEFAULT_KEY_TRANSFER_SOURCE_SEARCH);
     setUsers([]);
@@ -4495,6 +4752,8 @@ function KeyTransferView({
     setApiKeys([]);
     setSelectedKeyIds([]);
     setTransferResult(null);
+    setCreateKeyPlatform("");
+    void loadPlatformGroups();
     void loadSourceKeys("", { clearResult: false });
   }, [selectedUpstreamId]);
 
@@ -4905,6 +5164,21 @@ function KeyTransferView({
                 <Typography.Text code>{apiKeyEndpointUrl}</Typography.Text>
               </Space>
               <Typography.Text type="secondary">创建指定名称的 API key，name 使用 {KEY_TRANSFER_NAME_PATTERN} 格式，quota=0 表示无限制。</Typography.Text>
+              <div className="api-token-platform-field">
+                <Typography.Text>目标平台</Typography.Text>
+                <Select
+                  className="api-token-platform-select"
+                  value={createKeyPlatform || undefined}
+                  placeholder="默认 openai（不传 platform）"
+                  allowClear
+                  options={platformOptions}
+                  onChange={(value) => setCreateKeyPlatform(value ?? "")}
+                  notFoundContent="当前分组数据里没有平台信息"
+                />
+                <Typography.Text type="secondary">
+                  Key 会落到目标用户在该平台上的分组；该用户在这个平台没有分组时接口返回 400，错误消息会说明是哪个平台。
+                </Typography.Text>
+              </div>
               <Typography.Paragraph copyable={{ text: createApiKeyExample }}>
                 <pre>{createApiKeyExample}</pre>
               </Typography.Paragraph>
@@ -4980,32 +5254,36 @@ function ExistingOrchestrationView({
     () => apiKeys.filter((key) => selectedKeySet.has(idValue(key.key_id))),
     [apiKeys, selectedKeySet]
   );
-  const selectedUserDirectGroup = useMemo(() => {
-    const currentGroupId = selectedUser?.current_group_id ?? null;
-    const currentGroupName = selectedUser?.current_group_name ?? null;
-    const currentGroupValue = idValue(currentGroupId);
-    if (!currentGroupValue) {
-      return null;
-    }
-    return groups.find((group) => idValue(group.group_id) === currentGroupValue) ?? {
-      group_id: currentGroupId,
-      name: currentGroupName || currentGroupValue,
-      group_kind: null,
-      platform: null,
-      status: null,
-      is_exclusive: true,
-      is_subscription: false,
-      rotation_supported: true,
-      unsupported_reason: null,
-      account_count: null,
-      active_account_count: null,
-      rpm_limit: null,
-      rate_multiplier: null,
-      daily_limit_usd: null,
-      weekly_limit_usd: null,
-      monthly_limit_usd: null
-    };
-  }, [groups, selectedUser]);
+  const groupsById = useMemo(() => {
+    const index = new Map<string, OrchestrationGroup>();
+    groups.forEach((group) => {
+      const groupValue = idValue(group.group_id);
+      if (groupValue) {
+        index.set(groupValue, group);
+      }
+    });
+    return index;
+  }, [groups]);
+  // Whatever platforms the loaded groups actually declare. Never a hardcoded list.
+  const availablePlatforms = useMemo(
+    () =>
+      Array.from(
+        new Set(groups.map(groupPlatform).filter((platform): platform is string => Boolean(platform)))
+      ).sort(),
+    [groups]
+  );
+  // The selected user's dedicated group per platform, resolved against the group list so
+  // every entry carries a real platform even when the group was not in the payload.
+  const selectedUserAssignmentGroups = useMemo(
+    () =>
+      userDirectGroupSummaries(selectedUser)
+        .map((summary) => ({
+          platform: summary.platform,
+          group: groupsById.get(summary.groupId) ?? syntheticGroup(summary.groupId, summary.groupName, summary.platform)
+        }))
+        .filter((entry) => Boolean(idValue(entry.group.group_id))),
+    [groupsById, selectedUser]
+  );
   const selectedKeyPrimaryGroup = useMemo(() => {
     if (mode !== "api_key" || selectedKeys.length === 0) {
       return null;
@@ -5015,31 +5293,48 @@ function ExistingOrchestrationView({
     if (!keyGroupValue) {
       return null;
     }
-    return groups.find((group) => idValue(group.group_id) === keyGroupValue) ?? {
-      group_id: key.group_id,
-      name: key.group_name?.trim() || keyGroupValue,
-      group_kind: null,
-      platform: null,
-      status: null,
-      is_exclusive: true,
-      is_subscription: false,
-      rotation_supported: true,
-      unsupported_reason: null,
-      account_count: null,
-      active_account_count: null,
-      rpm_limit: null,
-      rate_multiplier: null,
-      daily_limit_usd: null,
-      weekly_limit_usd: null,
-      monthly_limit_usd: null
-    };
-  }, [groups, mode, selectedKeys]);
+    return (
+      groupsById.get(keyGroupValue) ??
+      syntheticGroup(key.group_id, key.group_name?.trim() || keyGroupValue, null)
+    );
+  }, [groupsById, mode, selectedKeys]);
   const selectedGroupMigrationSourceGroup = useMemo(() => {
     if (mode !== "group_migration" || !sourceGroupId) {
       return null;
     }
-    return groups.find((group) => idValue(group.group_id) === sourceGroupId) ?? null;
-  }, [groups, mode, sourceGroupId]);
+    return groupsById.get(sourceGroupId) ?? null;
+  }, [groupsById, mode, sourceGroupId]);
+  const selectedTargetGroup = useMemo(
+    () => (targetGroupId ? groupsById.get(targetGroupId) ?? null : null),
+    [groupsById, targetGroupId]
+  );
+  // The platform the current operation runs on. For a user-level replacement it is the
+  // platform of the chosen target group: that is what decides which of the user's
+  // dedicated groups is the source, and it is the same rule the backend enforces.
+  const activePlatform = useMemo(() => {
+    if (mode === "api_key") {
+      return groupPlatform(selectedKeyPrimaryGroup);
+    }
+    if (mode === "group_migration") {
+      return groupPlatform(selectedGroupMigrationSourceGroup);
+    }
+    return groupPlatform(selectedTargetGroup);
+  }, [mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup, selectedTargetGroup]);
+  const selectedUserPlatformTags = useMemo(
+    () => (selectedUser ? userDirectGroupTags(selectedUser) : []),
+    [selectedUser]
+  );
+  const selectedUserDirectGroup = useMemo(() => {
+    if (!selectedUser) {
+      return null;
+    }
+    if (!activePlatform) {
+      // No target platform decided yet: a single assignment is unambiguous, more than
+      // one would be a guess, so show nothing until a target is picked.
+      return selectedUserAssignmentGroups.length === 1 ? selectedUserAssignmentGroups[0].group : null;
+    }
+    return selectedUserAssignmentGroups.find((entry) => entry.platform === activePlatform)?.group ?? null;
+  }, [activePlatform, selectedUser, selectedUserAssignmentGroups]);
   const sourceGroups = useMemo(() => {
     const primaryGroup =
       mode === "api_key"
@@ -5054,36 +5349,43 @@ function ExistingOrchestrationView({
       ? "所选 Key 无路由组"
       : mode === "group_migration"
       ? "选择源分组"
-      : selectedUser
-      ? "无源分组，将直接分配"
-      : "先选择用户";
-  const targetGroups = useMemo(() => {
-    const currentGroup =
+      : !selectedUser
+      ? "先选择用户"
+      : !targetGroupId && selectedUserAssignmentGroups.length > 1
+      ? "选择目标分组后按平台匹配"
+      : activePlatform
+      ? `该用户在 ${activePlatform} 上无分组，将直接分配`
+      : "无源分组，将直接分配";
+  // Single-key moves and group migrations keep the source fixed, so the target must stay
+  // on the source's platform. A user replacement instead derives its source from whichever
+  // target is chosen, so every platform stays selectable there and nothing is constrained.
+  const targetPlatformConstraint = useMemo(
+    () =>
       mode === "api_key"
-        ? selectedKeyPrimaryGroup
+        ? groupPlatform(selectedKeyPrimaryGroup)
         : mode === "group_migration"
-        ? selectedGroupMigrationSourceGroup
-        : selectedUserDirectGroup;
-    const currentGroupValue = idValue(currentGroup?.group_id);
+        ? groupPlatform(selectedGroupMigrationSourceGroup)
+        : null,
+    [mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup]
+  );
+  const targetGroups = useMemo(() => {
     if (mode !== "group_migration" && !selectedUser) {
       return [];
     }
-    const candidates = mode === "replace_group" || mode === "group_migration"
-      ? groups.filter((group) => group.rotation_supported)
-      : groups;
+    const candidates =
+      mode === "replace_group" || mode === "group_migration"
+        ? groups.filter((group) => group.rotation_supported)
+        : groups;
     const ordered = new Map<string, OrchestrationGroup>();
-    if (currentGroupValue && currentGroup) {
-      ordered.set(currentGroupValue, currentGroup);
-    }
     candidates.forEach((group) => {
       const groupValue = idValue(group.group_id);
-      if (!groupValue) {
+      if (!groupValue || platformsConflict(targetPlatformConstraint, groupPlatform(group))) {
         return;
       }
       ordered.set(groupValue, group);
     });
     return Array.from(ordered.values());
-  }, [groups, mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup, selectedUser, selectedUserDirectGroup]);
+  }, [groups, mode, selectedUser, targetPlatformConstraint]);
   const sourceGroupOptions = useMemo(
     () =>
       mode === "group_migration"
@@ -5092,19 +5394,18 @@ function ExistingOrchestrationView({
     [groups, mode, sourceGroups]
   );
   const targetGroupOptions = useMemo(
-    () => {
-      const currentGroupId = idValue(
-        (
-          mode === "api_key"
-            ? selectedKeyPrimaryGroup
-            : mode === "group_migration"
-            ? selectedGroupMigrationSourceGroup
-            : selectedUserDirectGroup
-        )?.group_id
-      );
-      return targetGroups.map((group) => {
+    () =>
+      targetGroups.map((group) => {
         const groupId = idValue(group.group_id);
-        const isCurrentGroup = Boolean(currentGroupId && groupId === currentGroupId);
+        const platform = groupPlatform(group);
+        // "Current" is per platform: a group is the current one when it is what the user
+        // (or the key / the migration source) already sits on for that group's platform.
+        const isCurrentGroup =
+          mode === "api_key"
+            ? groupId === idValue(selectedKeyPrimaryGroup?.group_id)
+            : mode === "group_migration"
+            ? groupId === sourceGroupId
+            : userHoldsGroup(selectedUser, groupId, platform);
         const disabled =
           isCurrentGroup ||
           ((mode === "replace_group" || mode === "group_migration") && !group.rotation_supported);
@@ -5114,10 +5415,11 @@ function ExistingOrchestrationView({
           label: isCurrentGroup ? `${option.label}（当前）` : option.label,
           searchText: isCurrentGroup ? `${option.searchText} 当前 current` : option.searchText
         };
-      });
-    },
-    [mode, selectedGroupMigrationSourceGroup, selectedKeyPrimaryGroup, selectedUserDirectGroup, targetGroups]
+      }),
+    [mode, selectedKeyPrimaryGroup, selectedUser, sourceGroupId, targetGroups]
   );
+  const sourceGroupOptionGroups = useMemo(() => groupOptionsByPlatform(sourceGroupOptions), [sourceGroupOptions]);
+  const targetGroupOptionGroups = useMemo(() => groupOptionsByPlatform(targetGroupOptions), [targetGroupOptions]);
   const graphGroupOptions = useMemo<GroupSelectOption[]>(
     () => [
       ...groups.map((group) => buildGroupOption(group)),
@@ -5126,6 +5428,7 @@ function ExistingOrchestrationView({
         label: "未分组",
         searchText: "未分组 无分组 ungrouped",
         groupIdText: "无直接组 / 无绑定组",
+        platform: null,
         isVirtual: true
       }
     ],
@@ -5151,6 +5454,16 @@ function ExistingOrchestrationView({
   }
 
   function updateTargetGroup(groupId: string) {
+    // Guards the paths that bypass the dropdown (clicking a group or account on the
+    // canvas); the dropdown itself never offers a conflicting platform.
+    const platform = groupPlatform(groupsById.get(groupId) ?? null);
+    if (platformsConflict(targetPlatformConstraint, platform)) {
+      setStatus({
+        message: `目标分组在平台 ${platform}，当前操作固定在平台 ${targetPlatformConstraint}，不能跨平台。`,
+        tone: "error"
+      });
+      return;
+    }
     setTargetGroupId(groupId);
     includeGraphGroupFilter(groupId);
   }
@@ -5173,6 +5486,9 @@ function ExistingOrchestrationView({
         mode: "move" as const
       };
     }
+    // Counts read the user's assignment on the group's own platform, so a user who sits
+    // in the source group on openai is not double counted for a grok group of the same id.
+    const sourcePlatform = groupPlatform(groupsById.get(sourceGroupId) ?? null);
     const sourceUserIds = new Set<string>();
     let directUserCount = 0;
     users.forEach((user) => {
@@ -5180,7 +5496,7 @@ function ExistingOrchestrationView({
       if (!userId) {
         return;
       }
-      if (idValue(user.current_group_id) === sourceGroupId) {
+      if (userHoldsGroup(user, sourceGroupId, sourcePlatform)) {
         directUserCount += 1;
         sourceUserIds.add(userId);
       }
@@ -5198,8 +5514,9 @@ function ExistingOrchestrationView({
       }
     });
 
+    const targetPlatform = groupPlatform(targetGroupId ? groupsById.get(targetGroupId) ?? null : null);
     const targetExistingUserCount = targetGroupId
-      ? users.filter((user) => idValue(user.current_group_id) === targetGroupId).length
+      ? users.filter((user) => userHoldsGroup(user, targetGroupId, targetPlatform)).length
       : 0;
     return {
       directUserCount,
@@ -5208,7 +5525,7 @@ function ExistingOrchestrationView({
       targetExistingUserCount,
       mode: targetExistingUserCount > 0 ? ("merge" as const) : ("move" as const)
     };
-  }, [apiKeysByUserId, sourceGroupId, targetGroupId, users]);
+  }, [apiKeysByUserId, groupsById, sourceGroupId, targetGroupId, users]);
 
   const toggleKeySelection = (keyId: string) => {
     if (!keyId) return;
@@ -5252,27 +5569,13 @@ function ExistingOrchestrationView({
     };
     groups.forEach(upsertGraphGroup);
     users.forEach((user) => {
-      userDirectGroupIds(user).forEach((groupValue) => {
+      // One entry per platform the user is assigned on, so a synthesized group node
+      // still carries the platform it belongs to.
+      userDirectGroupSummaries(user).forEach((summary) => {
+        const groupValue = summary.groupId;
         groupUserCounts.set(groupValue, (groupUserCounts.get(groupValue) ?? 0) + 1);
         if (!graphGroups.has(groupValue)) {
-          graphGroups.set(groupValue, {
-            group_id: user.current_group_id,
-            name: user.current_group_name ?? user.local_group_name ?? groupValue,
-            group_kind: null,
-            platform: null,
-            status: null,
-            is_exclusive: true,
-            is_subscription: false,
-            rotation_supported: true,
-            unsupported_reason: null,
-            account_count: null,
-            active_account_count: null,
-            rpm_limit: null,
-            rate_multiplier: null,
-            daily_limit_usd: null,
-            weekly_limit_usd: null,
-            monthly_limit_usd: null
-          });
+          graphGroups.set(groupValue, syntheticGroup(groupValue, summary.groupName, summary.platform));
         }
       });
     });
@@ -5283,24 +5586,7 @@ function ExistingOrchestrationView({
       }
       groupKeyCounts.set(keyGroupValue, (groupKeyCounts.get(keyGroupValue) ?? 0) + 1);
       if (!graphGroups.has(keyGroupValue)) {
-        graphGroups.set(keyGroupValue, {
-          group_id: key.group_id,
-          name: key.group_name || keyGroupValue,
-          group_kind: null,
-          platform: null,
-          status: null,
-          is_exclusive: true,
-          is_subscription: false,
-          rotation_supported: true,
-          unsupported_reason: null,
-          account_count: null,
-          active_account_count: null,
-          rpm_limit: null,
-          rate_multiplier: null,
-          daily_limit_usd: null,
-          weekly_limit_usd: null,
-          monthly_limit_usd: null
-        });
+        graphGroups.set(keyGroupValue, syntheticGroup(key.group_id, key.group_name || keyGroupValue, null));
       }
     });
     accounts.forEach((account) => {
@@ -5320,24 +5606,10 @@ function ExistingOrchestrationView({
           );
         }
         if (!graphGroups.has(groupValue)) {
-          graphGroups.set(groupValue, {
-            group_id: groupId,
-            name: account.group_names[index] || groupValue,
-            group_kind: null,
-            platform: account.platform,
-            status: null,
-            is_exclusive: true,
-            is_subscription: false,
-            rotation_supported: true,
-            unsupported_reason: null,
-            account_count: null,
-            active_account_count: null,
-            rpm_limit: null,
-            rate_multiplier: null,
-            daily_limit_usd: null,
-            weekly_limit_usd: null,
-            monthly_limit_usd: null
-          });
+          graphGroups.set(
+            groupValue,
+            syntheticGroup(groupId, account.group_names[index] || groupValue, normalizedPlatform(account.platform))
+          );
         }
       });
     });
@@ -5414,17 +5686,18 @@ function ExistingOrchestrationView({
         currentConcurrency: groupCurrentConcurrency.get(groupValue) ?? null,
         concurrency: groupConcurrency.get(groupValue) ?? null
       };
-      const tags = [
+      const countTags = [
         `${groupUserCounts.get(groupValue) ?? 0} 直接用户`,
         `${groupKeyCounts.get(groupValue) ?? 0} 路由 Key`,
         `${groupAccountCounts.get(groupValue) ?? 0} 上游账号`
       ];
       if (groupValue === sourceGroupId) {
-        tags.push("当前");
+        countTags.push("当前");
       }
       if (groupValue === targetGroupId) {
-        tags.push("目标");
+        countTags.push("目标");
       }
+      const platform = groupPlatform(group);
       return createGraphNode({
         id: `group-${groupValue}`,
         kind: "group",
@@ -5439,7 +5712,10 @@ function ExistingOrchestrationView({
             title={group.name || "分组"}
             subtitle={`Group ${unknownToText(group.group_id)}`}
             tone={groupValue === sourceGroupId ? "source" : groupValue === targetGroupId ? "target" : "neutral"}
-            tag={tags.join(" / ")}
+            tags={[
+              ...(platform ? [{ key: "platform", text: platform, color: platformTagColor(platform) }] : []),
+              { key: "counts", text: countTags.join(" / ") }
+            ]}
             footer={<GroupCapacityRows group={group} fallback={fallbackCapacity} />}
           />
         )
@@ -5452,7 +5728,7 @@ function ExistingOrchestrationView({
         kind: "user",
         data: {
           userId,
-          directGroupId: idValue(user.current_group_id),
+          directGroupIds: userDirectGroupIds(user),
           relatedGroupIds: relatedGroupIdsForUser(user, userId)
         },
         selected: userId === selectedUserId,
@@ -5462,8 +5738,8 @@ function ExistingOrchestrationView({
             title={userDisplayName(user)}
             subtitle={userEmailText(user)}
             tone={userId === selectedUserId ? "active" : "user"}
-            tag={userDirectGroupLabel(user)}
-            tagColor={idValue(user.current_group_id) ? undefined : "default"}
+            tags={userDirectGroupTags(user)}
+            emptyTag="无直接用户组"
           />
         )
       })
@@ -5566,10 +5842,12 @@ function ExistingOrchestrationView({
       ...userKeyRows
         .filter(({ user, key }) => {
           const keyGroupId = idValue(key.group_id);
-          const userGroupId = idValue(user.current_group_id);
           const keyId = idValue(key.key_id);
           const userId = idValue(user.user_id);
-          return keyGroupId && keyGroupId !== userGroupId && (userId === selectedUserId || selectedKeySet.has(keyId));
+          // A key only gets its own route edge when it points somewhere other than any of
+          // the user's per-platform groups.
+          const routesElsewhere = Boolean(keyGroupId) && !userDirectGroupIds(user).includes(keyGroupId);
+          return routesElsewhere && (userId === selectedUserId || selectedKeySet.has(keyId));
         })
         .map(({ userId, key }) =>
           createGraphEdge({
@@ -5747,18 +6025,26 @@ function ExistingOrchestrationView({
       updateGraphGroupFilters([]);
       return;
     }
-    const directGroupId = idValue(selectedUserDirectGroup?.group_id);
-    setSourceGroupId(directGroupId);
-    updateGraphGroupFilters(directGroupId ? [directGroupId] : []);
+    // Focus the canvas on every platform group the user is on, not just one.
+    updateGraphGroupFilters(userDirectGroupIds(selectedUser));
     void loadApiKeys(idValue(selectedUser.user_id));
-  }, [mode, selectedUserId, selectedUserDirectGroup?.group_id]);
+  }, [mode, selectedUserId]);
 
+  // The source follows the platform in play: the key's own route group for a single-key
+  // move, otherwise the user's dedicated group on the target group's platform. It is
+  // therefore re-derived whenever the target changes, never picked by hand.
   useEffect(() => {
-    if (mode !== "api_key") {
+    if (mode === "group_migration" || !selectedUser) {
       return;
     }
-    setSourceGroupId(idValue(selectedKeyPrimaryGroup?.group_id));
-  }, [mode, selectedKeyPrimaryGroup?.group_id]);
+    const nextSourceGroupId = idValue(
+      (mode === "api_key" ? selectedKeyPrimaryGroup : selectedUserDirectGroup)?.group_id
+    );
+    setSourceGroupId(nextSourceGroupId);
+    if (nextSourceGroupId) {
+      includeGraphGroupFilter(nextSourceGroupId);
+    }
+  }, [mode, selectedKeyPrimaryGroup?.group_id, selectedUserDirectGroup?.group_id, selectedUserId]);
 
   useEffect(() => {
     if (mode !== "group_migration") {
@@ -5854,6 +6140,17 @@ function ExistingOrchestrationView({
       selectedKeys.every((key) => idValue(key.group_id) === targetGroupId)
     ) {
       setStatus({ message: "所选 Key 已经在目标分组。", tone: "error" });
+      return;
+    }
+    // The selectors already make a cross-platform pair unreachable; this is the last
+    // stop before the request, mirroring the rule the backend enforces.
+    const submitSourcePlatform = groupPlatform(sourceGroupId ? groupsById.get(sourceGroupId) ?? null : null);
+    const submitTargetPlatform = groupPlatform(groupsById.get(targetGroupId) ?? null);
+    if (platformsConflict(submitSourcePlatform, submitTargetPlatform)) {
+      setStatus({
+        message: `不能跨平台操作：当前分组在平台 ${submitSourcePlatform}，目标分组在平台 ${submitTargetPlatform}。`,
+        tone: "error"
+      });
       return;
     }
 
@@ -6103,8 +6400,9 @@ function ExistingOrchestrationView({
                   setMode(nextMode);
                   if (nextMode === "replace_group") {
                     setSelectedKeyIds([]);
-                    setSourceGroupId(idValue(selectedUserDirectGroup?.group_id));
-                    updateGraphGroupFilters(idValue(selectedUserDirectGroup?.group_id) ? [idValue(selectedUserDirectGroup?.group_id)] : []);
+                    // The source is re-derived from the target's platform, so only the
+                    // canvas focus is reset here.
+                    updateGraphGroupFilters(selectedUser ? userDirectGroupIds(selectedUser) : []);
                   } else if (nextMode === "group_migration") {
                     setSelectedKeyIds([]);
                     setApiKeys([]);
@@ -6182,10 +6480,27 @@ function ExistingOrchestrationView({
                 </div>
               )}
 
+              {mode !== "group_migration" && selectedUser ? (
+                <div className="manual-user-platforms" aria-label="用户各平台当前分组">
+                  <Typography.Text type="secondary">各平台当前分组</Typography.Text>
+                  <Space size={4} wrap>
+                    {selectedUserPlatformTags.length === 0 ? (
+                      <Tag color="default">所有平台均无专属分组</Tag>
+                    ) : (
+                      selectedUserPlatformTags.map((badge) => (
+                        <Tag key={badge.key} color={badge.color}>
+                          {badge.text}
+                        </Tag>
+                      ))
+                    )}
+                  </Space>
+                </div>
+              ) : null}
+
               <Typography.Text type="secondary" className="manual-zone-hint">
                 {mode === "group_migration"
                   ? `${groups.filter((group) => group.rotation_supported).length} 可迁移分组 · ${groupMigrationScope.sourceUserCount} 相关用户`
-                  : `${users.length} 用户 · ${groups.length} 分组`}
+                  : `${users.length} 用户 · ${groups.length} 分组 · ${availablePlatforms.length || "0"} 平台`}
               </Typography.Text>
             </section>
 
@@ -6207,8 +6522,9 @@ function ExistingOrchestrationView({
                     allowClear={mode === "group_migration"}
                     onChange={(value) => updateSourceGroup(value ?? "")}
                     optionFilterProp="searchText"
-                    options={sourceGroupOptions}
+                    options={sourceGroupOptionGroups}
                     optionRender={renderGroupOption}
+                    labelRender={(item) => renderGroupSelectLabel(sourceGroupOptions, item)}
                   />
                 </div>
                 <div className="manual-route-arrow" aria-hidden="true">
@@ -6219,17 +6535,40 @@ function ExistingOrchestrationView({
                   <Select
                     className="group-select"
                     value={targetGroupId || undefined}
-                    placeholder="选择目标分组"
+                    placeholder={
+                      mode === "group_migration" && !sourceGroupId ? "先选择源分组" : "选择目标分组"
+                    }
                     showSearch
                     allowClear
                     optionFilterProp="searchText"
                     onChange={(value) => updateTargetGroup(value ?? "")}
-                    options={targetGroupOptions}
+                    options={targetGroupOptionGroups}
                     optionRender={renderGroupOption}
-                    notFoundContent="暂无可用分组"
+                    labelRender={(item) => renderGroupSelectLabel(targetGroupOptions, item)}
+                    notFoundContent={
+                      activePlatform && mode !== "replace_group"
+                        ? `平台 ${activePlatform} 上暂无其他可用分组`
+                        : "暂无可用分组"
+                    }
                   />
                 </div>
               </div>
+
+              {mode === "replace_group" ? (
+                <Typography.Text type="secondary" className="manual-platform-hint">
+                  {activePlatform
+                    ? `目标分组在平台 ${activePlatform}，当前分组已按该平台自动匹配。`
+                    : "目标分组决定操作的平台，当前分组会按该平台自动匹配；跨平台组合无法选中。"}
+                </Typography.Text>
+              ) : mode === "group_migration" && activePlatform ? (
+                <Typography.Text type="secondary" className="manual-platform-hint">
+                  {`仅可迁移到平台 ${activePlatform} 上的分组。`}
+                </Typography.Text>
+              ) : mode === "api_key" && activePlatform ? (
+                <Typography.Text type="secondary" className="manual-platform-hint">
+                  {`所选 Key 的路由组在平台 ${activePlatform}，目标只列该平台的分组。`}
+                </Typography.Text>
+              ) : null}
 
               {mode === "group_migration" ? (
                 <section className="orchestration-keys-panel manual-keys-panel manual-group-migration-panel" aria-label="整组迁移范围">
@@ -7535,6 +7874,8 @@ function GraphNode({
   tone,
   tag,
   tagColor,
+  tags,
+  emptyTag,
   footer
 }: {
   icon: ReactNode;
@@ -7543,8 +7884,12 @@ function GraphNode({
   tone: GraphNodeTone;
   tag?: string;
   tagColor?: GraphNodeTagColor;
+  // Multi-badge variant, used where a node carries one badge per platform.
+  tags?: { key: string; text: string; color?: string }[];
+  emptyTag?: string;
   footer?: ReactNode;
 }) {
+  const badges = tags ?? [];
   return (
     <div className={`graph-node graph-node-${tone}`}>
       <span className="graph-node-icon">{icon}</span>
@@ -7552,7 +7897,21 @@ function GraphNode({
         <strong title={title}>{title}</strong>
         <small title={subtitle}>{subtitle}</small>
       </div>
-      {tag ? <Tag color={tagColor ?? defaultGraphTagColor(tone)}>{tag}</Tag> : null}
+      {tags ? (
+        <div className="graph-node-tags">
+          {badges.length > 0 ? (
+            badges.map((badge) => (
+              <Tag key={badge.key} color={badge.color ?? defaultGraphTagColor(tone)} title={badge.text}>
+                {badge.text}
+              </Tag>
+            ))
+          ) : emptyTag ? (
+            <Tag color="default">{emptyTag}</Tag>
+          ) : null}
+        </div>
+      ) : tag ? (
+        <Tag color={tagColor ?? defaultGraphTagColor(tone)}>{tag}</Tag>
+      ) : null}
       {footer ? <div className="graph-node-footer">{footer}</div> : null}
     </div>
   );
