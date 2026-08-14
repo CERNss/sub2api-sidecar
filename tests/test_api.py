@@ -231,7 +231,7 @@ class FakeRotationSub2API:
         self.users_page_size: int | None = None
         self.api_keys_page_size: int | None = None
         self.replace_calls: list[dict[str, object]] = []
-        self.set_user_group_calls: list[dict[str, object]] = []
+        self.user_update_calls: list[dict[str, object]] = []
         self.api_key_group_calls: list[dict[str, object]] = []
         self.api_key_owner_calls: list[dict[str, object]] = []
         self.api_key_create_calls: list[dict[str, object]] = []
@@ -242,7 +242,6 @@ class FakeRotationSub2API:
         self.generate_auth_url_calls = 0
         self.exchange_code_calls = 0
         self.update_account_calls: list[dict[str, object]] = []
-        self.bind_account_calls: list[dict[str, object]] = []
         self.scheduled_test_plans: dict[str, list[dict[str, object]]] = {}
         self.scheduled_test_plan_calls: list[dict[str, object]] = []
         self.group_usage_by_window = {
@@ -344,6 +343,18 @@ class FakeRotationSub2API:
                     "data": [self._user_response_item(user) for user in self.users],
                 },
             )
+        if (
+            method == "GET"
+            and path.startswith("/api/v1/admin/users/")
+            and len(path.split("/")) == 6
+        ):
+            user = self._find_user(path.split("/")[5])
+            if user is None:
+                return FakeResponse(404, {"message": "user not found"})
+            return FakeResponse(
+                200,
+                {"code": 0, "message": "success", "data": self._user_response_item(user)},
+            )
         if method == "POST" and path.startswith("/api/v1/admin/users/") and path.endswith("/balance"):
             user_id = int(path.split("/")[5])
             self.balance_calls.append(
@@ -368,6 +379,15 @@ class FakeRotationSub2API:
             return FakeResponse(404, {"message": "user not found"})
         if method == "GET" and path == "/api/v1/admin/accounts":
             return FakeResponse(200, {"code": 0, "message": "success", "data": self.accounts})
+        if (
+            method == "GET"
+            and path.startswith("/api/v1/admin/accounts/")
+            and len(path.split("/")) == 6
+        ):
+            account = self._find_account(path.split("/")[5])
+            if account is None:
+                return FakeResponse(404, {"message": "account not found"})
+            return FakeResponse(200, {"code": 0, "message": "success", "data": account})
         if (
             method == "GET"
             and path.startswith("/api/v1/admin/accounts/")
@@ -400,27 +420,23 @@ class FakeRotationSub2API:
                 user_id = int(user_id_value)
             except ValueError:
                 user_id = user_id_value
-            self.set_user_group_calls.append(
-                {
-                    "user_id": user_id,
-                    "group_id": json["group_id"],
-                    "allowed_groups": json["allowed_groups"],
-                }
+            # The upstream update-user request struct carries no top-level
+            # group_id, so a client that sends one has it silently discarded.
+            # Refuse to model a field the real server would ignore.
+            assert "group_id" not in (json or {}), (
+                "PUT /api/v1/admin/users/{id} has no top-level group_id field"
             )
-            group_name = next(
-                (
-                    str(group.get("name") or "")
-                    for group in self.groups
-                    if str(group.get("id")) == str(json["group_id"])
-                ),
-                "",
+            self.user_update_calls.append(
+                {"user_id": user_id, "allowed_groups": (json or {}).get("allowed_groups")}
             )
-            for user in self.users:
-                if str(user.get("id")) == str(user_id):
-                    user["group_id"] = json["group_id"]
-                    user["group_name"] = group_name
-                    user["allowed_groups"] = list(json["allowed_groups"])
-                    break
+            user = self._find_user(user_id)
+            if user is None:
+                return FakeResponse(404, {"message": "user not found"})
+            if "allowed_groups" in (json or {}):
+                # Declarative: whatever list arrives becomes the complete set of
+                # authorizations (omitted groups are really revoked), and the
+                # upstream migrates no API keys along with it.
+                self._set_user_allowed_groups(user, list(json["allowed_groups"]))
             return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
         if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
             self.generate_auth_url_calls += 1
@@ -502,64 +518,70 @@ class FakeRotationSub2API:
             self.update_account_calls.append(
                 {"account_id": account_id, "path": path, "json": dict(json or {})}
             )
+            account = self._find_account(account_id)
+            if account is None:
+                return FakeResponse(404, {"message": "account not found"})
+            if "group_ids" in (json or {}):
+                # Declarative: the list that arrives replaces every existing
+                # binding, so any group left out is unbound for real.
+                self._set_account_group_ids(account, list(json["group_ids"]))
+            if json.get("name") not in (None, ""):
+                account["name"] = json["name"]
             return FakeResponse(
                 200,
                 {
                     "code": 0,
                     "message": "success",
-                    "data": {"account_id": account_id, "name": json.get("name")},
+                    "data": {"account_id": account_id, "name": account.get("name")},
                 },
-            )
-        if method == "POST" and path in {
-            "/api/v1/admin/groups/11/accounts",
-            "/api/v1/admin/groups/22/accounts",
-            "/api/v1/admin/groups/77/accounts",
-            "/api/v1/admin/groups/999/accounts",
-        }:
-            self.bind_account_calls.append({"path": path, "json": dict(json or {})})
-            return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
-        if method == "POST" and path == "/api/v1/admin/users/101/replace-group":
-            self.replace_calls.append(
-                {
-                    "user_id": 101,
-                    "old_group_id": json["old_group_id"],
-                    "new_group_id": json["new_group_id"],
-                }
-            )
-            for user in self.users:
-                if user["id"] == 101:
-                    user["group_id"] = json["new_group_id"]
-                    user["group_name"] = "rotation-high" if json["new_group_id"] == 22 else "rotation-low"
-                    break
-            for api_key in self.user_api_keys.get(101, []):
-                if str(api_key.get("group_id")) == str(json["old_group_id"]):
-                    api_key["group_id"] = json["new_group_id"]
-            return FakeResponse(
-                200,
-                {"code": 0, "message": "success", "data": {"migrated_keys": 2}},
-            )
-        if method == "POST" and path == "/api/v1/admin/users/202/replace-group":
-            self.replace_calls.append(
-                {
-                    "user_id": 202,
-                    "old_group_id": json["old_group_id"],
-                    "new_group_id": json["new_group_id"],
-                }
-            )
-            for user in self.users:
-                if user["id"] == 202:
-                    user["group_id"] = json["new_group_id"]
-                    user["group_name"] = "rotation-high" if json["new_group_id"] == 22 else "rotation-low"
-                    break
-            for api_key in self.user_api_keys.get(202, []):
-                if str(api_key.get("group_id")) == str(json["old_group_id"]):
-                    api_key["group_id"] = json["new_group_id"]
-            return FakeResponse(
-                200,
-                {"code": 0, "message": "success", "data": {"migrated_keys": 1}},
             )
         if method == "POST" and path == "/api/v1/admin/users/303/replace-group":
             return FakeResponse(500, {"message": "boom"})
+        if (
+            method == "POST"
+            and path.startswith("/api/v1/admin/users/")
+            and path.endswith("/replace-group")
+        ):
+            user_id_value = path.split("/")[5]
+            try:
+                user_id = int(user_id_value)
+            except ValueError:
+                user_id = user_id_value
+            old_group_id = json["old_group_id"]
+            new_group_id = json["new_group_id"]
+            self.replace_calls.append(
+                {
+                    "user_id": user_id,
+                    "old_group_id": old_group_id,
+                    "new_group_id": new_group_id,
+                }
+            )
+            user = self._find_user(user_id)
+            if user is None:
+                return FakeResponse(404, {"message": "user not found"})
+            # Targeted replacement inside one transaction: grant the new group,
+            # move only the keys sitting in the old group, then revoke only the
+            # old group. Every other authorization is left alone. The server
+            # validates neither the old group's existence nor its ownership, so a
+            # wrong old_group_id is a silent no-op reporting migrated_keys: 0.
+            allowed_groups = self._user_allowed_groups(user)
+            if not any(str(existing) == str(new_group_id) for existing in allowed_groups):
+                allowed_groups.append(new_group_id)
+            allowed_groups = [
+                existing
+                for existing in allowed_groups
+                if str(existing) != str(old_group_id)
+            ]
+            self._set_user_allowed_groups(user, allowed_groups)
+            migrated_keys = 0
+            for api_key in self._api_keys_for(user_id):
+                if str(api_key.get("group_id")) == str(old_group_id):
+                    api_key["group_id"] = new_group_id
+                    migrated_keys += 1
+            return FakeResponse(
+                200,
+                {"code": 0, "message": "success", "data": {"migrated_keys": migrated_keys}},
+            )
         if method == "POST" and path.startswith("/api/v1/admin/api-keys/") and path.endswith("/transfer"):
             key_id = path.split("/")[5]
             self.api_key_owner_calls.append(
@@ -751,6 +773,105 @@ class FakeRotationSub2API:
             },
         )
 
+    def _find_user(self, user_id: object) -> dict[str, object] | None:
+        for user in self.users:
+            if str(user.get("id")) == str(user_id):
+                return user
+        return None
+
+    def _find_account(self, account_id: object) -> dict[str, object] | None:
+        for account in self.accounts:
+            if str(account.get("id")) == str(account_id):
+                return account
+        return None
+
+    def _group_name(self, group_id: object) -> str:
+        return next(
+            (
+                str(group.get("name") or "")
+                for group in self.groups
+                if str(group.get("id")) == str(group_id)
+            ),
+            "",
+        )
+
+    @staticmethod
+    def _dedupe_group_ids(values: object) -> list[object]:
+        group_ids: list[object] = []
+        for value in values if isinstance(values, list) else []:
+            if isinstance(value, dict):
+                value = value.get("id") or value.get("group_id") or value.get("groupId")
+            if value in (None, ""):
+                continue
+            if not any(str(existing) == str(value) for existing in group_ids):
+                group_ids.append(value)
+        return group_ids
+
+    def _user_allowed_groups(self, user: dict[str, object]) -> list[object]:
+        for field_name in ("allowed_groups", "allowedGroups", "group_ids"):
+            if field_name in user:
+                return self._dedupe_group_ids(user.get(field_name))
+        group_id = user.get("group_id")
+        return [] if group_id in (None, "") else [group_id]
+
+    def _set_user_allowed_groups(
+        self, user: dict[str, object], group_ids: list[object]
+    ) -> None:
+        """Store the new authorizations the way the upstream would report them.
+
+        Upstream users carry `allowed_groups` and nothing else — the "direct
+        group" the sidecar reads is simply the case where exactly one group is
+        authorized, so it is derived here rather than stored independently.
+        """
+        group_ids = self._dedupe_group_ids(group_ids)
+        user["allowed_groups"] = list(group_ids)
+        user["group_ids"] = list(group_ids)
+        user.pop("allowedGroups", None)
+        user.pop("groups", None)
+        if len(group_ids) == 1:
+            user["group_id"] = group_ids[0]
+            user["group_name"] = self._group_name(group_ids[0])
+        else:
+            user["group_id"] = None
+            user["group_name"] = None
+
+    def _set_account_group_ids(
+        self, account: dict[str, object], group_ids: list[object]
+    ) -> None:
+        group_ids = self._dedupe_group_ids(group_ids)
+        account["group_ids"] = list(group_ids)
+        account["groups"] = [
+            {"id": group_id, "name": self._group_name(group_id)} for group_id in group_ids
+        ]
+        for legacy_field in ("groupIds", "binding", "bindings", "group_id", "current_group_id"):
+            account.pop(legacy_field, None)
+
+    def _api_keys_for(self, user_id: object) -> list[dict[str, object]]:
+        """The user's keys, materializing the default fixture on first access.
+
+        Both the api-keys listing and replace-group have to see the same key
+        rows, otherwise replace-group would report migrations for keys the
+        sidecar never observes (or miss the ones it does).
+        """
+        try:
+            key = int(user_id)
+        except (TypeError, ValueError):
+            key = user_id
+        return self.user_api_keys.setdefault(
+            key,
+            [
+                {
+                    "id": f"key-{key}",
+                    "name": "primary",
+                    "group_id": 11,
+                    "group_name": "rotation-low",
+                    "usage_5h": 1.0,
+                    "usage_1d": 2.0,
+                    "usage_7d": 3.0,
+                }
+            ],
+        )
+
     def _user_response_item(self, user: dict[str, object]) -> dict[str, object]:
         current_group_id = user.get("current_group_id", user.get("group_id"))
         current_group_name = user.get("current_group_name", user.get("group_name"))
@@ -785,20 +906,7 @@ class FakeRotationSub2API:
         return items
 
     def _api_keys_response(self, user_id: int, params=None) -> FakeResponse:
-        items = self.user_api_keys.get(
-            user_id,
-            [
-                {
-                    "id": f"key-{user_id}",
-                    "name": "primary",
-                    "group_id": 11,
-                    "group_name": "rotation-low",
-                    "usage_5h": 1.0,
-                    "usage_1d": 2.0,
-                    "usage_7d": 3.0,
-                }
-            ],
-        )
+        items = self._api_keys_for(user_id)
         page = int((params or {}).get("page") or 1)
         page_size = int((params or {}).get("page_size") or self.api_keys_page_size or 1000)
         if self.api_keys_page_size:
@@ -1116,8 +1224,6 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
         return FakeResponse(200, {"id": "g-1", "name": json["name"]})
     if method == "POST" and path == "/api/v1/admin/users":
         return FakeResponse(200, {"id": "u-1", "email": json["email"]})
-    if method == "PUT" and path == "/api/v1/admin/users/u-1/groups":
-        return FakeResponse(200, {"success": True})
     if method == "POST" and path == "/api/v1/admin/openai/generate-auth-url":
         assert "redirect_uri" not in json
         upstream_state = f"upstream-{json['state']}"
@@ -1174,8 +1280,8 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
             **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN,
         }
         return FakeResponse(200, {"id": "stp-1", **json})
-    if method == "POST" and path == "/api/v1/admin/groups/g-1/accounts":
-        return FakeResponse(200, {"success": True, "account_id": json["account_id"]})
+    # No POST /api/v1/admin/groups/{id}/accounts route exists upstream; anything
+    # that still calls it has to fail here the way production 404s.
     return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
 
 
@@ -1802,11 +1908,24 @@ def test_sub2api_client_replace_group_sends_numeric_group_ids_as_numbers() -> No
     ]
 
 
-def test_sub2api_client_set_user_group_updates_direct_group() -> None:
+def test_sub2api_client_add_user_allowed_group_keeps_existing_authorizations() -> None:
     calls: list[dict[str, object]] = []
 
     def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
         calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        if method == "GET":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "id": 3,
+                        "email": "keeper@example.com",
+                        "allowed_groups": [15, 9],
+                    },
+                },
+            )
         return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
 
     client = Sub2APIClient(
@@ -1816,16 +1935,93 @@ def test_sub2api_client_set_user_group_updates_direct_group() -> None:
     )
 
     with patch.object(requests.Session, "request", new=fake_request):
-        result = client.set_user_group(user_id=3, group_id="7")
+        result = client.add_user_allowed_group(user_id=3, group_id="7")
 
     assert result["user_id"] == 3
     assert result["group_id"] == "7"
+    assert result["allowed_groups"] == [15, 9, 7]
+    # allowed_groups is a declarative overwrite that migrates no keys, so the
+    # write has to carry the groups the user already had; and the endpoint has no
+    # top-level group_id field to send.
     assert calls == [
+        {"method": "GET", "path": "/api/v1/admin/users/3", "json": None},
         {
             "method": "PUT",
             "path": "/api/v1/admin/users/3",
-            "json": {"group_id": 7, "allowed_groups": [7]},
-        }
+            "json": {"allowed_groups": [15, 9, 7]},
+        },
+    ]
+
+
+def test_sub2api_client_add_user_allowed_group_is_idempotent() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        if method == "GET":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {"id": 3, "email": "member@example.com", "allowed_groups": [7]},
+                },
+            )
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.add_user_allowed_group(user_id=3, group_id=7)
+
+    assert result["allowed_groups"] == [7]
+    assert calls[1]["json"] == {"allowed_groups": [7]}
+
+
+def test_sub2api_client_bind_account_to_group_unions_existing_bindings() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        if method == "GET":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "id": 42,
+                        "name": "shared-account",
+                        "platform": "openai",
+                        "group_ids": [11, 33],
+                    },
+                },
+            )
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"ok": True}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        result = client.bind_account_to_group(42, "22")
+
+    assert result["group_ids"] == [11, 33, 22]
+    # Upstream has no POST /admin/groups/{id}/accounts route, and the account PUT
+    # replaces the whole binding list, so the bind reads first and sends a union.
+    assert calls == [
+        {"method": "GET", "path": "/api/v1/admin/accounts/42", "json": None},
+        {
+            "method": "PUT",
+            "path": "/api/v1/admin/accounts/42",
+            "json": {"group_ids": [11, 33, 22], "confirm_mixed_channel_risk": True},
+        },
     ]
 
 
@@ -1868,6 +2064,15 @@ def test_sub2api_client_create_group_uses_upstream_group_form_payload() -> None:
         "haiku_mapped_model": "gpt-5.4-mini",
         "exact_model_mappings": {},
     }
+    # The model mapping fields exist only inside messages_dispatch_model_config;
+    # upstream's group request struct has no top-level counterparts left.
+    for dead_field in (
+        "opus_mapped_model",
+        "sonnet_mapped_model",
+        "haiku_mapped_model",
+        "exact_model_mappings",
+    ):
+        assert dead_field not in payload
 
 
 def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:
@@ -2024,6 +2229,7 @@ def test_sub2api_client_configures_existing_oauth_account_preserving_credentials
     account = {
         "id": "acct-existing",
         "name": "old@example.com",
+        "group_ids": [11, 33],
         "raw": {
             "credentials": {
                 "access_token": "keep-access",
@@ -2053,7 +2259,10 @@ def test_sub2api_client_configures_existing_oauth_account_preserving_credentials
     assert payload["provider"] == "openai"
     assert payload["platform"] == "openai"
     assert payload["type"] == "oauth"
-    assert payload["group_ids"] == [77]
+    # group_ids replaces the whole binding list upstream, so re-configuring an
+    # account must not drop the groups it already serves.
+    assert payload["group_ids"] == [11, 33, 77]
+    assert payload["confirm_mixed_channel_risk"] is True
     assert payload["concurrency"] == 5
     assert payload["credentials"]["access_token"] == "keep-access"
     assert payload["credentials"]["refresh_token"] == "keep-refresh"
@@ -3725,9 +3934,11 @@ def test_existing_user_group_orchestration_uses_replace_group_not_allowed_groups
 
     assert response.status_code == 200
     assert response.json()["status"] == "moved"
-    assert response.json()["migrated_keys"] == 3
+    # replace-group only moves the keys that actually sit in the old group
+    # (key-101), the unassigned one is picked up by the supplemental sync.
+    assert response.json()["migrated_keys"] == 2
     assert response.json()["metadata"]["supplemental_migrated_keys"] == 1
-    assert backend.set_user_group_calls == []
+    assert backend.user_update_calls == []
     assert backend.replace_calls == [
         {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
     ]
@@ -3761,7 +3972,7 @@ def test_existing_user_group_orchestration_requires_direct_source_group(client) 
     assert response.status_code == 400
     assert "direct current group" in response.json()["detail"]
     assert backend.replace_calls == []
-    assert backend.set_user_group_calls == []
+    assert backend.user_update_calls == []
 
 
 def test_existing_user_group_orchestration_assigns_user_without_source_group(client) -> None:
@@ -3806,17 +4017,16 @@ def test_existing_user_group_orchestration_assigns_user_without_source_group(cli
     assert payload["target_group_id"] == 22
     assert payload["migrated_keys"] == 2
     assert backend.replace_calls == []
-    assert backend.set_user_group_calls == [
-        {"user_id": 101, "group_id": 22, "allowed_groups": [22]}
-    ]
+    assert backend.user_update_calls == [{"user_id": 101, "allowed_groups": [22]}]
     assert backend.api_key_group_calls == [
         {"key_id": "key-101-primary", "group_id": 22},
         {"key_id": "key-101-extra", "group_id": 22},
     ]
-    assert backend.bind_account_calls == [
+    assert backend.update_account_calls == [
         {
-            "path": "/api/v1/admin/groups/22/accounts",
-            "json": {"account_id": "acct-ungrouped", "account_ids": ["acct-ungrouped"]},
+            "account_id": "acct-ungrouped",
+            "path": "/api/v1/admin/accounts/acct-ungrouped",
+            "json": {"group_ids": [22], "confirm_mixed_channel_risk": True},
         }
     ]
     assert payload["metadata"]["bound_accounts"] == 1
@@ -3868,12 +4078,13 @@ def test_existing_user_group_orchestration_resyncs_resources_when_target_already
     assert payload["migrated_keys"] == 1
     assert payload["metadata"]["bound_accounts"] == 1
     assert backend.replace_calls == []
-    assert backend.set_user_group_calls == []
+    assert backend.user_update_calls == []
     assert backend.api_key_group_calls == [{"key_id": "key-101-resync", "group_id": 22}]
-    assert backend.bind_account_calls == [
+    assert backend.update_account_calls == [
         {
-            "path": "/api/v1/admin/groups/22/accounts",
-            "json": {"account_id": "acct-resync", "account_ids": ["acct-resync"]},
+            "account_id": "acct-resync",
+            "path": "/api/v1/admin/accounts/acct-resync",
+            "json": {"group_ids": [22], "confirm_mixed_channel_risk": True},
         }
     ]
 
@@ -3924,7 +4135,7 @@ def test_existing_user_group_orchestration_rejects_ambiguous_allowed_groups_as_s
     assert response.status_code == 400
     assert "direct current group" in response.json()["detail"]
     assert backend.replace_calls == []
-    assert backend.set_user_group_calls == []
+    assert backend.user_update_calls == []
 
 
 def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> None:
@@ -3952,7 +4163,7 @@ def test_existing_single_key_orchestration_uses_api_key_group_update(client) -> 
     assert response.json()["tag"] == "manual_api_key"
     assert response.json()["migrated_keys"] == 1
     assert backend.replace_calls == []
-    assert backend.set_user_group_calls == []
+    assert backend.user_update_calls == []
     assert backend.api_key_group_calls == [{"key_id": "key-101", "group_id": 22}]
     runs = main.get_flow_store().list_orchestration_runs()
     assert runs[0].tag == "manual_api_key"
@@ -4059,15 +4270,19 @@ def test_group_migration_moves_users_with_source_group_keys_without_direct_group
     assert payload["moved"][0]["migrated_keys"] == 2
     assert payload["moved"][0]["metadata"]["source_match"] == "api_key_route"
     assert payload["moved"][0]["metadata"]["source_api_key_count"] == 1
-    assert next(user for user in backend.users if user["id"] == 404)["group_id"] == 22
+    # A user without a direct source group is only *granted* the target group;
+    # the upstream user PUT migrates no keys, so revoking group 11 here would
+    # strand every key still routed through it. The keys move on their own below.
+    assert next(user for user in backend.users if user["id"] == 404)["allowed_groups"] == [
+        11,
+        22,
+    ]
     assert next(user for user in backend.users if user["id"] == 505)["group_id"] == 22
     assert backend.user_api_keys[505] == [
         {"id": "key-505-target", "name": "target-key", "group_id": 22},
     ]
     assert backend.replace_calls == []
-    assert backend.set_user_group_calls == [
-        {"user_id": 404, "group_id": 22, "allowed_groups": [22]}
-    ]
+    assert backend.user_update_calls == [{"user_id": 404, "allowed_groups": [11, 22]}]
     assert backend.api_key_group_calls == [
         {"key_id": "key-404", "group_id": 22},
         {"key_id": "key-404-extra", "group_id": 22},
@@ -4107,9 +4322,7 @@ def test_group_migration_does_not_treat_ambiguous_allowed_groups_as_direct_sourc
     assert payload["moved"][0]["user_id"] == 404
     assert payload["moved"][0]["metadata"]["source_match"] == "api_key_route"
     assert backend.replace_calls == []
-    assert backend.set_user_group_calls == [
-        {"user_id": 404, "group_id": 22, "allowed_groups": [22]}
-    ]
+    assert backend.user_update_calls == [{"user_id": 404, "allowed_groups": [11, 22]}]
 
 
 def test_group_migration_rejects_same_source_and_target(client) -> None:
@@ -5399,7 +5612,8 @@ def test_provisioning_ignores_managed_pool_setting_and_uses_email_group(client) 
         {"method": "POST", "json": {"account_id": "oa-1", **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN}},
     ]
     assert backend.create_account_payloads[0]["group_ids"] == [11]
-    assert backend.bind_account_calls == []
+    # A freshly created account already carries the group, so nothing re-binds it.
+    assert backend.update_account_calls == []
     completed_flow = main.get_flow_store().get_by_flow_id(start_payload["flow_id"])
     assert completed_flow is not None
     assert completed_flow.user_id is None
@@ -5459,7 +5673,8 @@ def test_provision_start_uses_first_landing_pool_group_for_new_user(client) -> N
     assert complete_response.status_code == 200
     assert backend.create_account_calls == 1
     assert backend.create_account_payloads[0]["group_ids"] == [11]
-    assert backend.bind_account_calls == []
+    # A freshly created account already carries the group, so nothing re-binds it.
+    assert backend.update_account_calls == []
     completed_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
     assert completed_flow is not None
     assert completed_flow.group_id == "11"
@@ -5587,7 +5802,6 @@ def test_provision_start_configures_existing_oauth_account_without_authorization
     assert update_payload["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
     assert update_payload["extra"]["privacy_mode"] == "standard"
     assert update_payload["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
-    assert backend.bind_account_calls == []
     stored_flow = main.get_flow_store().get_by_flow_id(payload["flow_id"])
     assert stored_flow is not None
     assert stored_flow.status.value == "completed"
@@ -5631,14 +5845,23 @@ def test_provision_start_configures_existing_oauth_account_and_binds_missing_gro
     assert payload["oauth_url"] is None
     assert payload["oauth_account_id"] == "acct-repeat"
     assert backend.generate_auth_url_calls == 0
-    assert len(backend.update_account_calls) == 1
     assert backend.create_account_calls == 0
-    assert backend.bind_account_calls == [
-        {
-            "path": "/api/v1/admin/groups/77/accounts",
-            "json": {"account_id": "acct-repeat", "account_ids": ["acct-repeat"]},
-        }
+    # The configure PUT already unions the missing group in, and the follow-up
+    # bind (provisioning still issues one against its pre-update snapshot) is a
+    # second PUT re-sending the same union rather than a group-side POST.
+    assert [call["path"] for call in backend.update_account_calls] == [
+        "/api/v1/admin/accounts/acct-repeat",
+        "/api/v1/admin/accounts/acct-repeat",
     ]
+    configure_payload, bind_payload = (
+        call["json"] for call in backend.update_account_calls
+    )
+    assert configure_payload["name"] == "repeat@example.com"
+    assert configure_payload["group_ids"] == [11, 77]
+    assert configure_payload["confirm_mixed_channel_risk"] is True
+    assert bind_payload == {"group_ids": [11, 77], "confirm_mixed_channel_risk": True}
+    # The original group survives the write instead of being silently unbound.
+    assert backend.accounts[-1]["group_ids"] == [11, 77]
 
 
 def test_provisioning_settings_api_updates_assignment_mode(client) -> None:
@@ -5908,14 +6131,16 @@ def test_manual_rotation_success_skip_and_failure(client) -> None:
 
     assert moved.status_code == 200
     assert moved.json()["status"] == "moved"
-    assert moved.json()["migrated_keys"] == 2
+    # The user owns one key and it sits in the old group, so replace-group moves
+    # exactly that one.
+    assert moved.json()["migrated_keys"] == 1
     assert skipped.status_code == 200
     assert skipped.json()["status"] == "skipped"
     assert "matches the current assignment" in skipped.json()["reason"]
     assert failed.status_code == 200
     assert failed.json()["status"] == "failed"
     assert "replace-group failed" in failed.json()["reason"]
-    assert backend.set_user_group_calls == []
+    assert backend.user_update_calls == []
     assert backend.replace_calls == [
         {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
     ]

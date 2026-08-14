@@ -481,7 +481,7 @@ class RotationService:
         metadata: dict[str, Any] | None = None
         try:
             if effective_source_group_id in (None, ""):
-                self.sub2api_client.set_user_group(
+                self.sub2api_client.add_user_allowed_group(
                     user_id=user_id,
                     group_id=target_group_id,
                 )
@@ -641,7 +641,7 @@ class RotationService:
                     upstream_migrated_keys = int(response.get("migrated_keys") or 0)
                     source_match = "direct_group"
                 else:
-                    self.sub2api_client.set_user_group(
+                    self.sub2api_client.add_user_allowed_group(
                         user_id=user_id,
                         group_id=target_group_id,
                     )

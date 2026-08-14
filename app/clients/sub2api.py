@@ -72,8 +72,12 @@ class Sub2APIClient:
     GENERATE_OPENAI_AUTH_URL_PATH = "/api/v1/admin/openai/generate-auth-url"
     EXCHANGE_OPENAI_CODE_PATH = "/api/v1/admin/openai/exchange-code"
     CREATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts"
-    UPDATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts/{account_id}"
-    BIND_ACCOUNT_TO_GROUP_PATH = "/api/v1/admin/groups/{group_id}/accounts"
+    # Serves GET (read one) and PUT (partial update) for a single account.
+    # There is deliberately no group-side bind path here: upstream exposes no
+    # POST /api/v1/admin/groups/{group_id}/accounts route (it always 404s), so
+    # account/group bindings are written through this account PUT instead.
+    OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts/{account_id}"
+    UPDATE_OPENAI_ACCOUNT_PATH = OPENAI_ACCOUNT_PATH
     LIST_SCHEDULED_TEST_PLANS_PATH = "/api/v1/admin/accounts/{account_id}/scheduled-test-plans"
     CREATE_SCHEDULED_TEST_PLAN_PATH = "/api/v1/admin/scheduled-test-plans"
     SET_ACCOUNT_SCHEDULABLE_PATH = "/api/v1/admin/accounts/{account_id}/schedulable"
@@ -244,21 +248,78 @@ class Sub2APIClient:
             "raw": data,
         }
 
-    def set_user_group(self, *, user_id: Any, group_id: Any) -> dict[str, Any]:
+    def add_user_allowed_group(self, *, user_id: Any, group_id: Any) -> dict[str, Any]:
+        """Authorize a user for one more group without revoking the others.
+
+        Two upstream details make the naive "overwrite with the target group"
+        write actively destructive:
+
+        * The user PUT has no top-level ``group_id`` field at all — the upstream
+          request struct only carries ``allowed_groups``, so a ``group_id`` key is
+          silently dropped and the call looks like it worked.
+        * ``allowed_groups`` is declarative: omitting it leaves the stored
+          authorizations alone, but sending it replaces them wholesale (real
+          deletes) *without migrating a single API key*. Collapsing a user to one
+          group therefore turns every key it owns in its other groups into a 403
+          orphan.
+
+        So the only safe "join this group" write is the union of what the user is
+        already authorized for and the new group. Moving a user *off* a group is a
+        different operation with its own transactional endpoint —
+        :meth:`replace_exclusive_user_group`.
+        """
         coerced_group_id = self._coerce_numeric_id(group_id)
-        payload = {
-            "group_id": coerced_group_id,
-            "allowed_groups": [coerced_group_id],
-        }
+        user = self.get_user(user_id)
+        allowed_groups = self._merge_group_ids(user.get("group_ids"), coerced_group_id)
+        payload = {"allowed_groups": allowed_groups}
         path = self.UPDATE_USER_PATH.format(user_id=user_id)
         data = self._request("PUT", path, json=payload)
-        return {"user_id": user_id, "group_id": group_id, "raw": data}
+        return {
+            "user_id": user_id,
+            "group_id": group_id,
+            "allowed_groups": allowed_groups,
+            "raw": data,
+        }
+
+    def get_user(self, user_id: Any) -> dict[str, Any]:
+        path = self.UPDATE_USER_PATH.format(user_id=user_id)
+        data = self._request("GET", path)
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API user response is not an object")
+        users = self._parse_user_list([body])
+        if not users:
+            raise Sub2APIError(f"Sub2API returned no user for id {user_id}")
+        return users[0]
 
     @staticmethod
     def _coerce_numeric_id(value: Any) -> Any:
         if isinstance(value, str) and value.isdecimal():
             return int(value)
         return value
+
+    def _merge_group_ids(self, current: Any, *additions: Any) -> list[Any]:
+        """Union of the currently bound group ids and the requested ones.
+
+        Both ``allowed_groups`` (users) and ``group_ids`` (accounts) are
+        declarative list fields upstream, so every write of them has to be a
+        union unless the intent really is to revoke the missing entries.
+        """
+        merged: list[Any] = []
+
+        def add(value: Any) -> None:
+            if value in (None, ""):
+                return
+            coerced = self._coerce_numeric_id(value)
+            if not any(str(existing) == str(coerced) for existing in merged):
+                merged.append(coerced)
+
+        if isinstance(current, list):
+            for value in current:
+                add(value)
+        for value in additions:
+            add(value)
+        return merged
 
     def list_groups(self, platform: str | None = None) -> list[dict[str, Any]]:
         params = {"platform": platform} if platform else None
@@ -970,10 +1031,38 @@ class Sub2APIClient:
         return {"id": account_id, "name": name, "raw": data}
 
     def bind_account_to_group(self, account_id: Any, group_id: Any) -> dict[str, Any]:
-        payload = {"account_id": account_id, "account_ids": [account_id]}
-        path = self.BIND_ACCOUNT_TO_GROUP_PATH.format(group_id=group_id)
-        data = self._request("POST", path, json=payload)
-        return {"account_id": account_id, "group_id": group_id, "raw": data}
+        """Add one more group binding to an account, keeping the existing ones.
+
+        Upstream has no group-side bind route (``POST /admin/groups/{id}/accounts``
+        404s), so the binding is written through the account PUT. That endpoint's
+        ``group_ids`` is declarative — the list that is sent replaces every
+        existing binding — hence the read-then-union: sending just the target
+        group would silently unbind the account from every other group it serves.
+        ``confirm_mixed_channel_risk`` acknowledges the server-side mixed-channel
+        guard so a wider group set cannot bounce the write with a 409.
+        """
+        account = self.get_account(account_id)
+        group_ids = self._merge_group_ids(account.get("group_ids"), group_id)
+        payload = {"group_ids": group_ids, "confirm_mixed_channel_risk": True}
+        path = self.UPDATE_OPENAI_ACCOUNT_PATH.format(account_id=account_id)
+        data = self._request("PUT", path, json=payload)
+        return {
+            "account_id": account_id,
+            "group_id": group_id,
+            "group_ids": group_ids,
+            "raw": data,
+        }
+
+    def get_account(self, account_id: Any) -> dict[str, Any]:
+        path = self.OPENAI_ACCOUNT_PATH.format(account_id=account_id)
+        data = self._request("GET", path)
+        body = self._unwrap_data(data)
+        if not isinstance(body, dict):
+            raise Sub2APIError("Sub2API account response is not an object")
+        accounts = self._parse_account_list([body])
+        if not accounts:
+            raise Sub2APIError(f"Sub2API returned no account for id {account_id}")
+        return accounts[0]
 
     def list_proxies(self) -> list[dict[str, Any]]:
         data = self._request("GET", self.LIST_PROXIES_PATH)
@@ -1103,10 +1192,11 @@ class Sub2APIClient:
             "fallback_group_id": None,
             "fallback_group_id_on_invalid_request": None,
             "allow_messages_dispatch": False,
-            "opus_mapped_model": "gpt-5.4",
-            "sonnet_mapped_model": "gpt-5.3-codex",
-            "haiku_mapped_model": "gpt-5.4-mini",
-            "exact_model_mappings": [],
+            # The model-mapping fields live *only* inside
+            # messages_dispatch_model_config below: upstream folded them into that
+            # JSONB column and its group request struct has no top-level
+            # opus/sonnet/haiku_mapped_model or exact_model_mappings any more, so
+            # sending them at the top level was writing to nothing.
             "require_oauth_only": False,
             "require_privacy_set": False,
             "model_routing": None,
@@ -1243,7 +1333,8 @@ class Sub2APIClient:
             "credentials": credentials,
             "extra": extra,
             "concurrency": self.provisioning_defaults.account_concurrency,
-            "group_ids": [self._coerce_numeric_id(group_id)],
+            "group_ids": self._existing_account_group_ids(account, group_id),
+            "confirm_mixed_channel_risk": True,
         }
         for field_name in (
             "notes",
@@ -1334,7 +1425,8 @@ class Sub2APIClient:
             "credentials": credentials,
             "extra": extra,
             "concurrency": self.provisioning_defaults.account_concurrency,
-            "group_ids": [self._coerce_numeric_id(group_id)],
+            "group_ids": self._existing_account_group_ids(account, group_id),
+            "confirm_mixed_channel_risk": True,
         }
         for field_name in (
             "notes",
@@ -1348,6 +1440,23 @@ class Sub2APIClient:
             if isinstance(raw, dict) and field_name in raw:
                 payload[field_name] = raw[field_name]
         return payload
+
+    def _existing_account_group_ids(
+        self, account: dict[str, Any], group_id: Any
+    ) -> list[Any]:
+        """Group ids to send when re-configuring an already existing account.
+
+        ``group_ids`` on the account PUT is declarative, so reusing the create
+        payload's ``[group_id]`` here would unbind the account from every other
+        group it currently serves as a side effect of a rename/credential
+        refresh. Send the union instead.
+        """
+        current = account.get("group_ids")
+        if not isinstance(current, list):
+            raw = account.get("raw")
+            source = raw if isinstance(raw, dict) else account
+            current, _ = self._extract_account_groups(source)
+        return self._merge_group_ids(current, group_id)
 
     def _build_openai_apikey_credentials(
         self, *, api_key: str, base_url: str
