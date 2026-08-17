@@ -11,6 +11,7 @@ from app.errors import (
     FlowNotFoundError,
     InvalidOAuthCallbackPayloadError,
     InvalidOAuthStateError,
+    ProvisioningError,
 )
 from app.models.flow import (
     AssignmentMode,
@@ -29,6 +30,14 @@ from app.models.schemas import (
 from app.stores.postgres import PostgresFlowStore
 
 logger = logging.getLogger(__name__)
+
+# Where each platform's upstream OAuth helper listens for the callback. Used only as
+# the display fallback when the generated auth URL carries no `redirect_uri` of its
+# own — the URL upstream actually minted always wins.
+DEFAULT_OAUTH_REDIRECT_URIS: dict[str, str] = {
+    "openai": "http://localhost:1455/auth/callback",
+    "grok": "http://127.0.0.1:56121/callback",
+}
 
 
 class ProvisioningService:
@@ -52,11 +61,14 @@ class ProvisioningService:
         *,
         email: str,
         upstream_id: str,
+        platform: str | None = None,
         sub2api_client: Sub2APIClient | None = None,
     ) -> ProvisionStartResponse:
         client = sub2api_client or self.sub2api_client
-        platform = self._default_platform(client)
-        logger.info("Starting provisioning flow for email=%s", email)
+        platform = self._resolve_platform(client, platform)
+        logger.info(
+            "Starting provisioning flow for email=%s | platform=%s", email, platform
+        )
         flow_id = str(uuid.uuid4())
         requested_state = secrets.token_urlsafe(24)
         self._record_event(
@@ -67,6 +79,10 @@ class ProvisioningService:
             details={"email": email, "platform": platform},
         )
         try:
+            # An OAuth handoff needs both the platform's endpoints and its credential
+            # assembly, so refuse before any group or account is written rather than
+            # halfway through.
+            self._require_oauth_platform(platform)
             group_id, assignment_mode, assignment_reason = self._resolve_group_assignment(
                 email,
                 upstream_id=upstream_id,
@@ -96,6 +112,7 @@ class ProvisioningService:
                     email=email,
                     group_id=group_id,
                     flow_id=flow_id,
+                    platform=platform,
                     sub2api_client=client,
                 )
                 flow = ProvisionFlow(
@@ -117,22 +134,24 @@ class ProvisioningService:
                     flow_id=flow_id,
                     event_type=ProvisionEventType.account_created,
                     status=ProvisionEventStatus.succeeded,
-                    message="Existing OpenAI OAuth account configured",
+                    message="Existing OAuth account configured",
                     details={
                         "account_id": account["id"],
                         "group_id": group_id,
                         "action": account_action,
+                        "platform": platform,
                     },
                 )
                 self._record_event(
                     flow_id=flow_id,
                     event_type=ProvisionEventType.account_bound,
                     status=ProvisionEventStatus.succeeded,
-                    message="OpenAI OAuth account group assignment resolved",
+                    message="OAuth account group assignment resolved",
                     details={
                         "account_id": account["id"],
                         "group_id": group_id,
                         "action": account_action,
+                        "platform": platform,
                     },
                 )
                 self._record_event(
@@ -140,7 +159,11 @@ class ProvisioningService:
                     event_type=ProvisionEventType.completed,
                     status=ProvisionEventStatus.succeeded,
                     message="Provisioning flow completed without OAuth handoff",
-                    details={"oauth_account_id": account["id"], "group_id": group_id},
+                    details={
+                        "oauth_account_id": account["id"],
+                        "group_id": group_id,
+                        "platform": platform,
+                    },
                 )
                 logger.info(
                     "Provisioning flow completed with existing account | flow_id=%s | account_id=%s",
@@ -159,22 +182,26 @@ class ProvisioningService:
                     oauth_required=False,
                     oauth_account_id=flow.oauth_account_id,
                     oauth_url=None,
-                    oauth_redirect_uri=self.openai_oauth_redirect_uri,
+                    oauth_redirect_uri=self._default_redirect_uri(platform),
                 )
 
-            oauth = client.generate_openai_auth_url(
+            oauth = client.generate_oauth_auth_url(
                 email=email,
                 state=requested_state,
+                platform=platform,
             )
             state = str(oauth.get("state") or requested_state)
             self._record_event(
                 flow_id=flow_id,
                 event_type=ProvisionEventType.oauth_url_generated,
                 status=ProvisionEventStatus.succeeded,
-                message="OpenAI OAuth handoff URL generated",
+                message="OAuth handoff URL generated",
                 details={
-                    "redirect_uri": self.openai_oauth_redirect_uri,
+                    "redirect_uri": self._oauth_redirect_uri_from_url(
+                        oauth.get("url"), platform
+                    ),
                     "session_id": oauth.get("session_id"),
+                    "platform": platform,
                 },
             )
         except Exception as exc:
@@ -183,7 +210,7 @@ class ProvisioningService:
                 event_type=ProvisionEventType.failed,
                 status=ProvisionEventStatus.failed,
                 message="Provisioning flow failed during start",
-                details={"error": str(exc)},
+                details={"error": str(exc), "platform": platform},
             )
             raise
 
@@ -206,12 +233,13 @@ class ProvisioningService:
             event_type=ProvisionEventType.pending_oauth,
             status=ProvisionEventStatus.info,
             message="Provisioning flow is pending OAuth callback",
-            details={"state": state},
+            details={"state": state, "platform": platform},
         )
         logger.info(
-            "Provisioning flow created | flow_id=%s | group_id=%s",
+            "Provisioning flow created | flow_id=%s | group_id=%s | platform=%s",
             flow_id,
             group_id,
+            platform,
         )
 
         return ProvisionStartResponse(
@@ -226,7 +254,7 @@ class ProvisioningService:
             oauth_required=True,
             oauth_account_id=None,
             oauth_url=flow.oauth_url or "",
-            oauth_redirect_uri=self._oauth_redirect_uri_from_url(flow.oauth_url),
+            oauth_redirect_uri=self._oauth_redirect_uri_from_url(flow.oauth_url, platform),
         )
 
     def start_apikey_flow_for_upstream(
@@ -236,11 +264,17 @@ class ProvisioningService:
         api_base_url: str,
         api_key: str,
         upstream_id: str,
+        platform: str | None = None,
         sub2api_client: Sub2APIClient | None = None,
     ) -> ProvisionApiKeyStartResponse:
         client = sub2api_client or self.sub2api_client
-        platform = self._default_platform(client)
-        logger.info("Starting API key provisioning flow for name=%s", name)
+        # No OAuth support check here: an API key account needs no per-platform
+        # endpoints or credential assembly, and upstream applies no platform
+        # whitelist, so any platform the operator names is a legal target.
+        platform = self._resolve_platform(client, platform)
+        logger.info(
+            "Starting API key provisioning flow for name=%s | platform=%s", name, platform
+        )
         flow_id = str(uuid.uuid4())
         state = secrets.token_urlsafe(24)
         self._record_event(
@@ -282,22 +316,24 @@ class ProvisioningService:
                 flow_id=flow_id,
                 event_type=ProvisionEventType.account_created,
                 status=ProvisionEventStatus.succeeded,
-                message="OpenAI API key account configured",
+                message="API key account configured",
                 details={
                     "account_id": account["id"],
                     "group_id": group_id,
                     "action": account_action,
+                    "platform": platform,
                 },
             )
             self._record_event(
                 flow_id=flow_id,
                 event_type=ProvisionEventType.account_bound,
                 status=ProvisionEventStatus.succeeded,
-                message="OpenAI API key account group assignment resolved",
+                message="API key account group assignment resolved",
                 details={
                     "account_id": account["id"],
                     "group_id": group_id,
                     "action": account_action,
+                    "platform": platform,
                 },
             )
         except Exception as exc:
@@ -306,7 +342,7 @@ class ProvisioningService:
                 event_type=ProvisionEventType.failed,
                 status=ProvisionEventStatus.failed,
                 message="API key provisioning flow failed during start",
-                details={"error": str(exc)},
+                details={"error": str(exc), "platform": platform},
             )
             raise
 
@@ -330,12 +366,17 @@ class ProvisioningService:
             event_type=ProvisionEventType.completed,
             status=ProvisionEventStatus.succeeded,
             message="API key provisioning flow completed",
-            details={"account_id": account["id"], "group_id": group_id},
+            details={
+                "account_id": account["id"],
+                "group_id": group_id,
+                "platform": platform,
+            },
         )
         logger.info(
-            "API key provisioning flow completed | flow_id=%s | account_id=%s",
+            "API key provisioning flow completed | flow_id=%s | account_id=%s | platform=%s",
             flow_id,
             account["id"],
+            platform,
         )
         return ProvisionApiKeyStartResponse(
             upstream_id=flow.upstream_id,
@@ -378,20 +419,28 @@ class ProvisioningService:
         if not flow:
             raise FlowNotFoundError("No provisioning flow found for the provided state")
 
-        logger.info("Completing OAuth flow | flow_id=%s | email=%s", flow.flow_id, flow.email)
         client = sub2api_client or self.sub2api_client
+        platform = self._platform_for_flow(client, flow)
+        logger.info(
+            "Completing OAuth flow | flow_id=%s | email=%s | platform=%s",
+            flow.flow_id,
+            flow.email,
+            platform,
+        )
         try:
+            self._require_oauth_platform(platform)
             self._record_event(
                 flow_id=flow.flow_id,
                 event_type=ProvisionEventType.callback_parsed,
                 status=ProvisionEventStatus.succeeded,
                 message="OAuth callback parsed",
-                details={"state": state},
+                details={"state": state, "platform": platform},
             )
-            exchange = client.exchange_openai_code(
+            exchange = client.exchange_oauth_code(
                 code=code,
                 state=state,
                 session_id=flow.oauth_session_id,
+                platform=platform,
             )
             self._record_event(
                 flow_id=flow.flow_id,
@@ -401,6 +450,7 @@ class ProvisioningService:
                 details={
                     "provider_user_id": exchange["exchange"].get("provider_user_id"),
                     "received_token_payload": True,
+                    "platform": platform,
                 },
             )
             account, account_action = self._resolve_oauth_account(
@@ -408,13 +458,13 @@ class ProvisioningService:
                 oauth_payload=exchange["exchange"],
                 group_id=flow.group_id,
                 flow_id=flow.flow_id,
-                platform=self._default_platform(client),
+                platform=platform,
                 sub2api_client=client,
             )
             if account_action == "created":
-                account_message = "OpenAI OAuth account created"
+                account_message = "OAuth account created"
             else:
-                account_message = "Existing OpenAI OAuth account reused"
+                account_message = "Existing OAuth account reused"
             self._record_event(
                 flow_id=flow.flow_id,
                 event_type=ProvisionEventType.account_created,
@@ -424,17 +474,19 @@ class ProvisioningService:
                     "account_id": account["id"],
                     "group_id": flow.group_id,
                     "action": account_action,
+                    "platform": platform,
                 },
             )
             self._record_event(
                 flow_id=flow.flow_id,
                 event_type=ProvisionEventType.account_bound,
                 status=ProvisionEventStatus.succeeded,
-                message="OpenAI OAuth account group assignment resolved",
+                message="OAuth account group assignment resolved",
                 details={
                     "account_id": account["id"],
                     "group_id": flow.group_id,
                     "action": account_action,
+                    "platform": platform,
                 },
             )
         except Exception as exc:
@@ -448,7 +500,7 @@ class ProvisioningService:
                 event_type=ProvisionEventType.failed,
                 status=ProvisionEventStatus.failed,
                 message="OAuth completion failed",
-                details={"error": str(exc)},
+                details={"error": str(exc), "platform": platform},
             )
             raise
 
@@ -463,12 +515,17 @@ class ProvisioningService:
             event_type=ProvisionEventType.completed,
             status=ProvisionEventStatus.succeeded,
             message="Provisioning flow completed",
-            details={"oauth_account_id": account["id"], "group_id": flow.group_id},
+            details={
+                "oauth_account_id": account["id"],
+                "group_id": flow.group_id,
+                "platform": platform,
+            },
         )
         logger.info(
-            "OAuth flow completed | flow_id=%s | oauth_account_id=%s",
+            "OAuth flow completed | flow_id=%s | oauth_account_id=%s | platform=%s",
             flow.flow_id,
             flow.oauth_account_id,
+            platform,
         )
         return flow
 
@@ -492,13 +549,22 @@ class ProvisioningService:
             )
         return code, state
 
-    def _oauth_redirect_uri_from_url(self, oauth_url: str | None) -> str:
+    def _oauth_redirect_uri_from_url(
+        self, oauth_url: str | None, platform: str | None = None
+    ) -> str:
+        """What to tell the operator to paste back, parsed from the auth URL.
+
+        The redirect_uri baked into the URL upstream minted is the only one the
+        provider will actually call back, so it wins whenever it is there; the
+        per-platform default is only for URLs that carry none.
+        """
+        fallback = self._default_redirect_uri(platform or "openai")
         if not oauth_url:
-            return self.openai_oauth_redirect_uri
+            return fallback
         parsed = urlparse(oauth_url)
         params = parse_qs(parsed.query or parsed.fragment)
         redirect_uri = self._first_param(params, "redirect_uri")
-        return redirect_uri or self.openai_oauth_redirect_uri
+        return redirect_uri or fallback
 
     def fail_flow(self, state: str, message: str) -> ProvisionFlow | None:
         flow = self.flow_store.get_by_state(state)
@@ -518,13 +584,70 @@ class ProvisioningService:
         return flow
 
     def _default_platform(self, client: Sub2APIClient) -> str:
-        """The upstream's configured provisioning platform.
+        """The upstream's configured default provisioning platform.
 
         This is the single place the configured default is read; every helper
         below takes the platform as an explicit argument so a caller can drive a
         different platform without the deep layers reaching back into config.
         """
         return str(client.provisioning_defaults.group_platform or "").strip() or "openai"
+
+    def _resolve_platform(self, client: Sub2APIClient, platform: str | None) -> str:
+        """A request's explicit platform wins; config only fills the blank.
+
+        Kept an opaque string on purpose — upstream applies no platform whitelist to
+        account creation, so a platform sidecar has never heard of is a valid group
+        target. Only the OAuth flow narrows this further (see _require_oauth_platform),
+        because that one really does need per-platform endpoints and credentials.
+        """
+        explicit = str(platform).strip() if platform is not None else ""
+        return explicit or self._default_platform(client)
+
+    def _require_oauth_platform(self, platform: str) -> None:
+        supported = Sub2APIClient.supported_oauth_platforms()
+        if platform in supported:
+            return
+        raise ProvisioningError(
+            f"OAuth provisioning is not supported for platform '{platform}'. "
+            f"Supported platforms: {', '.join(supported)}"
+        )
+
+    def _platform_for_flow(self, client: Sub2APIClient, flow: ProvisionFlow) -> str:
+        """The platform a pending flow belongs to, recovered at callback time.
+
+        The flow record predates multi-platform provisioning and carries no platform
+        column, so the target group is what remembers it: the account is about to be
+        bound to that group and upstream keeps account and group platform in step, so
+        the group's own platform is the authoritative answer. A group that cannot be
+        read back (or carries no platform) falls back to the configured default, which
+        is exactly the pre-change behavior.
+        """
+        try:
+            for group in client.list_groups():
+                if str(group.get("id")) == str(flow.group_id):
+                    platform = str(group.get("platform") or "").strip()
+                    if platform:
+                        return platform
+                    break
+        except Exception:
+            logger.warning(
+                "Falling back to the configured platform: group lookup failed | flow_id=%s | group_id=%s",
+                flow.flow_id,
+                flow.group_id,
+                exc_info=True,
+            )
+        return self._default_platform(client)
+
+    def _default_redirect_uri(self, platform: str) -> str:
+        """Redirect URI to show when the auth URL itself does not name one.
+
+        openai keeps reading the configured value (it is deployment-specific and has
+        always been configurable); every other platform uses its upstream helper's
+        fixed loopback callback.
+        """
+        if platform == "openai":
+            return self.openai_oauth_redirect_uri
+        return DEFAULT_OAUTH_REDIRECT_URIS.get(platform, self.openai_oauth_redirect_uri)
 
     def _build_group_name(self, email: str, platform: str) -> str:
         """`{email}_{platform}`, capped at the upstream's 128-char group name limit.
@@ -637,10 +760,11 @@ class ProvisioningService:
         client = sub2api_client or self.sub2api_client
         existing = self._find_oauth_account(email, platform=platform, sub2api_client=client)
         if existing is None:
-            account = client.create_openai_account_from_oauth(
+            account = client.create_account_from_oauth(
                 name=email,
                 oauth_payload=oauth_payload,
                 group_id=group_id,
+                platform=platform,
             )
             self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "created"
@@ -670,22 +794,24 @@ class ProvisioningService:
         client = sub2api_client or self.sub2api_client
         existing = self._find_apikey_account(name, platform=platform, sub2api_client=client)
         if existing is None:
-            account = client.create_openai_account_from_apikey(
+            account = client.create_account_from_apikey(
                 name=name,
                 base_url=api_base_url,
                 api_key=api_key,
                 group_id=group_id,
+                platform=platform,
             )
             self._ensure_default_scheduled_test_plan(flow_id, account["id"], client)
             return account, "created"
 
         had_group = self._account_has_group(existing, group_id)
-        account = client.configure_existing_openai_apikey_account(
+        account = client.configure_existing_apikey_account(
             account=existing,
             name=name,
             base_url=api_base_url,
             api_key=api_key,
             group_id=group_id,
+            platform=platform,
         )
         # The configure PUT sends the union of the account's current groups and the
         # target group, so the binding already landed; a follow-up bind would only
@@ -719,14 +845,16 @@ class ProvisioningService:
         email: str,
         group_id: object,
         flow_id: str,
+        platform: str | None = None,
         sub2api_client: Sub2APIClient | None = None,
     ) -> tuple[dict[str, object], str]:
         client = sub2api_client or self.sub2api_client
         had_group = self._account_has_group(existing_account, group_id)
-        account = client.configure_existing_openai_oauth_account(
+        account = client.configure_existing_oauth_account(
             account=existing_account,
             name=email,
             group_id=group_id,
+            platform=platform,
         )
         # See _resolve_apikey_account: configure already writes the union of the
         # existing group_ids and the target group, so no follow-up bind is needed.

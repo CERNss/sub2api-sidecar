@@ -681,6 +681,20 @@ pre {
   justify-self: start;
 }
 
+.provision-platform-field {
+  max-width: 260px;
+}
+
+/* The picker shows the same platform badge every other platform-aware control uses,
+   so the target platform reads identically here and on groups, users and keys. */
+.provision-platform-select {
+  width: 100%;
+}
+
+.provision-platform-select .platform-tag {
+  margin: 0;
+}
+
 .provision-callback-form {
   padding-top: 22px;
   border-top: 1px solid #e5e7eb;

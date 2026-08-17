@@ -25,6 +25,79 @@ DEFAULT_SCHEDULED_TEST_MODEL_ID = "gpt-5.5"
 DEFAULT_SCHEDULED_TEST_CRON_EXPRESSION = "*/5 * * * *"
 DEFAULT_SCHEDULED_TEST_MAX_RESULTS = 100
 
+# Per-platform OAuth endpoint pair: platform -> (auth-url path, exchange-code path).
+# Upstream gives every platform its own pair; the request/response shapes are
+# structurally identical, only the paths and a couple of body field names differ
+# (see _build_auth_url_request / _build_exchange_request).
+#
+# Extension slots — upstream already serves the paths below, they are recorded here
+# as prose rather than as entries because sidecar has no credential assembly for them
+# yet. Wiring one up means: add it to this table, then add its OAUTH_CREDENTIAL_FIELDS
+# and OAUTH_EXTRA_FIELDS entries; supported_oauth_platforms() picks it up from there,
+# and the API and the UI platform picker follow automatically.
+#   anthropic:   /api/v1/admin/accounts/generate-auth-url
+#                /api/v1/admin/accounts/exchange-code
+#   gemini:      /api/v1/admin/gemini/oauth/auth-url
+#                /api/v1/admin/gemini/oauth/exchange-code
+#                (auth-url additionally requires oauth_type and tier_id)
+#   antigravity: /api/v1/admin/antigravity/oauth/auth-url
+#                /api/v1/admin/antigravity/oauth/exchange-code
+OAUTH_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "openai": (
+        "/api/v1/admin/openai/generate-auth-url",
+        "/api/v1/admin/openai/exchange-code",
+    ),
+    "grok": (
+        "/api/v1/admin/grok/oauth/auth-url",
+        "/api/v1/admin/grok/oauth/exchange-code",
+    ),
+}
+
+# Which fields of an exchange-code response go into the account's `credentials` /
+# `extra`. Deliberately a white-list per platform rather than a pass-through of the
+# whole exchange body: upstream stores credentials verbatim, so an unexpected key
+# would be persisted onto the account forever. Missing fields are simply skipped.
+OAUTH_CREDENTIAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "openai": (
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "expires_at",
+        "chatgpt_account_id",
+        "chatgpt_user_id",
+        "organization_id",
+        "plan_type",
+        "client_id",
+    ),
+    "grok": (
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "token_type",
+        "expires_at",
+        "client_id",
+        "scope",
+        "email",
+        "sub",
+        "team_id",
+        "subscription_tier",
+        "entitlement_status",
+        "base_url",
+    ),
+}
+
+OAUTH_EXTRA_FIELDS: dict[str, tuple[str, ...]] = {
+    "openai": ("email", "name", "privacy_mode"),
+    "grok": ("email", "subscription_tier", "entitlement_status"),
+}
+
+# Default `credentials.base_url` for API-key accounts when the caller names none.
+# openai is deliberately absent: upstream already defaults it, and the historical
+# behavior is to omit the key entirely rather than pin a host.
+APIKEY_DEFAULT_BASE_URLS: dict[str, str] = {
+    "grok": "https://api.x.ai/v1",
+}
+
 # Usage logs are append-only, so a fully-elapsed day never changes and its (large,
 # slow) crawl can be served from memory. Skip caching in the first minutes after
 # local midnight so late upstream writes to the just-closed day are not frozen out.
@@ -69,8 +142,9 @@ class Sub2APIClient:
     USAGE_STATS_PATH = "/api/v1/admin/usage/stats"
     DASHBOARD_GROUPS_PATH = "/api/v1/admin/dashboard/groups"
     DASHBOARD_USERS_RANKING_PATH = "/api/v1/admin/dashboard/users-ranking"
-    GENERATE_OPENAI_AUTH_URL_PATH = "/api/v1/admin/openai/generate-auth-url"
-    EXCHANGE_OPENAI_CODE_PATH = "/api/v1/admin/openai/exchange-code"
+    # OAuth paths are per-platform and live in the OAUTH_ENDPOINTS table above.
+    # Account creation is not: one generic endpoint serves every platform, which is
+    # why the payload carries `platform` instead of the route encoding it.
     CREATE_OPENAI_ACCOUNT_PATH = "/api/v1/admin/accounts"
     # Serves GET (read one) and PUT (partial update) for a single account.
     # There is deliberately no group-side bind path here: upstream exposes no
@@ -878,11 +952,65 @@ class Sub2APIClient:
             raise Sub2APIError("Sub2API account usage stats response is not an object")
         return body
 
-    def generate_openai_auth_url(self, email: str, state: str) -> dict[str, Any]:
-        payload = {
-            "state": state,
-        }
-        data = self._request("POST", self.GENERATE_OPENAI_AUTH_URL_PATH, json=payload)
+    @staticmethod
+    def supported_oauth_platforms() -> list[str]:
+        """Platforms this client can drive an OAuth provisioning flow for.
+
+        The intersection of "upstream endpoints are known" and "sidecar knows how to
+        assemble the account credentials"; a platform with only one half is not
+        provisionable, so it must not be offered to callers or to the UI.
+        """
+        return sorted(set(OAUTH_ENDPOINTS) & set(OAUTH_CREDENTIAL_FIELDS))
+
+    def _oauth_endpoints(self, platform: str) -> tuple[str, str]:
+        paths = OAUTH_ENDPOINTS.get(platform)
+        if paths is None:
+            raise Sub2APIError(
+                f"Sub2API OAuth provisioning is not implemented for platform '{platform}'. "
+                f"Supported platforms: {', '.join(self.supported_oauth_platforms())}"
+            )
+        return paths
+
+    def _build_auth_url_request(self, platform: str, state: str) -> dict[str, Any]:
+        # openai mints the handoff URL around a caller-supplied state; grok mints both
+        # the state and the session itself and takes only optional proxy_id /
+        # redirect_uri, so sending a state there would be an unknown field.
+        if platform == "openai":
+            return {"state": state}
+        return {}
+
+    def _build_exchange_request(
+        self,
+        platform: str,
+        *,
+        code: str,
+        state: str,
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        if platform == "openai":
+            payload: dict[str, Any] = {"code": code, "state": state}
+            if session_id:
+                payload["session_id"] = session_id
+            return payload
+        # grok keys the exchange off the session it created; `state` is optional there
+        # but we always have the value upstream handed us, so send it and let upstream
+        # cross-check the callback.
+        payload = {"session_id": session_id, "code": code}
+        if state:
+            payload["state"] = state
+        return payload
+
+    def generate_oauth_auth_url(
+        self,
+        *,
+        email: str,
+        state: str,
+        platform: str | None = None,
+    ) -> dict[str, Any]:
+        effective_platform = self._effective_account_platform(platform)
+        auth_url_path, _ = self._oauth_endpoints(effective_platform)
+        payload = self._build_auth_url_request(effective_platform, state)
+        data = self._request("POST", auth_url_path, json=payload)
         body = self._unwrap_data(data)
         auth_url = self._extract_value(
             body,
@@ -901,7 +1029,7 @@ class Sub2APIClient:
         )
         if not auth_url:
             raise Sub2APIError(
-                "Sub2API did not return an OAuth URL. Adjust `generate_openai_auth_url()` parsing."
+                "Sub2API did not return an OAuth URL. Adjust `generate_oauth_auth_url()` parsing."
             )
         session_id = self._extract_value(
             body,
@@ -925,32 +1053,37 @@ class Sub2APIClient:
             upstream_state = self._extract_state_from_url(str(auth_url))
         return {"url": auth_url, "session_id": session_id, "state": upstream_state, "raw": data}
 
-    def exchange_openai_code(
+    def exchange_oauth_code(
         self,
         code: str,
         state: str,
         session_id: str | None = None,
+        platform: str | None = None,
     ) -> dict[str, Any]:
-        payload = {
-            "code": code,
-            "state": state,
-        }
-        if session_id:
-            payload["session_id"] = session_id
-        data = self._request("POST", self.EXCHANGE_OPENAI_CODE_PATH, json=payload)
+        effective_platform = self._effective_account_platform(platform)
+        _, exchange_path = self._oauth_endpoints(effective_platform)
+        payload = self._build_exchange_request(
+            effective_platform,
+            code=code,
+            state=state,
+            session_id=session_id,
+        )
+        data = self._request("POST", exchange_path, json=payload)
         body = self._unwrap_data(data)
         return {"exchange": body if isinstance(body, dict) else data, "raw": data}
 
-    def create_openai_account_from_oauth(
+    def create_account_from_oauth(
         self,
         name: str,
         oauth_payload: dict[str, Any],
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
-        payload = self._build_openai_oauth_account_payload(
+        payload = self._build_oauth_account_payload(
             name=name,
             oauth_payload=oauth_payload,
             group_id=group_id,
+            platform=platform,
         )
         data = self._request("POST", self.CREATE_OPENAI_ACCOUNT_PATH, json=payload)
         body = self._unwrap_data(data)
@@ -965,36 +1098,40 @@ class Sub2APIClient:
         )
         return {"id": account_id, "name": name, "raw": data}
 
-    def configure_existing_openai_oauth_account(
+    def configure_existing_oauth_account(
         self,
         *,
         account: dict[str, Any],
         name: str,
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
         account_id = account["id"]
-        payload = self._build_existing_openai_oauth_account_payload(
+        payload = self._build_existing_oauth_account_payload(
             account=account,
             name=name,
             group_id=group_id,
+            platform=platform,
         )
         path = self.UPDATE_OPENAI_ACCOUNT_PATH.format(account_id=account_id)
         data = self._request("PUT", path, json=payload)
         return {"id": account_id, "name": name, "raw": data}
 
-    def create_openai_account_from_apikey(
+    def create_account_from_apikey(
         self,
         *,
         name: str,
         base_url: str,
         api_key: str,
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
-        payload = self._build_openai_apikey_account_payload(
+        payload = self._build_apikey_account_payload(
             name=name,
             base_url=base_url,
             api_key=api_key,
             group_id=group_id,
+            platform=platform,
         )
         data = self._request("POST", self.CREATE_OPENAI_ACCOUNT_PATH, json=payload)
         body = self._unwrap_data(data)
@@ -1009,7 +1146,7 @@ class Sub2APIClient:
         )
         return {"id": account_id, "name": name, "raw": data}
 
-    def configure_existing_openai_apikey_account(
+    def configure_existing_apikey_account(
         self,
         *,
         account: dict[str, Any],
@@ -1017,14 +1154,16 @@ class Sub2APIClient:
         base_url: str,
         api_key: str,
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
         account_id = account["id"]
-        payload = self._build_existing_openai_apikey_account_payload(
+        payload = self._build_existing_apikey_account_payload(
             account=account,
             name=name,
             base_url=base_url,
             api_key=api_key,
             group_id=group_id,
+            platform=platform,
         )
         path = self.UPDATE_OPENAI_ACCOUNT_PATH.format(account_id=account_id)
         data = self._request("PUT", path, json=payload)
@@ -1211,11 +1350,14 @@ class Sub2APIClient:
             "require_privacy_set": False,
             "model_routing": None,
             "model_routing_enabled": False,
-            "supported_model_scopes": ["claude", "gemini_text", "gemini_image"],
             "mcp_xml_inject": True,
             "copy_accounts_from_group_ids": [],
         }
         if effective_platform == "openai":
+            # Both of these are openai-only: a live grok group reads back
+            # `supported_model_scopes: []`, and the dispatch mapping names openai
+            # models, so sending either on another platform writes nonsense.
+            payload["supported_model_scopes"] = ["claude", "gemini_text", "gemini_image"]
             payload["messages_dispatch_model_config"] = {
                 "opus_mapped_model": "gpt-5.4",
                 "sonnet_mapped_model": "gpt-5.3-codex",
@@ -1255,32 +1397,22 @@ class Sub2APIClient:
         payload["group_id"] = group_id
         return payload
 
-    def _build_openai_oauth_account_payload(
+    def _build_oauth_account_payload(
         self,
         *,
         name: str,
         oauth_payload: dict[str, Any],
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
-        credentials = self._build_openai_oauth_credentials(oauth_payload)
-        temporary_unschedulable_rules = [
-            self._serialize_rule(rule)
-            for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
-        ]
-        credentials["temp_unschedulable_enabled"] = (
-            self.provisioning_defaults.account_temporary_unschedulable
-        )
-        credentials["temp_unschedulable_rules"] = temporary_unschedulable_rules
-        credentials["model_mapping"] = {
-            model_name: model_name
-            for model_name in self.provisioning_defaults.account_model_whitelist
-        }
-        extra = self._build_openai_oauth_extra(oauth_payload)
+        effective_platform = self._effective_account_platform(platform)
+        credentials = self._build_oauth_credentials(oauth_payload, effective_platform)
+        self._apply_openai_only_credentials(credentials, effective_platform)
+        extra = self._build_oauth_extra(oauth_payload, effective_platform)
         payload: dict[str, Any] = {
             "name": name,
             "notes": "",
-            "provider": self.provisioning_defaults.account_provider,
-            "platform": self.provisioning_defaults.account_platform,
+            "platform": effective_platform,
             "type": self.provisioning_defaults.account_type,
             "credentials": credentials,
             "extra": extra,
@@ -1293,52 +1425,27 @@ class Sub2APIClient:
             "expires_at": None,
             "auto_pause_on_expired": True,
         }
-        if self.provisioning_defaults.account_ws_mode:
-            payload["extra"]["openai_oauth_responses_websockets_v2_mode"] = (
-                self.provisioning_defaults.account_ws_mode
-            )
-            payload["extra"]["openai_oauth_responses_websockets_v2_enabled"] = (
-                self.provisioning_defaults.account_ws_mode != "off"
-            )
+        self._apply_openai_only_extra(payload["extra"], effective_platform)
         return payload
 
-    def _build_existing_openai_oauth_account_payload(
+    def _build_existing_oauth_account_payload(
         self,
         *,
         account: dict[str, Any],
         name: str,
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
+        effective_platform = self._effective_account_platform(platform)
         raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
         credentials = self._merged_dict_from_account(account, raw, "credentials")
         extra = self._merged_dict_from_account(account, raw, "extra")
-        credentials.update(
-            {
-                "temp_unschedulable_enabled": (
-                    self.provisioning_defaults.account_temporary_unschedulable
-                ),
-                "temp_unschedulable_rules": [
-                    self._serialize_rule(rule)
-                    for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
-                ],
-                "model_mapping": {
-                    model_name: model_name
-                    for model_name in self.provisioning_defaults.account_model_whitelist
-                },
-            }
-        )
-        if self.provisioning_defaults.account_ws_mode:
-            extra["openai_oauth_responses_websockets_v2_mode"] = (
-                self.provisioning_defaults.account_ws_mode
-            )
-            extra["openai_oauth_responses_websockets_v2_enabled"] = (
-                self.provisioning_defaults.account_ws_mode != "off"
-            )
+        self._apply_openai_only_credentials(credentials, effective_platform)
+        self._apply_openai_only_extra(extra, effective_platform)
 
         payload: dict[str, Any] = {
             "name": name,
-            "provider": self.provisioning_defaults.account_provider,
-            "platform": self.provisioning_defaults.account_platform,
+            "platform": effective_platform,
             "type": self.provisioning_defaults.account_type,
             "credentials": credentials,
             "extra": extra,
@@ -1359,33 +1466,24 @@ class Sub2APIClient:
                 payload[field_name] = raw[field_name]
         return payload
 
-    def _build_openai_apikey_account_payload(
+    def _build_apikey_account_payload(
         self,
         *,
         name: str,
         base_url: str,
         api_key: str,
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
-        credentials = self._build_openai_apikey_credentials(
-            api_key=api_key, base_url=base_url
+        effective_platform = self._effective_account_platform(platform)
+        credentials = self._build_apikey_credentials(
+            api_key=api_key, base_url=base_url, platform=effective_platform
         )
-        credentials["temp_unschedulable_enabled"] = (
-            self.provisioning_defaults.account_temporary_unschedulable
-        )
-        credentials["temp_unschedulable_rules"] = [
-            self._serialize_rule(rule)
-            for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
-        ]
-        credentials["model_mapping"] = {
-            model_name: model_name
-            for model_name in self.provisioning_defaults.account_model_whitelist
-        }
+        self._apply_openai_only_credentials(credentials, effective_platform)
         return {
             "name": name,
             "notes": "",
-            "provider": self.provisioning_defaults.account_provider,
-            "platform": self.provisioning_defaults.account_platform,
+            "platform": effective_platform,
             "type": self.provisioning_defaults.account_apikey_type,
             "credentials": credentials,
             "extra": {},
@@ -1399,7 +1497,7 @@ class Sub2APIClient:
             "auto_pause_on_expired": True,
         }
 
-    def _build_existing_openai_apikey_account_payload(
+    def _build_existing_apikey_account_payload(
         self,
         *,
         account: dict[str, Any],
@@ -1407,30 +1505,21 @@ class Sub2APIClient:
         base_url: str,
         api_key: str,
         group_id: Any,
+        platform: str | None = None,
     ) -> dict[str, Any]:
+        effective_platform = self._effective_account_platform(platform)
         raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
         credentials = self._merged_dict_from_account(account, raw, "credentials")
         extra = self._merged_dict_from_account(account, raw, "extra")
-        credentials.update(self._build_openai_apikey_credentials(api_key=api_key, base_url=base_url))
         credentials.update(
-            {
-                "temp_unschedulable_enabled": (
-                    self.provisioning_defaults.account_temporary_unschedulable
-                ),
-                "temp_unschedulable_rules": [
-                    self._serialize_rule(rule)
-                    for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
-                ],
-                "model_mapping": {
-                    model_name: model_name
-                    for model_name in self.provisioning_defaults.account_model_whitelist
-                },
-            }
+            self._build_apikey_credentials(
+                api_key=api_key, base_url=base_url, platform=effective_platform
+            )
         )
+        self._apply_openai_only_credentials(credentials, effective_platform)
         payload: dict[str, Any] = {
             "name": name,
-            "provider": self.provisioning_defaults.account_provider,
-            "platform": self.provisioning_defaults.account_platform,
+            "platform": effective_platform,
             "type": self.provisioning_defaults.account_apikey_type,
             "credentials": credentials,
             "extra": extra,
@@ -1468,13 +1557,63 @@ class Sub2APIClient:
             current, _ = self._extract_account_groups(source)
         return self._merge_group_ids(current, group_id)
 
-    def _build_openai_apikey_credentials(
-        self, *, api_key: str, base_url: str
+    def _effective_account_platform(self, platform: str | None) -> str:
+        """Explicit platform wins; the configured default is only the fallback.
+
+        Mirrors _build_group_payload: a caller that already resolved a platform is
+        never silently overridden by config, and a caller that resolved none keeps
+        the pre-multi-platform behavior.
+        """
+        explicit = str(platform).strip() if platform is not None else ""
+        return explicit or self.provisioning_defaults.account_platform
+
+    def _build_apikey_credentials(
+        self, *, api_key: str, base_url: str, platform: str | None = None
     ) -> dict[str, Any]:
         credentials: dict[str, Any] = {"api_key": api_key}
-        if base_url not in (None, ""):
-            credentials["base_url"] = base_url
+        effective_base_url = str(base_url).strip() if base_url not in (None, "") else ""
+        if not effective_base_url:
+            effective_base_url = APIKEY_DEFAULT_BASE_URLS.get(
+                self._effective_account_platform(platform), ""
+            )
+        if effective_base_url:
+            credentials["base_url"] = effective_base_url
         return credentials
+
+    def _apply_openai_only_credentials(
+        self, credentials: dict[str, Any], platform: str
+    ) -> None:
+        """Stamp the openai-only credential knobs, and only for openai accounts.
+
+        ``model_mapping`` and the ``temp_unschedulable_*`` pair are openai account
+        fields: grok's upstream flow supplies its own model mapping, and writing
+        these onto a non-openai account only leaves dead keys on the record.
+        """
+        if platform != "openai":
+            return
+        credentials["temp_unschedulable_enabled"] = (
+            self.provisioning_defaults.account_temporary_unschedulable
+        )
+        credentials["temp_unschedulable_rules"] = [
+            self._serialize_rule(rule)
+            for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
+        ]
+        credentials["model_mapping"] = {
+            model_name: model_name
+            for model_name in self.provisioning_defaults.account_model_whitelist
+        }
+
+    def _apply_openai_only_extra(self, extra: dict[str, Any], platform: str) -> None:
+        # The key names say it: `openai_oauth_responses_websockets_v2_*` describes the
+        # openai responses transport and means nothing on another platform's account.
+        if platform != "openai" or not self.provisioning_defaults.account_ws_mode:
+            return
+        extra["openai_oauth_responses_websockets_v2_mode"] = (
+            self.provisioning_defaults.account_ws_mode
+        )
+        extra["openai_oauth_responses_websockets_v2_enabled"] = (
+            self.provisioning_defaults.account_ws_mode != "off"
+        )
 
     def _merged_dict_from_account(
         self,
@@ -1491,31 +1630,32 @@ class Sub2APIClient:
             values.update(account_value)
         return values
 
-    def _build_openai_oauth_credentials(self, oauth_payload: dict[str, Any]) -> dict[str, Any]:
-        credentials: dict[str, Any] = {}
-        for field_name in (
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "expires_at",
-            "chatgpt_account_id",
-            "chatgpt_user_id",
-            "organization_id",
-            "plan_type",
-            "client_id",
-        ):
-            value = oauth_payload.get(field_name)
-            if value not in (None, ""):
-                credentials[field_name] = value
-        return credentials
+    def _build_oauth_credentials(
+        self, oauth_payload: dict[str, Any], platform: str
+    ) -> dict[str, Any]:
+        field_names = OAUTH_CREDENTIAL_FIELDS.get(platform)
+        if field_names is None:
+            raise Sub2APIError(
+                f"Sub2API OAuth credential assembly is not implemented for platform "
+                f"'{platform}'. Supported platforms: "
+                f"{', '.join(self.supported_oauth_platforms())}"
+            )
+        return self._pick_present(oauth_payload, field_names)
 
-    def _build_openai_oauth_extra(self, oauth_payload: dict[str, Any]) -> dict[str, Any]:
-        extra: dict[str, Any] = {}
-        for field_name in ("email", "name", "privacy_mode"):
-            value = oauth_payload.get(field_name)
+    def _build_oauth_extra(
+        self, oauth_payload: dict[str, Any], platform: str
+    ) -> dict[str, Any]:
+        return self._pick_present(oauth_payload, OAUTH_EXTRA_FIELDS.get(platform, ()))
+
+    def _pick_present(
+        self, payload: dict[str, Any], field_names: tuple[str, ...]
+    ) -> dict[str, Any]:
+        picked: dict[str, Any] = {}
+        for field_name in field_names:
+            value = payload.get(field_name)
             if value not in (None, ""):
-                extra[field_name] = value
-        return extra
+                picked[field_name] = value
+        return picked
 
     def _extract_state_from_url(self, auth_url: str) -> str | None:
         parsed = urlparse(auth_url)
@@ -1747,7 +1887,13 @@ class Sub2APIClient:
 
     def _parse_scheduled_test_plan_list(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         body = self._unwrap_data(payload)
-        if isinstance(body, list):
+        if body is None:
+            # Upstream answers an account with no plans as `{"data": null}` rather than
+            # an empty list. That is "no plans", not a parse failure — treating it as
+            # an error made every freshly provisioned account log a warning and record
+            # a failed provisioning event.
+            raw_plans: list[Any] = []
+        elif isinstance(body, list):
             raw_plans = body
         elif isinstance(body, dict) and isinstance(body.get("items"), list):
             raw_plans = body["items"]

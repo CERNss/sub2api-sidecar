@@ -102,6 +102,13 @@ type ProvisionStartPayload = ApiPayload & {
   oauth_redirect_uri?: string;
 };
 
+type ProvisioningSettingsPayload = ApiPayload & {
+  settings?: { assignment_mode?: string };
+  // The platforms the backend can actually run an OAuth handoff for. The picker is
+  // built from this list — the frontend never carries a platform enum of its own.
+  supported_oauth_platforms?: string[];
+};
+
 type UpstreamInfo = {
   upstream_id: string;
   name: string;
@@ -748,6 +755,15 @@ const DEFAULT_AUTH_USERNAME = "admin";
 const DEFAULT_KEY_TRANSFER_SOURCE_SEARCH = "admin";
 const KEY_TRANSFER_NAME_PATTERN = "服务:环境:对象:版本号:邮箱";
 const FIXED_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback";
+// Only the pre-selection, and only until GET /api/provisioning/settings answers with
+// the real list — the picker's contents always come from the backend.
+const DEFAULT_PROVISION_PLATFORM = "openai";
+// Placeholders only: leaving the field empty lets the backend apply the platform's
+// own default API host.
+const API_BASE_URL_PLACEHOLDERS: Record<string, string> = {
+  openai: "https://api.openai.com/v1",
+  grok: "https://api.x.ai/v1"
+};
 const graphCompactNodeSize = { width: 272, height: 82 };
 const graphTallNodeSize = { width: 272, height: 184 };
 const graphLayerOrder: Record<GraphNodeKind, number> = { key: 0, user: 1, group: 2, account: 3 };
@@ -8910,11 +8926,61 @@ function ProvisionForm({
   const [startPayload, setStartPayload] = useState<ProvisionStartPayload | null>(null);
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [busyAction, setBusyAction] = useState<"start" | "complete" | "apikey" | null>(null);
+  const [platform, setPlatform] = useState(DEFAULT_PROVISION_PLATFORM);
+  const [supportedPlatforms, setSupportedPlatforms] = useState<string[]>([DEFAULT_PROVISION_PLATFORM]);
+
+  // The platform list is a backend capability, never a hardcoded enum here: a
+  // platform gains a picker entry the moment the backend can provision it. Fetched
+  // once on mount — the capability does not change while the page is open.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const payload = await requestJson<ProvisioningSettingsPayload>(
+          "/api/provisioning/settings",
+          { method: "GET" },
+          "加载预配平台列表失败"
+        );
+        const platforms = (payload.supported_oauth_platforms ?? []).filter(Boolean);
+        if (cancelled || platforms.length === 0) {
+          return;
+        }
+        setSupportedPlatforms(platforms);
+        setPlatform((current) => (platforms.includes(current) ? current : platforms[0]));
+      } catch {
+        // Swallowed on purpose: the form stays usable on the default platform, and a
+        // real problem (expired session included) surfaces on submit.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const platformOptions = useMemo(
+    () => supportedPlatforms.map((value) => ({ value, label: value })),
+    [supportedPlatforms]
+  );
+  const apiBaseUrlPlaceholder = API_BASE_URL_PLACEHOLDERS[platform] ?? "https://api.example.com/v1";
 
   function switchMode(next: "oauth" | "apikey") {
     setMode(next);
     setStatus(emptyStatus);
   }
+
+  const platformField = (
+    <label className="field provision-platform-field">
+      <span>平台</span>
+      <Select
+        className="provision-platform-select"
+        value={platform}
+        options={platformOptions}
+        onChange={(value) => setPlatform(value)}
+        optionRender={(option) => <PlatformTag platform={String(option.value)} />}
+        labelRender={(item) => <PlatformTag platform={String(item.value)} />}
+      />
+    </label>
+  );
 
   const oauthUrl = typeof startPayload?.oauth_url === "string" ? startPayload.oauth_url : "";
   const oauthRequired = startPayload
@@ -8947,7 +9013,11 @@ function ProvisionForm({
     try {
       const payload = await requestJson<ProvisionStartPayload>("/provision/start", {
         method: "POST",
-        body: JSON.stringify({ email: email.trim(), upstream_id: selectedUpstreamId })
+        body: JSON.stringify({
+          email: email.trim(),
+          upstream_id: selectedUpstreamId,
+          platform
+        })
       }, "请求失败");
       setStartPayload(payload);
       if (payload.oauth_required === false || payload.status === "completed") {
@@ -8974,10 +9044,6 @@ function ProvisionForm({
       setStatus({ message: "请先输入名称。", tone: "error" });
       return;
     }
-    if (!apiBaseUrl.trim()) {
-      setStatus({ message: "请先输入 API 地址。", tone: "error" });
-      return;
-    }
     if (!apiKey.trim()) {
       setStatus({ message: "请先输入 API Key。", tone: "error" });
       return;
@@ -8997,9 +9063,11 @@ function ProvisionForm({
           method: "POST",
           body: JSON.stringify({
             name: apikeyName.trim(),
-            api_base_url: apiBaseUrl.trim(),
+            // Left blank on purpose when the operator wants the platform default.
+            api_base_url: apiBaseUrl.trim() || null,
             api_key: apiKey.trim(),
-            upstream_id: selectedUpstreamId
+            upstream_id: selectedUpstreamId,
+            platform
           })
         },
         "创建失败"
@@ -9068,6 +9136,7 @@ function ProvisionForm({
         {mode === "oauth" ? (
         <>
         <form className="form-stack" onSubmit={startProvision}>
+          {platformField}
           <label className="field">
             <span>Email</span>
             <input
@@ -9129,6 +9198,7 @@ function ProvisionForm({
         </>
         ) : (
         <form className="form-stack" onSubmit={startApikeyProvision}>
+          {platformField}
           <label className="field">
             <span>名称</span>
             <input
@@ -9141,7 +9211,7 @@ function ProvisionForm({
             <span>API 地址</span>
             <input
               value={apiBaseUrl}
-              placeholder="https://api.openai.com/v1"
+              placeholder={`${apiBaseUrlPlaceholder}（留空用平台默认）`}
               onChange={(event) => setApiBaseUrl(event.target.value)}
             />
           </label>

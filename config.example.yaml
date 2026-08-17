@@ -53,10 +53,16 @@ sub2api:
 
   provisioning_defaults:
     account_concurrency: 6
-    # Default platform for provisioning and for key creation when the request
-    # names none. Any platform the upstream groups declare is valid.
+    # Fallback platform, used only when a provisioning request (or key creation)
+    # names no platform itself — /provision/start and /provision/apikey/start both
+    # take an optional `platform` that wins over this. Any platform the upstream
+    # groups declare is valid; OAuth provisioning currently implements openai and
+    # grok (GET /api/provisioning/settings reports the live list).
     group_platform: openai
+    # Ignored: upstream's account API has no `provider` field. Kept accepted so
+    # existing configs keep loading; safe to delete.
     account_provider: openai
+    # Fallback platform stamped on the account itself, same explicit-wins rule.
     account_platform: openai
     account_type: oauth
     account_apikey_type: api_key

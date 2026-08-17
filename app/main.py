@@ -389,6 +389,17 @@ def get_sub2api_client(upstream_id: str | None = None) -> Sub2APIClient:
     )
 
 
+def normalize_optional_platform(platform: str | None) -> str | None:
+    """Trim a request-supplied platform down to "named" or "not named".
+
+    Never validated against a list here: upstream has no platform whitelist, and the
+    one place that does need a narrower set (the OAuth flow) raises its own error
+    naming the platform and the supported ones.
+    """
+    value = (platform or "").strip()
+    return value or None
+
+
 def normalize_upstream_id(upstream_id: str | None = None) -> str:
     try:
         return get_settings().get_sub2api_upstream(upstream_id).upstream_id
@@ -674,7 +685,8 @@ def provisioning_runtime_settings_response(
         settings=ProvisioningRuntimeSettingsResponse(
             assignment_mode=settings.assignment_mode.value,
             updated_at=settings.updated_at,
-        )
+        ),
+        supported_oauth_platforms=Sub2APIClient.supported_oauth_platforms(),
     )
 
 
@@ -2905,6 +2917,7 @@ def provision_start(
     result = service.start_flow_for_upstream(
         email=str(payload.email),
         upstream_id=selected_upstream_id,
+        platform=normalize_optional_platform(payload.platform),
         sub2api_client=get_sub2api_client(selected_upstream_id),
     )
     return JSONResponse(status_code=200, content=result.model_dump())
@@ -2919,9 +2932,10 @@ def provision_apikey_start(
     selected_upstream_id = normalize_upstream_id(payload.upstream_id)
     result = service.start_apikey_flow_for_upstream(
         name=payload.name.strip(),
-        api_base_url=payload.api_base_url.strip(),
+        api_base_url=(payload.api_base_url or "").strip(),
         api_key=payload.api_key,
         upstream_id=selected_upstream_id,
+        platform=normalize_optional_platform(payload.platform),
         sub2api_client=get_sub2api_client(selected_upstream_id),
     )
     return JSONResponse(status_code=200, content=result.model_dump())

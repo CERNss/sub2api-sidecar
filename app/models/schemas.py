@@ -51,6 +51,10 @@ class Sub2APIUpstreamsEnvelope(BaseModel):
 class ProvisionStartRequest(BaseModel):
     email: EmailStr
     upstream_id: str | None = Field(default=None, min_length=1)
+    # Which upstream platform to provision on. Opaque string, not an enum: upstream
+    # applies no platform whitelist. Omitted falls back to the configured default
+    # platform, so callers written before multi-platform provisioning keep working.
+    platform: str | None = Field(default=None, min_length=1)
 
 
 class ProvisioningRuntimeSettingsResponse(BaseModel):
@@ -65,6 +69,10 @@ class ProvisioningRuntimeSettingsRequest(BaseModel):
 class ProvisioningRuntimeSettingsEnvelope(BaseModel):
     success: bool = True
     settings: ProvisioningRuntimeSettingsResponse
+    # Capability, not a setting: the platforms an OAuth provisioning flow can be
+    # started for right now. Lets the UI build its platform picker without ever
+    # hardcoding a platform list of its own.
+    supported_oauth_platforms: list[str] = Field(default_factory=list)
 
 
 class ProvisionStartResponse(BaseModel):
@@ -86,9 +94,14 @@ class ProvisionStartResponse(BaseModel):
 
 class ProvisionApiKeyStartRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
-    api_base_url: str = Field(..., min_length=1)
+    # Optional: left blank, the platform's default API host is used (grok ->
+    # https://api.x.ai/v1); openai keeps sending no base_url at all so upstream
+    # applies its own default.
+    api_base_url: str | None = Field(default=None)
     api_key: str = Field(..., min_length=1)
     upstream_id: str | None = Field(default=None, min_length=1)
+    # Same contract as ProvisionStartRequest.platform.
+    platform: str | None = Field(default=None, min_length=1)
 
 
 class ProvisionApiKeyStartResponse(BaseModel):

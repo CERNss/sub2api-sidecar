@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import app.main as main
 from conftest import started_test_client
 from app.auth import ACCESS_KEY_COOKIE_NAME
-from app.clients.sub2api import Sub2APIClient
+from app.clients.sub2api import Sub2APIClient, Sub2APIError
 from app.config import Sub2APIProvisioningDefaults, get_settings
 from app.models.flow import AssignmentMode
 from app.models.operational_data import (
@@ -76,6 +76,41 @@ EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN = {
     "enabled": True,
     "max_results": 100,
     "auto_recover": True,
+}
+# A grok exchange-code response, with two fields upstream does not put on a grok
+# account (`plan_type` is openai's, `raw_response` is debug noise) so the tests can
+# show the credential white-list dropping them instead of persisting them.
+GROK_EXCHANGE_PAYLOAD = {
+    "access_token": "grok-access-1",
+    "refresh_token": "grok-refresh-1",
+    "id_token": "grok-id-1",
+    "token_type": "Bearer",
+    "expires_at": "2026-09-01T00:00:00Z",
+    "client_id": "grok-client",
+    "scope": "openid profile email offline_access",
+    "email": "user@example.com",
+    "sub": "grok-sub-1",
+    "team_id": "grok-team-1",
+    "subscription_tier": "SuperGrok",
+    "entitlement_status": "active",
+    "base_url": "https://api.x.ai/v1",
+    "plan_type": "should-be-dropped",
+    "raw_response": {"should": "be dropped"},
+}
+EXPECTED_GROK_CREDENTIALS = {
+    "access_token": "grok-access-1",
+    "refresh_token": "grok-refresh-1",
+    "id_token": "grok-id-1",
+    "token_type": "Bearer",
+    "expires_at": "2026-09-01T00:00:00Z",
+    "client_id": "grok-client",
+    "scope": "openid profile email offline_access",
+    "email": "user@example.com",
+    "sub": "grok-sub-1",
+    "team_id": "grok-team-1",
+    "subscription_tier": "SuperGrok",
+    "entitlement_status": "active",
+    "base_url": "https://api.x.ai/v1",
 }
 
 
@@ -514,7 +549,7 @@ class FakeRotationSub2API:
         if method == "POST" and path == "/api/v1/admin/accounts":
             self.create_account_calls += 1
             self.create_account_payloads.append(dict(json or {}))
-            assert json["provider"] == "openai"
+            assert "provider" not in json
             assert json["platform"] == "openai"
             assert json["type"] == "oauth"
             assert json["credentials"]["access_token"] == "token-123"
@@ -1300,7 +1335,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
             },
         )
     if method == "POST" and path == "/api/v1/admin/accounts":
-        assert json["provider"] == "openai"
+        assert "provider" not in json
         assert json["platform"] == "openai"
         assert json["type"] == "oauth"
         assert "email" not in json
@@ -2199,6 +2234,249 @@ def test_sub2api_client_create_group_falls_back_to_configured_platform() -> None
     assert "messages_dispatch_model_config" not in payload
 
 
+def test_sub2api_client_create_group_scopes_supported_model_scopes_to_openai() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": 324}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_group("user@example.com_openai", platform="openai")
+        client.create_group("user@example.com_grok", platform="grok")
+
+    # Live grok groups read back `supported_model_scopes: []`, so the openai scope
+    # list must not travel with a grok group creation.
+    assert calls[0]["json"]["supported_model_scopes"] == ["claude", "gemini_text", "gemini_image"]
+    assert "supported_model_scopes" not in calls[1]["json"]
+
+
+def test_sub2api_client_supported_oauth_platforms_is_endpoints_and_credentials() -> None:
+    # The public capability list: a platform needs both an endpoint pair and a
+    # credential white-list before it can be offered.
+    assert Sub2APIClient.supported_oauth_platforms() == ["grok", "openai"]
+
+
+def test_sub2api_grok_oauth_requests_use_upstream_grok_paths() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        calls.append({"method": method, "path": path, "json": json})
+        if path == "/api/v1/admin/grok/oauth/auth-url":
+            return FakeResponse(
+                200,
+                {
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "auth_url": "https://accounts.x.ai/authorize?state=grok-state",
+                        "session_id": "grok-session-1",
+                        "state": "grok-state",
+                    },
+                },
+            )
+        if path == "/api/v1/admin/grok/oauth/exchange-code":
+            return FakeResponse(
+                200,
+                {"code": 0, "message": "success", "data": {"access_token": "grok-token"}},
+            )
+        return FakeResponse(404, {"detail": "not found"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        oauth = client.generate_oauth_auth_url(
+            email="user@example.com", state="sidecar-state", platform="grok"
+        )
+        client.exchange_oauth_code(
+            code="grok-code",
+            state=oauth["state"],
+            session_id=oauth["session_id"],
+            platform="grok",
+        )
+
+    assert oauth["state"] == "grok-state"
+    assert calls == [
+        {
+            "method": "POST",
+            "path": "/api/v1/admin/grok/oauth/auth-url",
+            # grok mints its own state and session; a sidecar-supplied state would be
+            # an unknown field on this endpoint.
+            "json": {},
+        },
+        {
+            "method": "POST",
+            "path": "/api/v1/admin/grok/oauth/exchange-code",
+            "json": {
+                "session_id": "grok-session-1",
+                "code": "grok-code",
+                "state": "grok-state",
+            },
+        },
+    ]
+
+
+def test_sub2api_oauth_requests_reject_platform_without_endpoints() -> None:
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with pytest.raises(Sub2APIError) as excinfo:
+        client.generate_oauth_auth_url(
+            email="user@example.com", state="state-1", platform="anthropic"
+        )
+
+    message = str(excinfo.value)
+    assert "anthropic" in message
+    assert "grok" in message and "openai" in message
+
+
+def test_sub2api_client_builds_grok_oauth_account_payload() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"method": method, "path": urlparse(url).path, "json": json})
+        return FakeResponse(200, {"account_id": "grok-acct-1", "name": json["name"]})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_account_from_oauth(
+            "user@example.com",
+            GROK_EXCHANGE_PAYLOAD,
+            "g-9",
+            platform="grok",
+        )
+
+    payload = calls[0]["json"]
+    assert calls[0]["path"] == "/api/v1/admin/accounts"
+    # Upstream has no `provider` field on the account API at all.
+    assert "provider" not in payload
+    assert payload["platform"] == "grok"
+    assert payload["type"] == "oauth"
+    assert payload["credentials"] == EXPECTED_GROK_CREDENTIALS
+    assert payload["extra"] == {
+        "email": "user@example.com",
+        "subscription_tier": "SuperGrok",
+        "entitlement_status": "active",
+    }
+    # openai-only account knobs must not ride along.
+    assert "temp_unschedulable_enabled" not in payload["credentials"]
+    assert "temp_unschedulable_rules" not in payload["credentials"]
+    assert "model_mapping" not in payload["credentials"]
+    assert "openai_oauth_responses_websockets_v2_mode" not in payload["extra"]
+
+
+def test_sub2api_client_grok_oauth_credentials_skip_unknown_exchange_fields() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"json": json})
+        return FakeResponse(200, {"account_id": "grok-acct-2", "name": json["name"]})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_account_from_oauth(
+            "sparse@example.com",
+            {
+                "access_token": "grok-access",
+                "refresh_token": "",
+                "chatgpt_account_id": "not-a-grok-field",
+                "surprise_field": {"nested": True},
+            },
+            "g-9",
+            platform="grok",
+        )
+
+    # Credentials are stored verbatim upstream, so only white-listed keys with an
+    # actual value are forwarded; everything else is dropped rather than persisted.
+    assert calls[0]["json"]["credentials"] == {"access_token": "grok-access"}
+
+
+def test_sub2api_client_apikey_credentials_default_base_url_per_platform() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"json": json})
+        return FakeResponse(200, {"account_id": "acct-1", "name": json["name"]})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_account_from_apikey(
+            name="grok-key", base_url="", api_key="xai-1", group_id="g-1", platform="grok"
+        )
+        client.create_account_from_apikey(
+            name="grok-key-explicit",
+            base_url="https://grok-proxy.internal/v1",
+            api_key="xai-2",
+            group_id="g-1",
+            platform="grok",
+        )
+        client.create_account_from_apikey(
+            name="openai-key", base_url="", api_key="sk-1", group_id="g-1", platform="openai"
+        )
+
+    assert calls[0]["json"]["credentials"]["base_url"] == "https://api.x.ai/v1"
+    # An explicit base URL still wins over the platform default.
+    assert calls[1]["json"]["credentials"]["base_url"] == "https://grok-proxy.internal/v1"
+    # openai keeps its historical behavior: no base_url key, upstream defaults it.
+    assert "base_url" not in calls[2]["json"]["credentials"]
+
+
+def test_sub2api_client_reads_null_scheduled_test_plan_list_as_empty() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        calls.append({"method": method, "path": path, "json": json})
+        if method == "GET":
+            # This is what upstream really answers for an account with no plans.
+            return FakeResponse(200, {"code": 0, "message": "success", "data": None})
+        return FakeResponse(200, {"code": 0, "message": "success", "data": {"id": 601}})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        assert client.list_scheduled_test_plans("77") == []
+        result = client.ensure_default_scheduled_test_plan(account_id="77")
+
+    # "no plans" must read as an empty list, not as a parse failure — the latter made
+    # every freshly provisioned account log a warning and record a failed event.
+    assert result["created"] is True
+    assert calls[-1]["path"] == "/api/v1/admin/scheduled-test-plans"
+
+
 def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:
     calls: list[dict[str, object]] = []
 
@@ -2236,8 +2514,8 @@ def test_sub2api_openai_oauth_requests_use_upstream_openai_paths() -> None:
     )
 
     with patch.object(requests.Session, "request", new=fake_request):
-        oauth = client.generate_openai_auth_url(email="user@example.com", state="state-1")
-        client.exchange_openai_code(
+        oauth = client.generate_oauth_auth_url(email="user@example.com", state="state-1")
+        client.exchange_oauth_code(
             code="code-1",
             state=oauth["state"],
             session_id=oauth["session_id"],
@@ -2369,7 +2647,7 @@ def test_sub2api_client_configures_existing_oauth_account_preserving_credentials
     }
 
     with patch.object(requests.Session, "request", new=fake_request):
-        result = client.configure_existing_openai_oauth_account(
+        result = client.configure_existing_oauth_account(
             account=account,
             name="existing@example.com",
             group_id=77,
@@ -2380,7 +2658,7 @@ def test_sub2api_client_configures_existing_oauth_account_preserving_credentials
     assert calls[0]["method"] == "PUT"
     assert calls[0]["path"] == "/api/v1/admin/accounts/acct-existing"
     assert payload["name"] == "existing@example.com"
-    assert payload["provider"] == "openai"
+    assert "provider" not in payload
     assert payload["platform"] == "openai"
     assert payload["type"] == "oauth"
     # group_ids replaces the whole binding list upstream, so re-configuring an
@@ -3095,6 +3373,241 @@ def test_provision_start_group_name_truncation_keeps_the_platform_suffix(client)
     assert group_name == f"{email[:121]}_openai"
 
 
+class FakeMultiPlatformUpstream:
+    """Fake upstream that keeps the groups it creates, so a flow can be replayed.
+
+    The completion half of an OAuth flow recovers its platform from the target
+    group, so a fake that forgets what it created would silently answer every
+    callback as the default platform.
+    """
+
+    def __init__(self) -> None:
+        self.groups: list[dict[str, object]] = []
+        self.create_group_payloads: list[dict[str, object]] = []
+        self.auth_url_calls: list[dict[str, object]] = []
+        self.exchange_calls: list[dict[str, object]] = []
+        self.create_account_payloads: list[dict[str, object]] = []
+        self.scheduled_test_plan_payloads: list[dict[str, object]] = []
+
+    def request(self, method: str, url: str, json=None, params=None, timeout=None):
+        path = urlparse(url).path
+        if method == "GET" and path == "/api/v1/admin/groups/all":
+            wanted = (params or {}).get("platform")
+            items = [
+                group
+                for group in self.groups
+                if not wanted or group["platform"] == wanted
+            ]
+            return FakeResponse(200, {"items": items})
+        if method == "POST" and path == "/api/v1/admin/groups":
+            self.create_group_payloads.append(dict(json or {}))
+            group = {
+                "id": f"g-{len(self.groups) + 1}",
+                "name": json["name"],
+                "platform": json["platform"],
+                "is_exclusive": json.get("is_exclusive", True),
+            }
+            self.groups.append(group)
+            return FakeResponse(200, group)
+        if method == "GET" and path == "/api/v1/admin/accounts":
+            return FakeResponse(200, {"items": []})
+        if method == "POST" and path == "/api/v1/admin/grok/oauth/auth-url":
+            self.auth_url_calls.append(dict(json or {}))
+            return FakeResponse(
+                200,
+                {
+                    "auth_url": (
+                        "https://accounts.x.ai/authorize"
+                        "?redirect_uri=http%3A%2F%2F127.0.0.1%3A56121%2Fcallback"
+                        "&state=grok-upstream-state"
+                    ),
+                    "session_id": "grok-session-1",
+                    "state": "grok-upstream-state",
+                },
+            )
+        if method == "POST" and path == "/api/v1/admin/grok/oauth/exchange-code":
+            self.exchange_calls.append(dict(json or {}))
+            return FakeResponse(200, dict(GROK_EXCHANGE_PAYLOAD))
+        if method == "POST" and path == "/api/v1/admin/accounts":
+            self.create_account_payloads.append(dict(json or {}))
+            return FakeResponse(200, {"account_id": "grok-acct-1", "name": json["name"]})
+        if (
+            method == "GET"
+            and path.startswith("/api/v1/admin/accounts/")
+            and path.endswith("/scheduled-test-plans")
+        ):
+            # Upstream's real answer for an account with no plans.
+            return FakeResponse(200, {"data": None})
+        if method == "POST" and path == "/api/v1/admin/scheduled-test-plans":
+            self.scheduled_test_plan_payloads.append(dict(json or {}))
+            return FakeResponse(200, {"id": "stp-1", **dict(json or {})})
+        return FakeResponse(404, {"detail": f"unexpected {method} {path}"})
+
+
+def test_provision_grok_oauth_flow_end_to_end(client, caplog) -> None:
+    backend = FakeMultiPlatformUpstream()
+    login(client)
+
+    with caplog.at_level(logging.WARNING), patch.object(
+        requests.Session, "request", new=backend.request
+    ):
+        start_response = client.post(
+            "/provision/start",
+            json={"email": "user@example.com", "platform": "grok"},
+        )
+        assert start_response.status_code == 200
+        start_payload = start_response.json()
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={
+                "callback_url": (
+                    "http://127.0.0.1:56121/callback"
+                    "?code=grok-code-1&state=grok-upstream-state"
+                )
+            },
+        )
+
+    assert start_payload["oauth_required"] is True
+    assert start_payload["oauth_url"].startswith("https://accounts.x.ai/authorize")
+    # Taken from the auth URL upstream actually minted, not from any local default.
+    assert start_payload["oauth_redirect_uri"] == "http://127.0.0.1:56121/callback"
+    assert complete_response.status_code == 200
+    assert complete_response.json()["oauth_account_id"] == "grok-acct-1"
+
+    group_payload = backend.create_group_payloads[0]
+    assert group_payload["name"] == "user@example.com_grok"
+    assert group_payload["platform"] == "grok"
+    assert "supported_model_scopes" not in group_payload
+    assert "messages_dispatch_model_config" not in group_payload
+
+    # grok mints its own state, so nothing sidecar generated is sent to auth-url.
+    assert backend.auth_url_calls == [{}]
+    assert backend.exchange_calls == [
+        {
+            "session_id": "grok-session-1",
+            "code": "grok-code-1",
+            "state": "grok-upstream-state",
+        }
+    ]
+
+    account_payload = backend.create_account_payloads[0]
+    assert "provider" not in account_payload
+    assert account_payload["platform"] == "grok"
+    assert account_payload["type"] == "oauth"
+    assert account_payload["name"] == "user@example.com"
+    assert account_payload["group_ids"] == ["g-1"]
+    assert account_payload["credentials"] == EXPECTED_GROK_CREDENTIALS
+    assert account_payload["extra"] == {
+        "email": "user@example.com",
+        "subscription_tier": "SuperGrok",
+        "entitlement_status": "active",
+    }
+    assert "temp_unschedulable_enabled" not in account_payload["credentials"]
+    assert "temp_unschedulable_rules" not in account_payload["credentials"]
+    assert "model_mapping" not in account_payload["credentials"]
+    assert "openai_oauth_responses_websockets_v2_mode" not in account_payload["extra"]
+
+    # The `{"data": null}` plan list is "no plans", so the default plan is created
+    # and nothing warns about it.
+    assert backend.scheduled_test_plan_payloads == [
+        {"account_id": "grok-acct-1", **EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN}
+    ]
+    assert "scheduled test plan setup failed" not in caplog.text.lower()
+
+    detail = client.get(f"/provision/flows/{start_payload['flow_id']}")
+    assert detail.status_code == 200
+    events = detail.json()["events"]
+    # The platform travels with the flow across the OAuth handoff, so the timeline
+    # says which platform every step ran on.
+    platform_events = {
+        event["event_type"]: (event["details"] or {}).get("platform") for event in events
+    }
+    for event_type in (
+        "start_requested",
+        "group_resolved",
+        "oauth_url_generated",
+        "pending_oauth",
+        "oauth_exchanged",
+        "account_created",
+        "account_bound",
+        "completed",
+    ):
+        assert platform_events[event_type] == "grok", event_type
+    assert not any(event["status"] == "failed" for event in events)
+
+
+def test_provision_start_rejects_oauth_platform_without_support(client) -> None:
+    backend = FakeMultiPlatformUpstream()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/provision/start",
+            json={"email": "user@example.com", "platform": "anthropic"},
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "anthropic" in detail
+    assert "openai" in detail and "grok" in detail
+    # The refusal lands before anything is written upstream.
+    assert backend.create_group_payloads == []
+    assert backend.create_account_payloads == []
+
+
+def test_provision_start_without_platform_uses_configured_default(client) -> None:
+    login(client)
+
+    with patch.object(requests.Session, "request", new=fake_sub2api_request):
+        response = client.post("/provision/start", json={"email": "user@example.com"})
+
+    assert response.status_code == 200
+    # SUB2API_GROUP_PLATFORM is openai in the test config; omitting `platform` must
+    # keep the pre-multi-platform behavior.
+    assert response.json()["group_id"] == "g-1"
+
+
+def test_provision_apikey_start_for_grok_defaults_the_base_url(client) -> None:
+    backend = FakeMultiPlatformUpstream()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        response = client.post(
+            "/provision/apikey/start",
+            json={"name": "grok-key-1", "api_key": "xai-test-123", "platform": "grok"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["account_id"] == "grok-acct-1"
+
+    assert backend.create_group_payloads[0]["name"] == "grok-key-1_grok"
+    assert backend.create_group_payloads[0]["platform"] == "grok"
+    account_payload = backend.create_account_payloads[0]
+    assert "provider" not in account_payload
+    assert account_payload["platform"] == "grok"
+    assert account_payload["type"] == "api_key"
+    assert account_payload["credentials"] == {
+        "api_key": "xai-test-123",
+        "base_url": "https://api.x.ai/v1",
+    }
+    assert "model_mapping" not in account_payload["credentials"]
+    assert "temp_unschedulable_enabled" not in account_payload["credentials"]
+
+
+def test_provisioning_settings_report_supported_oauth_platforms(client) -> None:
+    login(client)
+
+    response = client.get("/api/provisioning/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    # The UI builds its platform picker from this; it never hardcodes a list.
+    assert payload["supported_oauth_platforms"] == ["grok", "openai"]
+    assert payload["settings"]["assignment_mode"] == "dedicated"
+
+
 def test_sub2api_client_builds_apikey_account_payload() -> None:
     captured: list[dict[str, object]] = []
 
@@ -3109,7 +3622,7 @@ def test_sub2api_client_builds_apikey_account_payload() -> None:
     )
 
     with patch.object(requests.Session, "request", new=fake_request):
-        result = sub2api.create_openai_account_from_apikey(
+        result = sub2api.create_account_from_apikey(
             name="key-acct",
             base_url="https://api.openai.com/v1",
             api_key="sk-abc",
@@ -3119,7 +3632,7 @@ def test_sub2api_client_builds_apikey_account_payload() -> None:
     assert result["id"] == "oa-9"
     assert captured[0]["path"] == "/api/v1/admin/accounts"
     payload = captured[0]["json"]
-    assert payload["provider"] == "openai"
+    assert "provider" not in payload
     assert payload["platform"] == "openai"
     assert payload["type"] == "api_key"
     assert payload["credentials"]["api_key"] == "sk-abc"
@@ -3148,7 +3661,7 @@ def test_sub2api_client_apikey_account_payload_sends_numeric_group_ids_as_number
     )
 
     with patch.object(requests.Session, "request", new=fake_request):
-        sub2api.create_openai_account_from_apikey(
+        sub2api.create_account_from_apikey(
             name="key-acct",
             base_url="https://api.openai.com/v1",
             api_key="sk-abc",
@@ -3162,7 +3675,7 @@ def test_provision_apikey_start_creates_account_without_oauth(client) -> None:
     def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
         path = urlparse(url).path
         if method == "POST" and path == "/api/v1/admin/accounts":
-            assert json["provider"] == "openai"
+            assert "provider" not in json
             assert json["platform"] == "openai"
             assert json["type"] == "api_key"
             assert json["credentials"]["api_key"] == "sk-test-123"
@@ -6809,7 +7322,7 @@ def test_provision_start_configures_existing_oauth_account_without_authorization
     assert len(backend.update_account_calls) == 1
     update_payload = backend.update_account_calls[0]["json"]
     assert update_payload["name"] == "repeat@example.com"
-    assert update_payload["provider"] == "openai"
+    assert "provider" not in update_payload
     assert update_payload["platform"] == "openai"
     assert update_payload["type"] == "oauth"
     assert update_payload["group_ids"] == [77]
