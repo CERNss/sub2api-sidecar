@@ -3128,6 +3128,47 @@ pre {
   color: oklch(0.55 0.02 250);
 }
 
+/* Step 1 scope picker: narrows every mode below it to a single platform. */
+.manual-platform-field > .ant-typography {
+  font-size: 12px;
+}
+
+.manual-platform-select {
+  width: 100%;
+}
+
+.manual-platform-select .ant-select-selection-item {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-filter-option {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.platform-filter-all {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-filter-option .platform-tag {
+  flex: 0 0 auto;
+}
+
+.platform-filter-count {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+}
+
 .manual-group-migration-summary,
 .manual-group-migration-panel {
   min-width: 0;

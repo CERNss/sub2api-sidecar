@@ -319,6 +319,14 @@ type UserSelectOption = {
   platforms: string[];
 };
 
+type PlatformFilterOption = {
+  value: string;
+  label: string;
+  // null on the "all platforms" entry, otherwise the platform the option scopes to.
+  platform: string | null;
+  groupCount: number;
+};
+
 type OrchestrationGroupsPayload = ApiPayload & {
   items: OrchestrationGroup[];
   total: number;
@@ -754,6 +762,9 @@ const ungroupedGraphFilterValue = "__ungrouped__";
 // palette by hashing the value instead of being mapped per known platform.
 const platformTagColors = ["blue", "purple", "geekblue", "magenta", "cyan", "orange", "volcano", "green"] as const;
 const unknownPlatformLabel = "未标注平台";
+// Sentinel for "no platform scope" in the manual panel's platform picker. A real platform
+// is an opaque upstream string, so the neutral entry needs a value that cannot collide.
+const allPlatformsFilterValue = "__all_platforms__";
 const usageWindowOptions = [
   { label: "最近 5 小时", value: "5h" },
   { label: "最近 1 天", value: "1d" },
@@ -1585,6 +1596,22 @@ function renderGroupSelectLabel(options: GroupSelectOption[], item: { value?: un
     <span className="group-select-label">
       <span className="group-select-label-name">{option.label}</span>
       <PlatformTag platform={option.platform} />
+    </span>
+  );
+}
+
+// The platform picker reuses the badge every other platform-aware control uses, so the
+// scope in force reads the same as the platform shown on groups, users and keys.
+function renderPlatformFilterBadge(option: PlatformFilterOption | undefined, label: ReactNode) {
+  const platform = option?.platform ?? null;
+  return platform ? <PlatformTag platform={platform} /> : <span className="platform-filter-all">{label}</span>;
+}
+
+function renderPlatformFilterOption(option: { label?: ReactNode; data: PlatformFilterOption }) {
+  return (
+    <span className="platform-filter-option">
+      {renderPlatformFilterBadge(option.data, option.label)}
+      <span className="platform-filter-count">{option.data?.groupCount ?? 0} 分组</span>
     </span>
   );
 }
@@ -5214,6 +5241,9 @@ function ExistingOrchestrationView({
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [mode, setMode] = useState<OrchestrationMode>("replace_group");
+  // Panel-level scope for step 1. Holds `allPlatformsFilterValue` when nothing is scoped,
+  // in which case every list below behaves exactly as it did before the picker existed.
+  const [platformFilter, setPlatformFilter] = useState(allPlatformsFilterValue);
   const [users, setUsers] = useState<OrchestrationUser[]>([]);
   const [groups, setGroups] = useState<OrchestrationGroup[]>([]);
   const [accounts, setAccounts] = useState<OrchestrationAccount[]>([]);
@@ -5250,10 +5280,6 @@ function ExistingOrchestrationView({
   const selectedUser = users.find((user) => idValue(user.user_id) === selectedUserId) ?? null;
   const selectedKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
   const userOptions = useMemo(() => users.map(buildUserOption), [users]);
-  const selectedKeys = useMemo(
-    () => apiKeys.filter((key) => selectedKeySet.has(idValue(key.key_id))),
-    [apiKeys, selectedKeySet]
-  );
   const groupsById = useMemo(() => {
     const index = new Map<string, OrchestrationGroup>();
     groups.forEach((group) => {
@@ -5271,6 +5297,54 @@ function ExistingOrchestrationView({
         new Set(groups.map(groupPlatform).filter((platform): platform is string => Boolean(platform)))
       ).sort(),
     [groups]
+  );
+  // null while the panel is unscoped; otherwise the one platform step 1 is narrowed to.
+  const platformScope = platformFilter === allPlatformsFilterValue ? null : platformFilter;
+  // Every group list in this panel starts from here, so a single scope narrows the
+  // target dropdown, the migration sources and the key list at once.
+  const platformScopedGroups = useMemo(
+    () => (platformScope ? groups.filter((group) => groupPlatform(group) === platformScope) : groups),
+    [groups, platformScope]
+  );
+  const platformFilterOptions = useMemo<PlatformFilterOption[]>(
+    () => [
+      { value: allPlatformsFilterValue, label: "全部平台", platform: null, groupCount: groups.length },
+      ...availablePlatforms.map((platform) => ({
+        value: platform,
+        label: platform,
+        platform,
+        groupCount: groups.filter((group) => groupPlatform(group) === platform).length
+      }))
+    ],
+    [availablePlatforms, groups]
+  );
+  // Key id to the platform of its routing group, across every user the canvas knows about.
+  // A key without a routing group (or on a group of unknown platform) maps to null and is
+  // therefore never part of a scoped selection.
+  const keyPlatformById = useMemo(() => {
+    const index = new Map<string, string | null>();
+    const record = (key: OrchestrationApiKey) => {
+      const keyId = idValue(key.key_id);
+      if (!keyId) {
+        return;
+      }
+      index.set(keyId, groupPlatform(groupsById.get(idValue(key.group_id)) ?? null));
+    };
+    apiKeys.forEach(record);
+    Object.values(apiKeysByUserId).forEach((keys) => keys.forEach(record));
+    return index;
+  }, [apiKeys, apiKeysByUserId, groupsById]);
+  const visibleApiKeys = useMemo(
+    () =>
+      platformScope
+        ? apiKeys.filter((key) => groupPlatform(groupsById.get(idValue(key.group_id)) ?? null) === platformScope)
+        : apiKeys,
+    [apiKeys, groupsById, platformScope]
+  );
+  // Reads the visible keys only: a selection the scope hides must never reach a request.
+  const selectedKeys = useMemo(
+    () => visibleApiKeys.filter((key) => selectedKeySet.has(idValue(key.key_id))),
+    [selectedKeySet, visibleApiKeys]
   );
   // The selected user's dedicated group per platform, resolved against the group list so
   // every entry carries a real platform even when the group was not in the payload.
@@ -5404,8 +5478,8 @@ function ExistingOrchestrationView({
     }
     const candidates =
       mode === "replace_group" || mode === "group_migration"
-        ? groups.filter((group) => group.rotation_supported)
-        : groups;
+        ? platformScopedGroups.filter((group) => group.rotation_supported)
+        : platformScopedGroups;
     const ordered = new Map<string, OrchestrationGroup>();
     candidates.forEach((group) => {
       const groupValue = idValue(group.group_id);
@@ -5415,13 +5489,13 @@ function ExistingOrchestrationView({
       ordered.set(groupValue, group);
     });
     return Array.from(ordered.values());
-  }, [groups, mode, selectedUser, targetPlatformConstraint]);
+  }, [mode, platformScopedGroups, selectedUser, targetPlatformConstraint]);
   const sourceGroupOptions = useMemo(
     () =>
       mode === "group_migration"
-        ? groups.filter((group) => group.rotation_supported).map((group) => buildGroupOption(group))
+        ? platformScopedGroups.filter((group) => group.rotation_supported).map((group) => buildGroupOption(group))
         : sourceGroups.map((group) => buildGroupOption(group)),
-    [groups, mode, sourceGroups]
+    [mode, platformScopedGroups, sourceGroups]
   );
   const targetGroupOptions = useMemo(
     () =>
@@ -5504,6 +5578,29 @@ function ExistingOrchestrationView({
     if (groupId && groupId === targetGroupId) {
       setTargetGroupId("");
     }
+  }
+
+  // Narrowing the panel drops whatever the new scope no longer offers, so a selection made
+  // on one platform can never be carried into a submission on another. Widening back to
+  // "all platforms" keeps the current selection: nothing on screen becomes invalid.
+  function updatePlatformScope(nextValue: string) {
+    setPlatformFilter(nextValue || allPlatformsFilterValue);
+    const nextPlatform = nextValue === allPlatformsFilterValue ? null : normalizedPlatform(nextValue);
+    if (!nextPlatform) {
+      return;
+    }
+    const outOfScope = (groupId: string) =>
+      Boolean(groupId) && groupPlatform(groupsById.get(groupId) ?? null) !== nextPlatform;
+    if (outOfScope(targetGroupId)) {
+      setTargetGroupId("");
+    }
+    // The source is hand-picked only for a group migration; the other modes re-derive it
+    // from the target or from the selected keys.
+    if (mode === "group_migration" && outOfScope(sourceGroupId)) {
+      setSourceGroupId("");
+      updateGraphGroupFilters([]);
+    }
+    setSelectedKeyIds((current) => current.filter((keyId) => keyPlatformById.get(keyId) === nextPlatform));
   }
 
   const groupMigrationScope = useMemo(() => {
@@ -6111,6 +6208,11 @@ function ExistingOrchestrationView({
     }
     if (selection.kind === "key" && nextKeyId) {
       setMode("api_key");
+      // The canvas is never platform scoped, so picking a key from outside the current
+      // scope widens the panel instead of selecting a row the key list would hide.
+      if (platformScope && keyPlatformById.get(nextKeyId) !== platformScope) {
+        setPlatformFilter(allPlatformsFilterValue);
+      }
       setSelectedKeyIds((current) => (current.includes(nextKeyId) ? current : [...current, nextKeyId]));
       return;
     }
@@ -6354,7 +6456,8 @@ function ExistingOrchestrationView({
     }
   }
 
-  const allKeyIds = apiKeys.map((key) => idValue(key.key_id)).filter(Boolean);
+  // Select-all follows the scope: it only ever covers the keys the list is showing.
+  const allKeyIds = visibleApiKeys.map((key) => idValue(key.key_id)).filter(Boolean);
   const allKeysSelected = allKeyIds.length > 0 && allKeyIds.every((id) => selectedKeySet.has(id));
   const toggleAllKeys = () => {
     if (allKeysSelected) {
@@ -6364,15 +6467,21 @@ function ExistingOrchestrationView({
     }
   };
 
-  const apiKeyListContent = apiKeys.length === 0 ? (
+  const apiKeyListContent = visibleApiKeys.length === 0 ? (
     <Empty
       image={Empty.PRESENTED_IMAGE_SIMPLE}
-      description={loadingKeys ? "正在加载 API Keys" : "暂无 API Keys"}
+      description={
+        loadingKeys
+          ? "正在加载 API Keys"
+          : platformScope && apiKeys.length > 0
+          ? `该用户在平台 ${platformScope} 上无 API Key`
+          : "暂无 API Keys"
+      }
     />
   ) : (
     <List
       className="orchestration-key-list"
-      dataSource={apiKeys}
+      dataSource={visibleApiKeys}
       renderItem={(key) => {
         const keyId = idValue(key.key_id);
         const checked = selectedKeySet.has(keyId);
@@ -6442,6 +6551,23 @@ function ExistingOrchestrationView({
                 <Typography.Text strong id="manual-zone-target-title">选择对象</Typography.Text>
               </header>
 
+              <div className="ant-field manual-platform-field">
+                <Typography.Text strong>平台范围</Typography.Text>
+                <Select
+                  className="manual-platform-select"
+                  value={platformFilter}
+                  onChange={(value) => updatePlatformScope(value ?? allPlatformsFilterValue)}
+                  options={platformFilterOptions}
+                  optionRender={renderPlatformFilterOption}
+                  labelRender={(item) =>
+                    renderPlatformFilterBadge(
+                      platformFilterOptions.find((candidate) => candidate.value === item.value),
+                      item.label
+                    )
+                  }
+                />
+              </div>
+
               <AntSegmented
                 className="manual-mode-switch"
                 block
@@ -6458,7 +6584,8 @@ function ExistingOrchestrationView({
                     setSelectedKeyIds([]);
                     setApiKeys([]);
                     setUserSearch("");
-                    const nextSourceGroupId = sourceGroupId || groups.find((group) => group.rotation_supported)?.group_id;
+                    const nextSourceGroupId =
+                      sourceGroupId || platformScopedGroups.find((group) => group.rotation_supported)?.group_id;
                     const nextSourceValue = idValue(nextSourceGroupId);
                     setSourceGroupId(nextSourceValue);
                     updateGraphGroupFilters(nextSourceValue ? [nextSourceValue] : []);
@@ -6550,8 +6677,10 @@ function ExistingOrchestrationView({
 
               <Typography.Text type="secondary" className="manual-zone-hint">
                 {mode === "group_migration"
-                  ? `${groups.filter((group) => group.rotation_supported).length} 可迁移分组 · ${groupMigrationScope.sourceUserCount} 相关用户`
-                  : `${users.length} 用户 · ${groups.length} 分组 · ${availablePlatforms.length || "0"} 平台`}
+                  ? `${platformScopedGroups.filter((group) => group.rotation_supported).length} 可迁移分组 · ${groupMigrationScope.sourceUserCount} 相关用户`
+                  : `${users.length} 用户 · ${platformScopedGroups.length} 分组 · ${
+                      platformScope ? 1 : availablePlatforms.length || "0"
+                    } 平台`}
               </Typography.Text>
             </section>
 
@@ -6599,6 +6728,8 @@ function ExistingOrchestrationView({
                     notFoundContent={
                       activePlatform && mode !== "replace_group"
                         ? `平台 ${activePlatform} 上暂无其他可用分组`
+                        : platformScope
+                        ? `平台 ${platformScope} 上暂无可用分组`
                         : "暂无可用分组"
                     }
                   />
@@ -6658,10 +6789,10 @@ function ExistingOrchestrationView({
                       </Tooltip>
                     </Space>
                     <Space size={8}>
-                      {mode === "api_key" && apiKeys.length > 0 ? (
+                      {mode === "api_key" && visibleApiKeys.length > 0 ? (
                         <>
                           <Tag color={selectedKeyIds.length > 0 ? "green" : "default"}>
-                            已选 {selectedKeyIds.length} / {apiKeys.length}
+                            已选 {selectedKeyIds.length} / {visibleApiKeys.length}
                           </Tag>
                           <AntButton
                             size="small"
@@ -6675,7 +6806,7 @@ function ExistingOrchestrationView({
                       ) : loadingKeys ? (
                         <Spin size="small" />
                       ) : (
-                        <Tag>{apiKeys.length} Key</Tag>
+                        <Tag>{visibleApiKeys.length} Key</Tag>
                       )}
                     </Space>
                   </div>
