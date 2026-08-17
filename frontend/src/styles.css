@@ -591,16 +591,22 @@ pre {
   gap: 8px;
 }
 
-.field span,
-.hint-box span {
+/* Direct children only. A `.field` may host an antd control (the provision platform picker
+   does), and antd components carry their own nested `span` / `input` elements — a readonly
+   overlay input inside every Select, for one. A descendant selector here outranks antd's own
+   `:where()`-wrapped rules (0-1-1 vs 0-1-0) and would dress those internals as if they were
+   this form's native inputs, which is how the platform badge ended up sharing its box with a
+   46px-tall phantom input. */
+.field > span,
+.hint-box > span {
   color: #526174;
   font-size: 13px;
   font-weight: 700;
 }
 
-.field input,
-.field select,
-.field textarea {
+.field > input,
+.field > select,
+.field > textarea {
   width: 100%;
   border: 1px solid #cfd8e5;
   border-radius: 8px;
@@ -610,26 +616,26 @@ pre {
   transition: border-color 0.16s ease, box-shadow 0.16s ease;
 }
 
-.field input,
-.field select {
+.field > input,
+.field > select {
   height: 46px;
   padding: 0 13px;
 }
 
-.field textarea {
+.field > textarea {
   min-height: 126px;
   resize: vertical;
   padding: 12px 13px;
 }
 
-.field input:focus,
-.field select:focus,
-.field textarea:focus {
+.field > input:focus,
+.field > select:focus,
+.field > textarea:focus {
   border-color: #0f766e;
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
 }
 
-.field input[readonly] {
+.field > input[readonly] {
   background: #f8fafc;
   color: #334155;
 }
@@ -3151,15 +3157,11 @@ pre {
   width: 100%;
 }
 
-.manual-platform-select .ant-select-selection-item {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+/* Fills the option row so the group count stays pinned to the right edge even once the row
+   itself is laid out as a flex line (see .platform-select-popup below). */
 .platform-filter-option {
   min-width: 0;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3499,6 +3501,34 @@ pre {
   font-size: 11px;
   line-height: 18px;
   text-transform: none;
+}
+
+/* A badge dropped straight into an antd Select needs the surrounding box laid out as a
+   centered flex line. antd v6 renders the collapsed value into `.ant-select-content` and each
+   option into `.ant-select-item-option-content`; both are blocks with `overflow: hidden`, and
+   the badge — an inline-block carrying its own 18px line-height plus a border — is
+   baseline-aligned inside their 22px line box. Baseline alignment leaves it flush against one
+   clip edge (top in the collapsed value, bottom in the option list), so a hair of font-metric
+   drift shaves the pill. Centering removes the guesswork without changing the control height.
+   Note: `.ant-select-selector` / `.ant-select-selection-item` are antd v5 names that v6 no
+   longer emits — styling those nodes here has no effect. The collapsed-value selectors carry
+   the extra `.ant-select-single` / `.ant-select-content-has-value` qualifiers only to out-rank
+   antd's own three-class `display: block` on that node. */
+.provision-platform-select.ant-select-single .ant-select-content.ant-select-content-has-value,
+.manual-platform-select.ant-select-single .ant-select-content.ant-select-content-has-value {
+  min-width: 0;
+  /* A flex container has no strut, so this box would otherwise shrink to the badge and take
+     the control down with it. antd sizes the control off this very token, so re-asserting it
+     as a floor keeps the picker 32px tall like every control beside it. */
+  min-height: var(--ant-select-font-height, 22px);
+  display: flex;
+  align-items: center;
+}
+
+.platform-select-popup .ant-select-item-option-content {
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
 
 .group-option {

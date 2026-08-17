@@ -6571,6 +6571,10 @@ function ExistingOrchestrationView({
                 <Typography.Text strong>平台范围</Typography.Text>
                 <Select
                   className="manual-platform-select"
+                  // The option rows render a platform badge, which needs the centered flex
+                  // layout `.platform-select-popup` applies; the popup is portalled, so the
+                  // hook has to be handed to antd rather than inherited from this subtree.
+                  classNames={{ popup: { root: "platform-select-popup" } }}
                   value={platformFilter}
                   onChange={(value) => updatePlatformScope(value ?? allPlatformsFilterValue)}
                   options={platformFilterOptions}
@@ -8973,6 +8977,8 @@ function ProvisionForm({
       <span>平台</span>
       <Select
         className="provision-platform-select"
+        // Same badge, same centering hook as the orchestration platform picker.
+        classNames={{ popup: { root: "platform-select-popup" } }}
         value={platform}
         options={platformOptions}
         onChange={(value) => setPlatform(value)}
