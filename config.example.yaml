@@ -51,6 +51,19 @@ sub2api:
       base_url: https://us-proxy-2.sub2api.tcgcard.jp
       admin_api_key_env: SUB2API_US_PROXY_2_ADMIN_API_KEY
 
+  # 建号模板：sidecar 创建/更新账号时按这里的值填 payload。
+  # 下面这一层是 base，平台差异写在末尾的 per_platform 里，只覆盖它点名的键。
+  # base 分两类：
+  #   1) 全平台通用：account_type / account_apikey_type / account_concurrency /
+  #      account_priority / account_rate_multiplier / account_auto_pause_on_expired /
+  #      account_temporary_unschedulable(_rules) / account_base_url / account_extra
+  #      （熔断规则是通用 HTTP 错误码，所有平台同一套）
+  #   2) 只作用于默认平台 account_platform（生产 = openai）：
+  #      account_model_whitelist、account_ws_mode
+  #      其他平台不继承这两项，必须在 per_platform.<平台> 里显式配置才生效；
+  #      不配 = 不发 model_mapping / 不发 openai_oauth_responses_websockets_v2_* 键
+  #      （上游对缺失 model_mapping 有运行时兜底，安全）。这样将来给 anthropic、
+  #      gemini 建号时，不会被静默塞进 openai 的 gpt-5.x 模型映射。
   provisioning_defaults:
     account_concurrency: 6
     # Fallback platform, used only when a provisioning request (or key creation)
@@ -94,3 +107,34 @@ sub2api:
           - unavailable
           - maintenance
         description: 服务不可用 - 暂停 30 分钟
+    # 写进 credentials.base_url；留空表示不发这个键（openai 由上游自己填）。
+    account_base_url: ""
+    # 自由键值，合并进账号 extra。base 里放各平台通用的，平台专属的写 per_platform。
+    account_extra: {}
+    account_priority: 1
+    account_rate_multiplier: 1
+    account_auto_pause_on_expired: true
+
+    # 平台维度的模板覆盖：平台名 -> 只写要改的键。
+    # 不配 per_platform 时行为与没有这一节完全一致；下面 grok 这段是 sidecar 内置的
+    # 默认值（照抄一遍只是为了可见），删掉也仍然生效，写在这里则以你的值为准。
+    # 可覆盖的键：account_type / account_apikey_type / account_ws_mode /
+    # account_base_url / account_concurrency / account_priority /
+    # account_rate_multiplier / account_auto_pause_on_expired /
+    # account_temporary_unschedulable / account_temporary_unschedulable_rules /
+    # account_model_whitelist / account_extra
+    per_platform:
+      grok:
+        # 恒等映射，与线上手工配置的 grok 账号一致；写成 [] 表示不发 model_mapping。
+        account_model_whitelist:
+          - composer-2.5
+          - grok-4.5
+          - grok-4.6
+          - grok-4.6-latest
+        # grok OAuth 账号走上游的代理域名；API Key 账号用的是 api.x.ai，两者不是一回事。
+        account_base_url: https://cli-chat-proxy.grok.com/v1
+        account_extra:
+          grok_client_tool_cache_enabled: true
+        # openai_oauth_responses_websockets_v2_* 是 openai responses 传输层的键，
+        # grok 账号不带；ws_mode 置空即不下发这组键。
+        account_ws_mode: ""

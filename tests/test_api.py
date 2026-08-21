@@ -97,6 +97,17 @@ GROK_EXCHANGE_PAYLOAD = {
     "plan_type": "should-be-dropped",
     "raw_response": {"should": "be dropped"},
 }
+EXPECTED_GROK_MODEL_MAPPING = {
+    "composer-2.5": "composer-2.5",
+    "grok-4.5": "grok-4.5",
+    "grok-4.6": "grok-4.6",
+    "grok-4.6-latest": "grok-4.6-latest",
+}
+# The full shape a freshly created grok OAuth account carries: exchange fields the
+# white-list keeps, plus what the provisioning template stamps for grok. Mirrors the
+# hand-configured grok accounts upstream, `base_url` included — that one is the
+# template's `account_base_url`, never the exchange's (upstream sends none, and the
+# api.x.ai value in GROK_EXCHANGE_PAYLOAD must not leak through).
 EXPECTED_GROK_CREDENTIALS = {
     "access_token": "grok-access-1",
     "refresh_token": "grok-refresh-1",
@@ -110,7 +121,16 @@ EXPECTED_GROK_CREDENTIALS = {
     "team_id": "grok-team-1",
     "subscription_tier": "SuperGrok",
     "entitlement_status": "active",
-    "base_url": "https://api.x.ai/v1",
+    "temp_unschedulable_enabled": True,
+    "temp_unschedulable_rules": EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES,
+    "model_mapping": EXPECTED_GROK_MODEL_MAPPING,
+    "base_url": "https://cli-chat-proxy.grok.com/v1",
+}
+EXPECTED_GROK_EXTRA = {
+    "email": "user@example.com",
+    "subscription_tier": "SuperGrok",
+    "entitlement_status": "active",
+    "grok_client_tool_cache_enabled": True,
 }
 
 
@@ -2372,16 +2392,25 @@ def test_sub2api_client_builds_grok_oauth_account_payload() -> None:
     assert payload["platform"] == "grok"
     assert payload["type"] == "oauth"
     assert payload["credentials"] == EXPECTED_GROK_CREDENTIALS
-    assert payload["extra"] == {
-        "email": "user@example.com",
-        "subscription_tier": "SuperGrok",
-        "entitlement_status": "active",
-    }
-    # openai-only account knobs must not ride along.
-    assert "temp_unschedulable_enabled" not in payload["credentials"]
-    assert "temp_unschedulable_rules" not in payload["credentials"]
-    assert "model_mapping" not in payload["credentials"]
+    assert payload["extra"] == EXPECTED_GROK_EXTRA
+    # The knobs the provisioning template owns reach grok too — upstream stores them
+    # on any platform, and the hand-configured grok accounts carry all three.
+    assert payload["credentials"]["temp_unschedulable_enabled"] is True
+    assert payload["credentials"]["temp_unschedulable_rules"] == (
+        EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+    )
+    assert payload["credentials"]["model_mapping"] == EXPECTED_GROK_MODEL_MAPPING
+    assert payload["credentials"]["base_url"] == "https://cli-chat-proxy.grok.com/v1"
+    assert payload["extra"]["grok_client_tool_cache_enabled"] is True
+    # ...but the openai responses-transport keys stay behind: grok's template clears
+    # the ws mode, and live grok accounts carry no such keys.
     assert "openai_oauth_responses_websockets_v2_mode" not in payload["extra"]
+    assert "openai_oauth_responses_websockets_v2_enabled" not in payload["extra"]
+    # Account-level knobs match the live grok accounts (concurrency comes from the
+    # base template, not from a grok override).
+    assert payload["priority"] == 1
+    assert payload["rate_multiplier"] == 1
+    assert payload["concurrency"] == 5
 
 
 def test_sub2api_client_grok_oauth_credentials_skip_unknown_exchange_fields() -> None:
@@ -2412,7 +2441,14 @@ def test_sub2api_client_grok_oauth_credentials_skip_unknown_exchange_fields() ->
 
     # Credentials are stored verbatim upstream, so only white-listed keys with an
     # actual value are forwarded; everything else is dropped rather than persisted.
-    assert calls[0]["json"]["credentials"] == {"access_token": "grok-access"}
+    # What the template stamps is independent of the exchange and always present.
+    assert calls[0]["json"]["credentials"] == {
+        "access_token": "grok-access",
+        "temp_unschedulable_enabled": True,
+        "temp_unschedulable_rules": EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES,
+        "model_mapping": EXPECTED_GROK_MODEL_MAPPING,
+        "base_url": "https://cli-chat-proxy.grok.com/v1",
+    }
 
 
 def test_sub2api_client_apikey_credentials_default_base_url_per_platform() -> None:
@@ -2682,6 +2718,150 @@ def test_sub2api_client_configures_existing_oauth_account_preserving_credentials
     assert payload["proxy_id"] == "proxy-1"
     assert payload["priority"] == 9
     assert payload["rate_multiplier"] == 2
+
+
+def test_sub2api_client_sends_no_model_mapping_for_an_unconfigured_platform() -> None:
+    """A platform with no template of its own must not inherit openai's models."""
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"json": json})
+        return FakeResponse(200, {"account_id": "acct-anthropic"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_account_from_apikey(
+            name="anthropic-key",
+            base_url="https://api.anthropic.com/v1",
+            api_key="sk-ant-1",
+            group_id="g-1",
+            platform="anthropic",
+        )
+
+    credentials = calls[0]["json"]["credentials"]
+    # openai's gpt-5.x mapping on an anthropic account would misconfigure it, and
+    # nothing downstream would flag it — upstream simply stores what it is sent.
+    assert "model_mapping" not in credentials
+    assert credentials["base_url"] == "https://api.anthropic.com/v1"
+    # The cross-platform half of the template still applies.
+    assert credentials["temp_unschedulable_enabled"] is True
+    assert credentials["temp_unschedulable_rules"] == EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+    assert calls[0]["json"]["concurrency"] == 5
+
+
+def test_sub2api_client_sends_a_model_mapping_a_platform_opted_into() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"json": json})
+        return FakeResponse(200, {"account_id": "acct-anthropic"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(
+            per_platform={"anthropic": {"account_model_whitelist": ("claude-4",)}}
+        ),
+    )
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.create_account_from_apikey(
+            name="anthropic-key",
+            base_url="https://api.anthropic.com/v1",
+            api_key="sk-ant-1",
+            group_id="g-1",
+            platform="anthropic",
+        )
+
+    assert calls[0]["json"]["credentials"]["model_mapping"] == {"claude-4": "claude-4"}
+
+
+def test_sub2api_client_sends_no_websockets_extras_for_an_unconfigured_platform() -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"json": json})
+        return FakeResponse(200, {"account_id": "acct-anthropic"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+    account = {
+        "id": "acct-anthropic",
+        "name": "old@example.com",
+        "group_ids": [11],
+        "raw": {"credentials": {"access_token": "keep"}, "extra": {"legacy": "value"}},
+    }
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.configure_existing_oauth_account(
+            account=account,
+            name="existing@example.com",
+            group_id=77,
+            platform="anthropic",
+        )
+
+    payload = calls[0]["json"]
+    # `openai_oauth_responses_websockets_v2_*` is openai's responses transport.
+    assert "openai_oauth_responses_websockets_v2_mode" not in payload["extra"]
+    assert "openai_oauth_responses_websockets_v2_enabled" not in payload["extra"]
+    assert "model_mapping" not in payload["credentials"]
+    assert payload["extra"]["legacy"] == "value"
+    assert payload["credentials"]["temp_unschedulable_enabled"] is True
+
+
+def test_sub2api_client_repairs_an_existing_grok_account_onto_the_template() -> None:
+    """Re-configuring an account re-applies the template, drift included."""
+    calls: list[dict[str, object]] = []
+
+    def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
+        calls.append({"json": json})
+        return FakeResponse(200, {"account_id": "acct-grok-existing"})
+
+    client = Sub2APIClient(
+        base_url="https://sub2api.example.com",
+        admin_api_key="admin-key",
+        provisioning_defaults=Sub2APIProvisioningDefaults(),
+    )
+    account = {
+        "id": "acct-grok-existing",
+        "name": "old@example.com",
+        "group_ids": [11],
+        "raw": {
+            "credentials": {
+                "access_token": "keep-access",
+                # Hand-configured accounts exist with the API-key host on an OAuth
+                # account; the template is what puts them back on the proxy host.
+                "base_url": "https://api.x.ai/v1",
+            },
+            "extra": {"email": "old@example.com"},
+        },
+    }
+
+    with patch.object(requests.Session, "request", new=fake_request):
+        client.configure_existing_oauth_account(
+            account=account,
+            name="existing@example.com",
+            group_id=77,
+            platform="grok",
+        )
+
+    payload = calls[0]["json"]
+    assert payload["credentials"]["access_token"] == "keep-access"
+    assert payload["credentials"]["base_url"] == "https://cli-chat-proxy.grok.com/v1"
+    assert payload["credentials"]["model_mapping"] == EXPECTED_GROK_MODEL_MAPPING
+    assert payload["credentials"]["temp_unschedulable_rules"] == (
+        EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
+    )
+    assert payload["extra"]["grok_client_tool_cache_enabled"] is True
+    assert "openai_oauth_responses_websockets_v2_mode" not in payload["extra"]
 
 
 def login(client: TestClient) -> dict[str, object]:
@@ -3497,14 +3677,7 @@ def test_provision_grok_oauth_flow_end_to_end(client, caplog) -> None:
     assert account_payload["name"] == "user@example.com"
     assert account_payload["group_ids"] == ["g-1"]
     assert account_payload["credentials"] == EXPECTED_GROK_CREDENTIALS
-    assert account_payload["extra"] == {
-        "email": "user@example.com",
-        "subscription_tier": "SuperGrok",
-        "entitlement_status": "active",
-    }
-    assert "temp_unschedulable_enabled" not in account_payload["credentials"]
-    assert "temp_unschedulable_rules" not in account_payload["credentials"]
-    assert "model_mapping" not in account_payload["credentials"]
+    assert account_payload["extra"] == EXPECTED_GROK_EXTRA
     assert "openai_oauth_responses_websockets_v2_mode" not in account_payload["extra"]
 
     # The `{"data": null}` plan list is "no plans", so the default plan is created
@@ -3588,12 +3761,16 @@ def test_provision_apikey_start_for_grok_defaults_the_base_url(client) -> None:
     assert "provider" not in account_payload
     assert account_payload["platform"] == "grok"
     assert account_payload["type"] == "api_key"
+    # An API key talks to the platform's public API host, so the template's OAuth
+    # base_url (cli-chat-proxy) must not displace it. The rest of the template — the
+    # backoff rules and the model mapping — applies here as it does anywhere.
     assert account_payload["credentials"] == {
         "api_key": "xai-test-123",
         "base_url": "https://api.x.ai/v1",
+        "temp_unschedulable_enabled": True,
+        "temp_unschedulable_rules": EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES,
+        "model_mapping": EXPECTED_GROK_MODEL_MAPPING,
     }
-    assert "model_mapping" not in account_payload["credentials"]
-    assert "temp_unschedulable_enabled" not in account_payload["credentials"]
 
 
 def test_provisioning_settings_report_supported_oauth_platforms(client) -> None:
@@ -3938,6 +4115,153 @@ def test_oauth_complete_rejects_malformed_callback_url(client) -> None:
     payload = response.json()
     assert payload["success"] is False
     assert "Unable to parse code and state" in payload["detail"]
+
+
+def test_oauth_complete_rejects_callback_url_carrying_an_error(client) -> None:
+    login(client)
+    response = client.post(
+        "/provision/oauth/complete",
+        json={"callback_url": "http://localhost:1455/callback?error=access_denied"},
+    )
+
+    assert response.status_code == 400
+    assert "access_denied" in response.json()["detail"]
+
+
+def test_oauth_complete_accepts_a_bare_grok_authorization_code(client) -> None:
+    """grok's authorization page often prints a code instead of calling back."""
+    backend = FakeMultiPlatformUpstream()
+    login(client)
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        start_response = client.post(
+            "/provision/start",
+            json={"email": "user@example.com", "platform": "grok"},
+        )
+        assert start_response.status_code == 200
+        start_payload = start_response.json()
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={
+                # Trailing `=` padding is why the parser tests for a parsed `code`
+                # key rather than for parse_qs having produced anything: this string
+                # reads as the pair {"ory_ac_grok-1": ["="]}.
+                "callback_url": "  ory_ac_grok-1==  ",
+                "flow_id": start_payload["flow_id"],
+            },
+        )
+
+    assert complete_response.status_code == 200
+    assert complete_response.json()["status"] == "completed"
+    # The state was never pasted: it comes off the flow sidecar stored at start.
+    assert backend.exchange_calls == [
+        {
+            "session_id": "grok-session-1",
+            "code": "ory_ac_grok-1==",
+            "state": "grok-upstream-state",
+        }
+    ]
+
+
+def test_oauth_complete_accepts_a_bare_openai_authorization_code(client) -> None:
+    with patch.object(requests.Session, "request", new=fake_sub2api_request):
+        login(client)
+        start_response = client.post("/provision/start", json={"email": "user@example.com"})
+        assert start_response.status_code == 200
+        start_payload = start_response.json()
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={"callback_url": "bare-openai-code", "flow_id": start_payload["flow_id"]},
+        )
+
+    assert complete_response.status_code == 200
+    payload = complete_response.json()
+    assert payload["status"] == "completed"
+    assert payload["oauth_account_id"] == "oa-1"
+
+    state = parse_qs(urlparse(start_payload["oauth_url"]).query)["state"][0]
+    completed_flow = main.get_flow_store().get_by_state(state)
+    assert completed_flow is not None
+    assert completed_flow.status.value == "completed"
+
+
+def test_oauth_complete_bare_code_without_flow_id_is_rejected(client) -> None:
+    login(client)
+    response = client.post(
+        "/provision/oauth/complete",
+        json={"callback_url": "ory_ac_orphan-code"},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    # Guessing "the only pending flow" is not a fallback, so the message has to say
+    # what the operator can actually do about it.
+    assert "flow_id" in detail
+    assert "callback URL" in detail
+    assert "restart the authorization" in detail
+
+
+def test_oauth_complete_bare_code_with_unknown_flow_id_is_rejected(client) -> None:
+    login(client)
+    response = client.post(
+        "/provision/oauth/complete",
+        json={"callback_url": "ory_ac_orphan-code", "flow_id": "no-such-flow"},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "no-such-flow" in detail
+    assert "restart the authorization" in detail
+
+
+def test_oauth_complete_prefers_the_pasted_state_over_flow_id(client) -> None:
+    """A full callback URL still identifies its own flow; flow_id is ignored."""
+    with patch.object(requests.Session, "request", new=fake_sub2api_request):
+        login(client)
+        start_response = client.post("/provision/start", json={"email": "user@example.com"})
+        state = parse_qs(urlparse(start_response.json()["oauth_url"]).query)["state"][0]
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={
+                "callback_url": f"http://localhost:1455/callback?code=mock-code&state={state}",
+                "flow_id": "no-such-flow",
+            },
+        )
+
+    assert complete_response.status_code == 200
+    assert complete_response.json()["status"] == "completed"
+
+
+def test_oauth_complete_reports_that_a_failed_exchange_burns_the_session(client) -> None:
+    backend = FakeMultiPlatformUpstream()
+    login(client)
+
+    def failing_exchange(self, method: str, url: str, json=None, params=None, timeout=None):
+        if method == "POST" and urlparse(url).path.endswith("/grok/oauth/exchange-code"):
+            return FakeResponse(400, {"message": "invalid authorization code"})
+        return backend.request(method, url, json=json, params=params, timeout=timeout)
+
+    with patch.object(requests.Session, "request", new=failing_exchange):
+        start_response = client.post(
+            "/provision/start",
+            json={"email": "burned@example.com", "platform": "grok"},
+        )
+        assert start_response.status_code == 200
+        complete_response = client.post(
+            "/provision/oauth/complete",
+            json={
+                "callback_url": "ory_ac_wrong-code",
+                "flow_id": start_response.json()["flow_id"],
+            },
+        )
+
+    assert complete_response.status_code == 502
+    detail = complete_response.json()["detail"]
+    assert "invalid authorization code" in detail
+    # The session is spent whether or not the exchange succeeded, so the only way
+    # forward is a fresh authorization — say so instead of inviting a re-paste.
+    assert "single-use" in detail
+    assert "Restart the authorization" in detail
 
 
 def test_rotation_pool_candidates_and_exclusive_selection(client) -> None:

@@ -2948,9 +2948,11 @@ def provision_oauth_complete(
 ) -> JSONResponse:
     service = get_provisioning_service()
     code, state = service.parse_oauth_callback_url(payload.callback_url)
-    flow = get_flow_store().get_by_state(state)
-    if flow is None:
-        raise FlowNotFoundError("No provisioning flow found for the provided state")
+    # A pasted callback URL brings its own state; a bare authorization code does
+    # not, and then the flow named by flow_id supplies the state sidecar stored at
+    # start. Either way the state below is upstream's, never the operator's.
+    flow = service.resolve_callback_flow(state=state, flow_id=payload.flow_id)
+    state = flow.state
     selected_upstream_id = normalize_upstream_id(flow.upstream_id)
     completed = service.complete_oauth_with_client(
         code=code,

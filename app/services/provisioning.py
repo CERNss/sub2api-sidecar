@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
-from app.clients.sub2api import Sub2APIClient
+from app.clients.sub2api import Sub2APIClient, Sub2APIError
 from app.errors import (
     FlowNotFoundError,
     InvalidOAuthCallbackPayloadError,
@@ -390,8 +390,11 @@ class ProvisioningService:
             account_id=account["id"],
         )
 
-    def complete_oauth_from_callback_url(self, callback_url: str) -> ProvisionCompleteResponse:
+    def complete_oauth_from_callback_url(
+        self, callback_url: str, flow_id: str | None = None
+    ) -> ProvisionCompleteResponse:
         code, state = self.parse_oauth_callback_url(callback_url)
+        state = self.resolve_callback_flow(state=state, flow_id=flow_id).state
         flow = self.complete_oauth(code=code, state=state)
         return ProvisionCompleteResponse(
             upstream_id=flow.upstream_id,
@@ -436,12 +439,25 @@ class ProvisioningService:
                 message="OAuth callback parsed",
                 details={"state": state, "platform": platform},
             )
-            exchange = client.exchange_oauth_code(
-                code=code,
-                state=state,
-                session_id=flow.oauth_session_id,
-                platform=platform,
-            )
+            try:
+                exchange = client.exchange_oauth_code(
+                    code=code,
+                    state=state,
+                    session_id=flow.oauth_session_id,
+                    platform=platform,
+                )
+            except Sub2APIError as exc:
+                # The authorization session is consumed by the attempt, successful
+                # or not (grok's also expires 30 minutes after it is minted), so a
+                # second paste against the same handoff can never work. Say so:
+                # the fix is always to restart the authorization.
+                raise Sub2APIError(
+                    f"{exc} — the authorization session is single-use and expires "
+                    "(grok: 30 minutes), so this handoff is now spent. Restart the "
+                    "authorization for this account and paste the new callback URL "
+                    "or code.",
+                    status_code=exc.status_code,
+                ) from exc
             self._record_event(
                 flow_id=flow.flow_id,
                 event_type=ProvisionEventType.oauth_exchanged,
@@ -530,7 +546,25 @@ class ProvisioningService:
         return flow
 
     def parse_oauth_callback_url(self, callback_url: str) -> tuple[str, str]:
+        """Read back whatever the operator pasted: callback URL *or* bare code.
+
+        Not every authorization page redirects to a localhost callback — grok's
+        often just prints the code — so anything that does not carry a `code`
+        parameter is taken to be the code itself. The returned state may be empty:
+        state is never the operator's to supply, sidecar already stored the
+        upstream one on the flow, so an empty state here means "locate the flow by
+        its id instead" (see /provision/oauth/complete).
+
+        The full-URL test is deliberately "did a non-empty `code` key come out of
+        the parse", not "did the parse produce anything": a bare code carries `=`
+        padding (`ory_ac_x==`), which parse_qs happily reads as the single pair
+        `{"ory_ac_x": ["="]}`.
+        """
         raw_value = callback_url.strip()
+        if not raw_value:
+            raise InvalidOAuthCallbackPayloadError(
+                "Paste the OAuth callback URL or the authorization code; the value is empty"
+            )
         parsed = urlparse(raw_value)
         candidate_query = parsed.query or parsed.fragment or raw_value.lstrip("?")
         params = parse_qs(candidate_query)
@@ -542,12 +576,62 @@ class ProvisioningService:
             )
 
         code = self._first_param(params, "code")
-        state = self._first_param(params, "state")
-        if not code or not state:
+        if code:
+            return code, self._first_param(params, "state") or ""
+
+        # Nothing named `code` came out. Read the paste as a bare code only when it
+        # could not have been a callback in the first place: an actual URL, or a
+        # query string that carried `state` but lost its `code`, is a paste
+        # accident, and forwarding it upstream as a code would spend the one-shot
+        # authorization session on a value that cannot work.
+        if (parsed.scheme and parsed.netloc) or params.get("state"):
             raise InvalidOAuthCallbackPayloadError(
-                "Unable to parse code and state from pasted callback URL"
+                "Unable to parse code and state from pasted callback URL. Paste the "
+                "full callback URL, or paste only the authorization code."
             )
-        return code, state
+        return raw_value, ""
+
+    def resolve_callback_flow(
+        self, *, state: str, flow_id: str | None
+    ) -> ProvisionFlow:
+        """Find the flow the pasted callback value belongs to.
+
+        A pasted callback URL identifies its flow by the state it carries; a bare
+        authorization code carries none, so the caller must name the flow it
+        started (``flow_id`` comes straight back from /provision/start). Guessing
+        "the only pending flow" is deliberately not a fallback — two operators
+        authorizing at once would cross their codes into each other's accounts.
+        """
+        if state:
+            flow = self.flow_store.get_by_state(state)
+            if not flow:
+                raise FlowNotFoundError(
+                    "No provisioning flow found for the provided state"
+                )
+            return flow
+
+        requested_flow_id = (flow_id or "").strip()
+        if not requested_flow_id:
+            raise InvalidOAuthCallbackPayloadError(
+                "The pasted value carries no OAuth state, so it is read as a bare "
+                "authorization code and needs flow_id to say which flow it belongs "
+                "to. Paste the full callback URL instead, or restart the "
+                "authorization and paste the code it issues."
+            )
+
+        flow = self.flow_store.get_by_flow_id(requested_flow_id)
+        if not flow:
+            raise InvalidOAuthCallbackPayloadError(
+                f"No provisioning flow found for flow_id '{requested_flow_id}'. "
+                "Paste the full callback URL instead, or restart the authorization "
+                "and paste the code it issues."
+            )
+        if not flow.state:
+            raise InvalidOAuthStateError(
+                f"Provisioning flow '{requested_flow_id}' has no stored OAuth state; "
+                "restart the authorization for this account."
+            )
+        return flow
 
     def _oauth_redirect_uri_from_url(
         self, oauth_url: str | None, platform: str | None = None

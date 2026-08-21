@@ -82,7 +82,9 @@ OAUTH_CREDENTIAL_FIELDS: dict[str, tuple[str, ...]] = {
         "team_id",
         "subscription_tier",
         "entitlement_status",
-        "base_url",
+        # No `base_url` here on purpose: upstream's exchange response has no such
+        # field, so this white-list could never pick one up. The account's base_url
+        # comes from the provisioning template (`account_base_url`) instead.
     ),
 }
 
@@ -94,6 +96,12 @@ OAUTH_EXTRA_FIELDS: dict[str, tuple[str, ...]] = {
 # Default `credentials.base_url` for API-key accounts when the caller names none.
 # openai is deliberately absent: upstream already defaults it, and the historical
 # behavior is to omit the key entirely rather than pin a host.
+#
+# Not the same value as the provisioning template's `account_base_url`, and not a
+# duplicate of it: an API key talks to the platform's public API host, while an
+# OAuth account talks to the proxy host upstream mints tokens for (grok:
+# api.x.ai/v1 vs cli-chat-proxy.grok.com/v1). That is why the API-key builders
+# apply the template with `keep_existing_base_url=True`.
 APIKEY_DEFAULT_BASE_URLS: dict[str, str] = {
     "grok": "https://api.x.ai/v1",
 }
@@ -1406,26 +1414,27 @@ class Sub2APIClient:
         platform: str | None = None,
     ) -> dict[str, Any]:
         effective_platform = self._effective_account_platform(platform)
+        defaults = self._platform_defaults(effective_platform)
         credentials = self._build_oauth_credentials(oauth_payload, effective_platform)
-        self._apply_openai_only_credentials(credentials, effective_platform)
+        self._apply_platform_credentials(credentials, effective_platform)
         extra = self._build_oauth_extra(oauth_payload, effective_platform)
         payload: dict[str, Any] = {
             "name": name,
             "notes": "",
             "platform": effective_platform,
-            "type": self.provisioning_defaults.account_type,
+            "type": defaults.account_type,
             "credentials": credentials,
             "extra": extra,
             "proxy_id": None,
-            "concurrency": self.provisioning_defaults.account_concurrency,
+            "concurrency": defaults.account_concurrency,
             "load_factor": None,
-            "priority": 1,
-            "rate_multiplier": 1,
+            "priority": defaults.account_priority,
+            "rate_multiplier": defaults.account_rate_multiplier,
             "group_ids": [self._coerce_numeric_id(group_id)],
             "expires_at": None,
-            "auto_pause_on_expired": True,
+            "auto_pause_on_expired": defaults.account_auto_pause_on_expired,
         }
-        self._apply_openai_only_extra(payload["extra"], effective_platform)
+        self._apply_platform_extra(payload["extra"], effective_platform)
         return payload
 
     def _build_existing_oauth_account_payload(
@@ -1438,18 +1447,19 @@ class Sub2APIClient:
     ) -> dict[str, Any]:
         effective_platform = self._effective_account_platform(platform)
         raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
+        defaults = self._platform_defaults(effective_platform)
         credentials = self._merged_dict_from_account(account, raw, "credentials")
         extra = self._merged_dict_from_account(account, raw, "extra")
-        self._apply_openai_only_credentials(credentials, effective_platform)
-        self._apply_openai_only_extra(extra, effective_platform)
+        self._apply_platform_credentials(credentials, effective_platform)
+        self._apply_platform_extra(extra, effective_platform)
 
         payload: dict[str, Any] = {
             "name": name,
             "platform": effective_platform,
-            "type": self.provisioning_defaults.account_type,
+            "type": defaults.account_type,
             "credentials": credentials,
             "extra": extra,
-            "concurrency": self.provisioning_defaults.account_concurrency,
+            "concurrency": defaults.account_concurrency,
             "group_ids": self._existing_account_group_ids(account, group_id),
             "confirm_mixed_channel_risk": True,
         }
@@ -1476,25 +1486,28 @@ class Sub2APIClient:
         platform: str | None = None,
     ) -> dict[str, Any]:
         effective_platform = self._effective_account_platform(platform)
+        defaults = self._platform_defaults(effective_platform)
         credentials = self._build_apikey_credentials(
             api_key=api_key, base_url=base_url, platform=effective_platform
         )
-        self._apply_openai_only_credentials(credentials, effective_platform)
+        self._apply_platform_credentials(
+            credentials, effective_platform, keep_existing_base_url=True
+        )
         return {
             "name": name,
             "notes": "",
             "platform": effective_platform,
-            "type": self.provisioning_defaults.account_apikey_type,
+            "type": defaults.account_apikey_type,
             "credentials": credentials,
             "extra": {},
             "proxy_id": None,
-            "concurrency": self.provisioning_defaults.account_concurrency,
+            "concurrency": defaults.account_concurrency,
             "load_factor": None,
-            "priority": 1,
-            "rate_multiplier": 1,
+            "priority": defaults.account_priority,
+            "rate_multiplier": defaults.account_rate_multiplier,
             "group_ids": [self._coerce_numeric_id(group_id)],
             "expires_at": None,
-            "auto_pause_on_expired": True,
+            "auto_pause_on_expired": defaults.account_auto_pause_on_expired,
         }
 
     def _build_existing_apikey_account_payload(
@@ -1508,6 +1521,7 @@ class Sub2APIClient:
         platform: str | None = None,
     ) -> dict[str, Any]:
         effective_platform = self._effective_account_platform(platform)
+        defaults = self._platform_defaults(effective_platform)
         raw = account.get("raw") if isinstance(account.get("raw"), dict) else account
         credentials = self._merged_dict_from_account(account, raw, "credentials")
         extra = self._merged_dict_from_account(account, raw, "extra")
@@ -1516,14 +1530,16 @@ class Sub2APIClient:
                 api_key=api_key, base_url=base_url, platform=effective_platform
             )
         )
-        self._apply_openai_only_credentials(credentials, effective_platform)
+        self._apply_platform_credentials(
+            credentials, effective_platform, keep_existing_base_url=True
+        )
         payload: dict[str, Any] = {
             "name": name,
             "platform": effective_platform,
-            "type": self.provisioning_defaults.account_apikey_type,
+            "type": defaults.account_apikey_type,
             "credentials": credentials,
             "extra": extra,
-            "concurrency": self.provisioning_defaults.account_concurrency,
+            "concurrency": defaults.account_concurrency,
             "group_ids": self._existing_account_group_ids(account, group_id),
             "confirm_mixed_channel_risk": True,
         }
@@ -1580,39 +1596,64 @@ class Sub2APIClient:
             credentials["base_url"] = effective_base_url
         return credentials
 
-    def _apply_openai_only_credentials(
-        self, credentials: dict[str, Any], platform: str
-    ) -> None:
-        """Stamp the openai-only credential knobs, and only for openai accounts.
+    def _platform_defaults(self, platform: str) -> Sub2APIProvisioningDefaults:
+        """The provisioning template as it applies to this platform.
 
-        ``model_mapping`` and the ``temp_unschedulable_*`` pair are openai account
-        fields: grok's upstream flow supplies its own model mapping, and writing
-        these onto a non-openai account only leaves dead keys on the record.
+        Single source of truth for every account default: the flat settings are the
+        base, `provisioning_defaults.per_platform` (config, over the built-in
+        entries) overrides per key. Nothing below branches on a platform name.
         """
-        if platform != "openai":
-            return
+        return self.provisioning_defaults.for_platform(platform)
+
+    def _apply_platform_credentials(
+        self,
+        credentials: dict[str, Any],
+        platform: str,
+        *,
+        keep_existing_base_url: bool = False,
+    ) -> None:
+        """Stamp the credential knobs the template owns for this platform.
+
+        Upstream accepts ``temp_unschedulable_*`` and ``model_mapping`` on every
+        platform — the live grok accounts carry both — so what is sent is decided by
+        what the template holds, not by which platform this is. A platform with no
+        model whitelist sends no ``model_mapping`` at all rather than an empty one,
+        leaving upstream's own runtime mapping in charge.
+        """
+        defaults = self._platform_defaults(platform)
         credentials["temp_unschedulable_enabled"] = (
-            self.provisioning_defaults.account_temporary_unschedulable
+            defaults.account_temporary_unschedulable
         )
         credentials["temp_unschedulable_rules"] = [
             self._serialize_rule(rule)
-            for rule in self.provisioning_defaults.account_temporary_unschedulable_rules
+            for rule in defaults.account_temporary_unschedulable_rules
         ]
-        credentials["model_mapping"] = {
-            model_name: model_name
-            for model_name in self.provisioning_defaults.account_model_whitelist
-        }
+        if defaults.account_model_whitelist:
+            credentials["model_mapping"] = {
+                model_name: model_name
+                for model_name in defaults.account_model_whitelist
+            }
+        if defaults.account_base_url:
+            # The template owns base_url the same way it owns the knobs above, so it
+            # also repairs an account that drifted onto the wrong host. The one
+            # exception is an API-key account: its host is the caller's (or the
+            # platform's API host), a different endpoint from the OAuth one.
+            if keep_existing_base_url:
+                credentials.setdefault("base_url", defaults.account_base_url)
+            else:
+                credentials["base_url"] = defaults.account_base_url
 
-    def _apply_openai_only_extra(self, extra: dict[str, Any], platform: str) -> None:
-        # The key names say it: `openai_oauth_responses_websockets_v2_*` describes the
-        # openai responses transport and means nothing on another platform's account.
-        if platform != "openai" or not self.provisioning_defaults.account_ws_mode:
+    def _apply_platform_extra(self, extra: dict[str, Any], platform: str) -> None:
+        defaults = self._platform_defaults(platform)
+        extra.update(defaults.account_extra)
+        # `openai_oauth_responses_websockets_v2_*` describes the openai responses
+        # transport, so it rides on the ws mode being set rather than on a platform
+        # name: platforms that have no such transport clear the mode in the template.
+        if not defaults.account_ws_mode:
             return
-        extra["openai_oauth_responses_websockets_v2_mode"] = (
-            self.provisioning_defaults.account_ws_mode
-        )
+        extra["openai_oauth_responses_websockets_v2_mode"] = defaults.account_ws_mode
         extra["openai_oauth_responses_websockets_v2_enabled"] = (
-            self.provisioning_defaults.account_ws_mode != "off"
+            defaults.account_ws_mode != "off"
         )
 
     def _merged_dict_from_account(

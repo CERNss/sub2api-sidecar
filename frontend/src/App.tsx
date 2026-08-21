@@ -8997,9 +8997,12 @@ function ProvisionForm({
     typeof startPayload?.oauth_redirect_uri === "string"
       ? startPayload.oauth_redirect_uri
       : FIXED_OAUTH_REDIRECT_URI;
+  // Not every authorization page redirects to a localhost callback — grok often
+  // just prints the code — so both shapes are offered. A bare code is matched back
+  // to this flow by flow_id, which the start response already handed us.
   const callbackPlaceholder = callbackDisabled
     ? "已有账号已配置完成"
-    : `${redirectUri}${redirectUri.includes("?") ? "&" : "?"}code=...&state=...`;
+    : `${redirectUri}${redirectUri.includes("?") ? "&" : "?"}code=...&state=...\n或直接粘贴授权码（如 ory_ac_...）`;
 
   async function startProvision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -9030,7 +9033,10 @@ function ProvisionForm({
         setCallbackUrl("");
         setStatus({ message: "已有账号已配置完成。", tone: "success" });
       } else {
-        setStatus({ message: "创建成功。完成 OAuth 后粘贴 localhost 回调 URL。", tone: "success" });
+        setStatus({
+          message: "创建成功。完成 OAuth 后粘贴回调 URL 或授权码。",
+          tone: "success"
+        });
       }
       onFlowChanged();
     } catch (error: unknown) {
@@ -9097,17 +9103,23 @@ function ProvisionForm({
     }
 
     if (!callbackUrl.trim()) {
-      setStatus({ message: "请先粘贴 localhost 回调地址。", tone: "error" });
+      setStatus({ message: "请先粘贴回调 URL 或授权码。", tone: "error" });
       return;
     }
 
     setBusyAction("complete");
-    setStatus({ message: "正在解析回调地址并完成 OAuth 绑定", tone: "info" });
+    setStatus({ message: "正在解析回调内容并完成 OAuth 绑定", tone: "info" });
 
     try {
       await requestJson<ApiPayload>("/provision/oauth/complete", {
         method: "POST",
-        body: JSON.stringify({ callback_url: callbackUrl.trim() })
+        // flow_id is what lets a bare authorization code (no state of its own) be
+        // matched back to this flow; a full callback URL carries its own state and
+        // ignores it.
+        body: JSON.stringify({
+          callback_url: callbackUrl.trim(),
+          flow_id: typeof startPayload?.flow_id === "string" ? startPayload.flow_id : null
+        })
       }, "完成绑定失败");
       setStatus({ message: "OAuth 绑定已完成。", tone: "success" });
       onFlowChanged();
@@ -9177,7 +9189,7 @@ function ProvisionForm({
 
         <form className="form-stack provision-callback-form" onSubmit={completeProvision}>
           <label className="field">
-            <span>Paste Callback URL</span>
+            <span>粘贴回调 URL 或授权码</span>
             <textarea
               value={callbackUrl}
               placeholder={callbackPlaceholder}

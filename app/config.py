@@ -4,7 +4,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -124,13 +124,125 @@ class Sub2APIProvisioningDefaults:
     account_platform: str = "openai"
     account_type: str = "oauth"
     account_apikey_type: str = "api_key"
+    # Scoped to `account_platform` — see DEFAULT_PLATFORM_ONLY_FIELDS. Other
+    # platforms send no websockets extras unless they set this themselves.
     account_ws_mode: str = "context_pool"
     account_concurrency: int = 5
     account_temporary_unschedulable: bool = True
     account_temporary_unschedulable_rules: tuple[TemporaryUnschedulableRule, ...] = (
         DEFAULT_TEMPORARY_UNSCHEDULABLE_RULES
     )
+    # Scoped to `account_platform` — see DEFAULT_PLATFORM_ONLY_FIELDS. Other
+    # platforms send no model_mapping unless they list their own models.
     account_model_whitelist: tuple[str, ...] = DEFAULT_ACCOUNT_MODEL_WHITELIST
+    # Written to `credentials.base_url` on account creation when non-empty. Empty
+    # for openai, whose account host upstream fills in itself.
+    account_base_url: str = ""
+    # Free-form keys merged into the account's `extra`. Platform switches that are
+    # neither derived from the OAuth exchange nor modelled as their own setting
+    # (grok's `grok_client_tool_cache_enabled`, for one) live here.
+    account_extra: Mapping[str, Any] = field(default_factory=dict)
+    account_priority: int = 1
+    account_rate_multiplier: int = 1
+    account_auto_pause_on_expired: bool = True
+    # Per-platform overrides of the settings above: platform name -> {field: value}.
+    # The flat fields are the base every platform starts from (except the two in
+    # DEFAULT_PLATFORM_ONLY_FIELDS, which only reach `account_platform`); an entry
+    # here only replaces the keys it names, so a config that never mentions
+    # per_platform keeps behaving exactly as it did before this field existed.
+    # Defaults to the built-in entries (see BUILTIN_PLATFORM_PROVISIONING_OVERRIDES)
+    # so a stock install — and any code constructing this template directly —
+    # already matches upstream.
+    per_platform: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=lambda: _copy_platform_overrides(
+            BUILTIN_PLATFORM_PROVISIONING_OVERRIDES
+        )
+    )
+
+    def for_platform(self, platform: str | None) -> "Sub2APIProvisioningDefaults":
+        """This template as it applies to one platform: base + that platform's overrides.
+
+        Every account-building path resolves its defaults through here, so adding a
+        platform is a config (or built-in table) edit rather than a new branch at
+        each call site.
+
+        Most base settings are genuinely cross-platform, but the two in
+        DEFAULT_PLATFORM_ONLY_FIELDS describe openai-shaped accounts and are scoped
+        to `account_platform` alone: a platform that does not name them explicitly
+        gets them emptied rather than inheriting. Silently stamping one platform's
+        model list (or the openai responses-transport keys) onto another platform's
+        account would misconfigure it in a way nothing downstream flags.
+        """
+        key = str(platform or "").strip()
+        overrides = dict(self.per_platform.get(key) or {}) if key else {}
+        resolved: dict[str, Any] = {}
+
+        if key and key != self.account_platform:
+            for name, unset_value in DEFAULT_PLATFORM_ONLY_FIELDS.items():
+                if name not in overrides:
+                    resolved[name] = unset_value
+
+        resolved.update(overrides)
+        if "account_extra" in resolved:
+            # The one merged key: base extras are common ground, the platform entry
+            # adds to them and wins per key. Every other override replaces outright.
+            resolved["account_extra"] = {
+                **dict(self.account_extra),
+                **dict(resolved["account_extra"]),
+            }
+        if not resolved:
+            return self
+        return replace(self, **resolved)
+
+
+# Base settings that describe an openai-shaped account rather than an account in
+# general, mapped to the value that means "do not send this". They apply to
+# `account_platform` (the configured default platform) and to no one else, so any
+# other platform must opt in through `per_platform.<platform>`:
+#   * account_model_whitelist -> `credentials.model_mapping`. A model list is only
+#     meaningful for the platform that serves those models; upstream falls back to
+#     its own runtime mapping when the key is absent.
+#   * account_ws_mode -> the `openai_oauth_responses_websockets_v2_*` extras, whose
+#     key names are openai's transport, not a general account feature.
+DEFAULT_PLATFORM_ONLY_FIELDS: Mapping[str, Any] = {
+    "account_model_whitelist": (),
+    "account_ws_mode": "",
+}
+
+
+# Platform overrides sidecar ships with, applied unless the config names the same
+# key for the same platform. They exist so a stock install already creates accounts
+# that match what upstream itself writes for that platform.
+BUILTIN_PLATFORM_PROVISIONING_OVERRIDES: Mapping[str, Mapping[str, Any]] = {
+    "grok": {
+        # Identity mapping over the models grok accounts serve, mirroring the
+        # hand-configured grok accounts upstream.
+        "account_model_whitelist": (
+            "composer-2.5",
+            "grok-4.5",
+            "grok-4.6",
+            "grok-4.6-latest",
+        ),
+        # The host upstream's own BuildAccountCredentials pins for grok OAuth
+        # accounts. (Not to be confused with the API-key host, api.x.ai — a
+        # different endpoint for a different account type.)
+        "account_base_url": "https://cli-chat-proxy.grok.com/v1",
+        "account_extra": {"grok_client_tool_cache_enabled": True},
+        # `openai_oauth_responses_websockets_v2_*` describes the openai responses
+        # transport; live grok accounts carry no such keys, and an empty ws mode is
+        # what suppresses them.
+        "account_ws_mode": "",
+        # Concurrency, priority, rate multiplier and the temporary-unschedulable
+        # rules are deliberately not overridden: grok accounts want the same values
+        # the base template already carries.
+    },
+}
+
+
+def _copy_platform_overrides(
+    overrides: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {platform: dict(values) for platform, values in overrides.items()}
 
 
 @dataclass(frozen=True)
@@ -516,6 +628,32 @@ def _provisioning_defaults_setting(config: Mapping[str, Any]) -> Sub2APIProvisio
         ),
         account_temporary_unschedulable_rules=_rules_setting(config),
         account_model_whitelist=_account_model_whitelist_setting(config),
+        account_base_url=_string_setting(
+            config,
+            "SUB2API_ACCOUNT_BASE_URL",
+            ("sub2api", "provisioning_defaults", "account_base_url"),
+            default="",
+        ),
+        account_extra=_account_extra_setting(config),
+        account_priority=_int_setting(
+            config,
+            "SUB2API_ACCOUNT_PRIORITY",
+            ("sub2api", "provisioning_defaults", "account_priority"),
+            default=1,
+        ),
+        account_rate_multiplier=_int_setting(
+            config,
+            "SUB2API_ACCOUNT_RATE_MULTIPLIER",
+            ("sub2api", "provisioning_defaults", "account_rate_multiplier"),
+            default=1,
+        ),
+        account_auto_pause_on_expired=_bool_setting(
+            config,
+            "SUB2API_ACCOUNT_AUTO_PAUSE_ON_EXPIRED",
+            ("sub2api", "provisioning_defaults", "account_auto_pause_on_expired"),
+            default=True,
+        ),
+        per_platform=_per_platform_provisioning_setting(config),
     )
 
 
@@ -850,6 +988,141 @@ def _account_model_whitelist_setting(config: Mapping[str, Any]) -> tuple[str, ..
         return DEFAULT_ACCOUNT_MODEL_WHITELIST
 
     return _parse_string_list_payload(payload, source=_config_label(config_path))
+
+
+def _account_extra_setting(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    env_name = "SUB2API_ACCOUNT_EXTRA_JSON"
+    env_value = _env_string(env_name)
+    if env_value is not None:
+        try:
+            payload = json.loads(env_value)
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(f"{env_name} must be valid JSON") from exc
+        return _parse_account_extra_payload(payload, source=env_name)
+
+    config_path = ("sub2api", "provisioning_defaults", "account_extra")
+    payload = _config_value(config, config_path)
+    if payload is None:
+        return {}
+    return _parse_account_extra_payload(payload, source=_config_label(config_path))
+
+
+def _parse_account_extra_payload(payload: Any, *, source: str) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ConfigurationError(f"{source} must be a mapping of extra keys to values")
+    extra: dict[str, Any] = {}
+    for key, value in payload.items():
+        name = str(key).strip()
+        if not name:
+            raise ConfigurationError(f"{source} contains an empty key name")
+        extra[name] = value
+    return extra
+
+
+# Which template fields a per-platform entry may override, and how each one's raw
+# value is read. Adding a knob to the platform dimension means adding it here — the
+# account builders never look at a platform name themselves.
+PER_PLATFORM_OVERRIDE_PARSERS: Mapping[str, Any] = {
+    "account_type": lambda value, source: _parse_platform_string(value, source=source),
+    "account_apikey_type": lambda value, source: _parse_platform_string(
+        value, source=source
+    ),
+    # Deliberately allowed to be empty: an empty ws mode is how a platform opts out
+    # of the openai websockets extras entirely.
+    "account_ws_mode": lambda value, source: _parse_platform_string(
+        value, source=source, allow_empty=True
+    ),
+    "account_base_url": lambda value, source: _parse_platform_string(
+        value, source=source, allow_empty=True
+    ),
+    "account_concurrency": lambda value, source: _parse_int_value(value, source=source),
+    "account_priority": lambda value, source: _parse_int_value(value, source=source),
+    "account_rate_multiplier": lambda value, source: _parse_int_value(
+        value, source=source
+    ),
+    "account_auto_pause_on_expired": lambda value, source: _parse_bool_value(
+        value, source=source
+    ),
+    "account_temporary_unschedulable": lambda value, source: _parse_bool_value(
+        value, source=source
+    ),
+    "account_temporary_unschedulable_rules": lambda value, source: _parse_rules_payload(
+        value, source=source
+    ),
+    # Empty list allowed: that is how a platform says "send no model_mapping".
+    "account_model_whitelist": lambda value, source: _parse_string_list_payload(
+        value, source=source, allow_empty=True
+    ),
+    "account_extra": lambda value, source: _parse_account_extra_payload(
+        value, source=source
+    ),
+}
+
+
+def _parse_platform_string(
+    raw_value: Any, *, source: str, allow_empty: bool = False
+) -> str:
+    if raw_value is None:
+        value = ""
+    elif isinstance(raw_value, str):
+        value = raw_value.strip()
+    elif isinstance(raw_value, (int, float, bool)):
+        value = str(raw_value).strip()
+    else:
+        raise ConfigurationError(f"{source} must be a string")
+    if not value and not allow_empty:
+        raise ConfigurationError(f"{source} must be a non-empty string")
+    return value
+
+
+def _per_platform_provisioning_setting(
+    config: Mapping[str, Any],
+) -> Mapping[str, Mapping[str, Any]]:
+    """Read `provisioning_defaults.per_platform`, overlaid on the built-in entries.
+
+    The overlay is per key, not per platform: configuring `grok.account_concurrency`
+    leaves grok's built-in model whitelist and base_url in place, so an operator
+    tuning one knob does not silently drop the rest of the shipped template.
+    """
+    env_name = "SUB2API_PROVISIONING_PER_PLATFORM_JSON"
+    env_value = _env_string(env_name)
+    if env_value is not None:
+        try:
+            payload = json.loads(env_value)
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(f"{env_name} must be valid JSON") from exc
+        source = env_name
+    else:
+        config_path = ("sub2api", "provisioning_defaults", "per_platform")
+        payload = _config_value(config, config_path)
+        source = _config_label(config_path)
+
+    overrides = _copy_platform_overrides(BUILTIN_PLATFORM_PROVISIONING_OVERRIDES)
+    if payload is None:
+        return overrides
+    if not isinstance(payload, Mapping):
+        raise ConfigurationError(f"{source} must be a mapping of platform to settings")
+
+    for platform, values in payload.items():
+        platform_name = str(platform).strip()
+        if not platform_name:
+            raise ConfigurationError(f"{source} contains an empty platform name")
+        platform_source = f"{source}.{platform_name}"
+        if not isinstance(values, Mapping):
+            raise ConfigurationError(f"{platform_source} must be a mapping")
+        resolved = overrides.setdefault(platform_name, {})
+        for key, value in values.items():
+            field_name = str(key).strip()
+            parser = PER_PLATFORM_OVERRIDE_PARSERS.get(field_name)
+            if parser is None:
+                raise ConfigurationError(
+                    f"{platform_source}.{field_name} is not an overridable "
+                    "provisioning default; supported keys: "
+                    f"{', '.join(sorted(PER_PLATFORM_OVERRIDE_PARSERS))}"
+                )
+            resolved[field_name] = parser(value, f"{platform_source}.{field_name}")
+
+    return overrides
 
 
 def _string_list_setting(

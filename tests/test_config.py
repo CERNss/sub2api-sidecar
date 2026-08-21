@@ -46,6 +46,12 @@ CONFIG_ENV_NAMES = (
     "SUB2API_ACCOUNT_MODEL_WHITELIST_JSON",
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE",
     "SUB2API_ACCOUNT_TEMPORARY_UNSCHEDULABLE_RULES_JSON",
+    "SUB2API_ACCOUNT_BASE_URL",
+    "SUB2API_ACCOUNT_EXTRA_JSON",
+    "SUB2API_ACCOUNT_PRIORITY",
+    "SUB2API_ACCOUNT_RATE_MULTIPLIER",
+    "SUB2API_ACCOUNT_AUTO_PAUSE_ON_EXPIRED",
+    "SUB2API_PROVISIONING_PER_PLATFORM_JSON",
     "SUB2API_API_KEY_GROUP_SELECTION",
     "SUB2API_USAGE_LOG_MAX_ITEMS",
     "SUB2API_REQUEST_MAX_RETRIES",
@@ -754,3 +760,292 @@ def test_settings_rejects_non_positive_api_keys_fetch_concurrency(
         Settings.from_env()
 
     assert "SUB2API_API_KEYS_FETCH_CONCURRENCY" in str(exc_info.value)
+
+
+def _write_provisioning_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provisioning_yaml: str
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        _database_config_yaml()
+        + """
+sub2api:
+  upstreams:
+    - id: main
+      base_url: http://mock-sub2api.local
+      admin_api_key_env: SUB2API_ADMIN_API_KEY
+  provisioning_defaults:
+"""
+        + provisioning_yaml,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+    monkeypatch.setenv("SUB2API_ADMIN_API_KEY", "test-key")
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+
+
+def _provisioning_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, yaml: str):
+    _clear_config_env(monkeypatch)
+    _write_provisioning_config(tmp_path, monkeypatch, yaml)
+    return Settings.from_env().default_sub2api_upstream.provisioning_defaults
+
+
+def test_provisioning_defaults_without_per_platform_keep_base_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config that never mentions per_platform behaves as it did before."""
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_concurrency: 7
+    account_model_whitelist:
+      - base-model
+""",
+    )
+
+    assert defaults.account_concurrency == 7
+    assert defaults.account_model_whitelist == ("base-model",)
+    assert defaults.account_ws_mode == "context_pool"
+    # The default platform gets the base template unchanged, and so does a caller
+    # that resolved no platform at all.
+    assert defaults.account_platform == "openai"
+    assert defaults.for_platform("openai") is defaults
+    assert defaults.for_platform(None) is defaults
+    assert defaults.for_platform("") is defaults
+
+
+def test_base_model_whitelist_and_ws_mode_do_not_leak_to_other_platforms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both describe an openai-shaped account, so they stop at account_platform."""
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_concurrency: 7
+    account_model_whitelist:
+      - base-model
+""",
+    )
+    anthropic = defaults.for_platform("anthropic")
+
+    # No model list and no websockets extras: an unlisted platform would otherwise
+    # be handed openai's models and openai's transport keys, silently.
+    assert anthropic.account_model_whitelist == ()
+    assert anthropic.account_ws_mode == ""
+    # Everything genuinely cross-platform still applies.
+    assert anthropic.account_concurrency == 7
+    assert anthropic.account_temporary_unschedulable is True
+    assert anthropic.account_temporary_unschedulable_rules == (
+        defaults.account_temporary_unschedulable_rules
+    )
+    assert anthropic.account_type == defaults.account_type
+
+
+def test_another_platform_opts_in_to_a_model_whitelist_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_model_whitelist:
+      - base-model
+    per_platform:
+      anthropic:
+        account_model_whitelist:
+          - claude-4
+      gemini:
+        account_ws_mode: context_pool
+""",
+    )
+
+    anthropic = defaults.for_platform("anthropic")
+    assert anthropic.account_model_whitelist == ("claude-4",)
+    # Opting into one of the two does not drag the other along.
+    assert anthropic.account_ws_mode == ""
+
+    gemini = defaults.for_platform("gemini")
+    assert gemini.account_ws_mode == "context_pool"
+    assert gemini.account_model_whitelist == ()
+
+
+def test_base_model_whitelist_follows_a_non_openai_default_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scope is `account_platform`, not the literal string "openai"."""
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_platform: anthropic
+    account_model_whitelist:
+      - claude-4
+""",
+    )
+
+    assert defaults.for_platform("anthropic").account_model_whitelist == ("claude-4",)
+    assert defaults.for_platform("openai").account_model_whitelist == ()
+
+
+def test_provisioning_defaults_ship_a_builtin_grok_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stock install: grok already matches what upstream writes for grok accounts."""
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_concurrency: 8
+""",
+    )
+    grok = defaults.for_platform("grok")
+
+    assert grok.account_model_whitelist == (
+        "composer-2.5",
+        "grok-4.5",
+        "grok-4.6",
+        "grok-4.6-latest",
+    )
+    assert grok.account_base_url == "https://cli-chat-proxy.grok.com/v1"
+    assert grok.account_extra == {"grok_client_tool_cache_enabled": True}
+    # No websockets extras for grok, and everything the entry does not name — the
+    # backoff rules, concurrency — still comes from the base template.
+    assert grok.account_ws_mode == ""
+    assert grok.account_concurrency == 8
+    assert grok.account_temporary_unschedulable is True
+    assert grok.account_temporary_unschedulable_rules == (
+        defaults.account_temporary_unschedulable_rules
+    )
+
+
+def test_per_platform_overrides_only_the_keys_it_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_concurrency: 5
+    per_platform:
+      grok:
+        account_concurrency: 12
+      anthropic:
+        account_model_whitelist:
+          - claude-4
+        account_base_url: https://api.anthropic.com/v1
+        account_extra:
+          anthropic_beta_enabled: true
+""",
+    )
+
+    grok = defaults.for_platform("grok")
+    assert grok.account_concurrency == 12
+    # Tuning one knob must not drop the rest of the shipped grok template.
+    assert grok.account_base_url == "https://cli-chat-proxy.grok.com/v1"
+    assert grok.account_model_whitelist[0] == "composer-2.5"
+
+    anthropic = defaults.for_platform("anthropic")
+    assert anthropic.account_model_whitelist == ("claude-4",)
+    assert anthropic.account_base_url == "https://api.anthropic.com/v1"
+    assert anthropic.account_extra == {"anthropic_beta_enabled": True}
+    assert anthropic.account_concurrency == 5
+
+    # Base is untouched by either entry.
+    assert defaults.account_concurrency == 5
+    assert defaults.account_base_url == ""
+
+
+def test_per_platform_account_extra_merges_over_the_base_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """extra is the one merged key: base extras are common ground, platform wins."""
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_extra:
+      shared_flag: true
+      overridden: base
+    per_platform:
+      grok:
+        account_extra:
+          overridden: grok
+""",
+    )
+
+    assert defaults.account_extra == {"shared_flag": True, "overridden": "base"}
+    assert defaults.for_platform("grok").account_extra == {
+        "shared_flag": True,
+        "overridden": "grok",
+    }
+
+
+def test_per_platform_can_switch_off_a_model_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    per_platform:
+      grok:
+        account_model_whitelist: []
+""",
+    )
+
+    assert defaults.for_platform("grok").account_model_whitelist == ()
+
+
+def test_per_platform_rejects_unknown_override_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_provisioning_config(
+        tmp_path,
+        monkeypatch,
+        """    per_platform:
+      grok:
+        account_notes: nope
+""",
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        Settings.from_env()
+
+    message = str(exc_info.value)
+    assert "account_notes" in message
+    assert "account_model_whitelist" in message
+
+
+def test_per_platform_can_be_supplied_as_json_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_config_env(monkeypatch)
+    _write_minimal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("OPENAI_OAUTH_REDIRECT_URI", "http://localhost:1455/callback")
+    monkeypatch.setenv(
+        "SUB2API_PROVISIONING_PER_PLATFORM_JSON",
+        '{"grok": {"account_ws_mode": "context_pool"}}',
+    )
+
+    defaults = Settings.from_env().default_sub2api_upstream.provisioning_defaults
+    grok = defaults.for_platform("grok")
+
+    assert grok.account_ws_mode == "context_pool"
+    assert grok.account_base_url == "https://cli-chat-proxy.grok.com/v1"
+
+
+def test_provisioning_defaults_read_the_new_template_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _provisioning_defaults(
+        tmp_path,
+        monkeypatch,
+        """    account_base_url: https://base.example.com/v1
+    account_priority: 3
+    account_rate_multiplier: 2
+    account_auto_pause_on_expired: false
+""",
+    )
+
+    assert defaults.account_base_url == "https://base.example.com/v1"
+    assert defaults.account_priority == 3
+    assert defaults.account_rate_multiplier == 2
+    assert defaults.account_auto_pause_on_expired is False

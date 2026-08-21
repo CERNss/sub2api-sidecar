@@ -118,7 +118,16 @@ class ProvisionApiKeyStartResponse(BaseModel):
 
 
 class ProvisionCompleteRequest(BaseModel):
+    # Historical name, widened meaning: this is whatever the operator pasted back
+    # from the authorization page — a full callback URL, a bare query string, or
+    # just the authorization code. Providers do not all redirect to a localhost
+    # callback (grok often only prints the code), so the code alone is accepted.
     callback_url: str = Field(..., min_length=1)
+    # Only needed when the pasted value carries no `state` (i.e. a bare code): the
+    # state is never the operator's to supply, sidecar stored the upstream one on
+    # the flow at start, so the flow is located by its id and the state read off
+    # it. Callers that paste a full callback URL can keep omitting this.
+    flow_id: str | None = Field(default=None)
 
 
 class ProvisionCompleteResponse(BaseModel):

@@ -451,6 +451,27 @@ https://sub2api.example.com/sidecar/
 - 创建 OAuth 账号时会把目标分组 ID 带入 payload：优先使用已有的同平台 `{email}_{platform}` 专属分组，其次使用同平台 landing pool，最后才创建新的专属分组
 - 如果已存在同名或同邮箱 OAuth 账号，`POST /provision/start` 会跳过授权登录，保留已有 OAuth token，只更新账号默认配置并确保绑定到目标分组
 
+这份模板还有一层平台维度：上面列的是 base，`provisioning_defaults.per_platform` 按平台名只覆盖它点名的键。
+不写 `per_platform` 时行为与没有这一层完全一致。可覆盖的键见 `config.example.yaml`，另有两个只在模板里出现的键：
+`account_base_url`（写进 `credentials.base_url`，留空则不发）和 `account_extra`（自由键值，合并进账号 `extra`）。
+
+base 里的字段分两类：
+
+- **全平台通用**：`account_type`、`account_apikey_type`、`account_concurrency`、`account_priority`、
+  `account_rate_multiplier`、`account_auto_pause_on_expired`、`account_temporary_unschedulable(_rules)`、
+  `account_base_url`、`account_extra`。停调规则是通用 HTTP 错误码，线上 grok 账号也是同一套。
+- **只作用于默认平台 `account_platform`（生产 = openai）**：`account_model_whitelist`、`account_ws_mode`。
+  这两项描述的是 openai 形态的账号（模型清单、`openai_oauth_responses_websockets_v2_*` 传输层键），
+  其他平台**不继承**，必须在 `per_platform.<平台>` 里显式配置才生效；不配就是不发 `model_mapping`、
+  不发 ws 键（上游对缺失 `model_mapping` 有运行时兜底）。否则将来给 anthropic / gemini 建号时，
+  会被静默写进 openai 的 `gpt-5.x` 模型映射，把账号配废。
+
+sidecar 内置了 grok 的平台默认值，不配也生效：模型白名单 `composer-2.5`、`grok-4.5`、`grok-4.6`、
+`grok-4.6-latest`（恒等映射），`account_base_url=https://cli-chat-proxy.grok.com/v1`（OAuth 账号用的
+代理域名，与 API Key 账号的 `api.x.ai` 不是一回事），`account_extra.grok_client_tool_cache_enabled=true`，
+以及空的 `account_ws_mode`（`openai_oauth_responses_websockets_v2_*` 是 openai 传输层的键，grok 账号不带）。
+停调规则与并发度等则沿用 base，与线上手工配置的 grok 账号一致。
+
 ## 安装依赖
 
 安装后端依赖：
