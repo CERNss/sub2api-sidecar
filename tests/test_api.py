@@ -101,7 +101,6 @@ EXPECTED_GROK_MODEL_MAPPING = {
     "composer-2.5": "composer-2.5",
     "grok-4.5": "grok-4.5",
     "grok-4.6": "grok-4.6",
-    "grok-4.6-latest": "grok-4.6-latest",
 }
 # The full shape a freshly created grok OAuth account carries: exchange fields the
 # white-list keeps, plus what the provisioning template stamps for grok. Mirrors the

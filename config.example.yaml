@@ -130,7 +130,6 @@ sub2api:
           - composer-2.5
           - grok-4.5
           - grok-4.6
-          - grok-4.6-latest
         # grok OAuth 账号走上游的代理域名；API Key 账号用的是 api.x.ai，两者不是一回事。
         account_base_url: https://cli-chat-proxy.grok.com/v1
         account_extra:

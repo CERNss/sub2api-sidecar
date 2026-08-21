@@ -221,7 +221,6 @@ BUILTIN_PLATFORM_PROVISIONING_OVERRIDES: Mapping[str, Mapping[str, Any]] = {
             "composer-2.5",
             "grok-4.5",
             "grok-4.6",
-            "grok-4.6-latest",
         ),
         # The host upstream's own BuildAccountCredentials pins for grok OAuth
         # accounts. (Not to be confused with the API-key host, api.x.ai — a

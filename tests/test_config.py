@@ -903,7 +903,6 @@ def test_provisioning_defaults_ship_a_builtin_grok_template(
         "composer-2.5",
         "grok-4.5",
         "grok-4.6",
-        "grok-4.6-latest",
     )
     assert grok.account_base_url == "https://cli-chat-proxy.grok.com/v1"
     assert grok.account_extra == {"grok_client_tool_cache_enabled": True}
