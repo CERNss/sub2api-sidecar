@@ -1708,9 +1708,15 @@ function apiKeyOwnerLabel(key: OrchestrationApiKey): string {
 }
 
 // One badge per platform, e.g. "openai · Codex 可用组 A". Platforms the user has no
-// group on are simply absent.
-function userDirectGroupTags(user: OrchestrationUser): { key: string; text: string; color?: string }[] {
-  return userDirectGroupSummaries(user).map((summary) => ({
+// group on are simply absent. With a platform scope, badges from other platforms are
+// trimmed so a scoped view never shows out-of-scope assignments.
+function userDirectGroupTags(
+  user: OrchestrationUser,
+  platformScope: string | null = null
+): { key: string; text: string; color?: string }[] {
+  return userDirectGroupSummaries(user)
+    .filter((summary) => !platformScope || summary.platform === platformScope)
+    .map((summary) => ({
     key: `${summary.platform ?? unknownPlatformLabel}-${summary.groupId}`,
     text: summary.platform ? `${summary.platform} · ${summary.groupName}` : summary.groupName,
     color: summary.platform ? platformTagColor(summary.platform) : undefined
@@ -5542,7 +5548,7 @@ function ExistingOrchestrationView({
   const targetGroupOptionGroups = useMemo(() => groupOptionsByPlatform(targetGroupOptions), [targetGroupOptions]);
   const graphGroupOptions = useMemo<GroupSelectOption[]>(
     () => [
-      ...groups.map((group) => buildGroupOption(group)),
+      ...platformScopedGroups.map((group) => buildGroupOption(group)),
       {
         value: ungroupedGraphFilterValue,
         label: "未分组",
@@ -5552,7 +5558,7 @@ function ExistingOrchestrationView({
         isVirtual: true
       }
     ],
-    [groups]
+    [platformScopedGroups]
   );
   const graphGroupFilterSet = useMemo(() => new Set(graphGroupFilterIds), [graphGroupFilterIds]);
   function updateGraphGroupFilters(values: string[]) {
@@ -5617,6 +5623,11 @@ function ExistingOrchestrationView({
       updateGraphGroupFilters([]);
     }
     setSelectedKeyIds((current) => current.filter((keyId) => keyPlatformById.get(keyId) === nextPlatform));
+    setGraphGroupFilterIds((current) => {
+      const next = current.filter((groupId) => groupId === ungroupedGraphFilterValue || !outOfScope(groupId));
+      return next.length === current.length ? current : next;
+    });
+    refreshGraphLayout();
   }
 
   const groupMigrationScope = useMemo(() => {
@@ -5677,6 +5688,20 @@ function ExistingOrchestrationView({
     );
   };
   const graph = useMemo(() => {
+    // The graph follows the panel's platform scope: with a scope active it only shows
+    // that platform's groups and accounts, the users that hold assets there, and the
+    // keys routing there. Cross-platform users keep only their in-scope edges.
+    const keyInScope = (key: OrchestrationApiKey) =>
+      !platformScope || groupPlatform(groupsById.get(idValue(key.group_id)) ?? null) === platformScope;
+    const scopedDirectSummaries = (user: OrchestrationUser) =>
+      platformScope
+        ? userDirectGroupSummaries(user).filter((summary) => summary.platform === platformScope)
+        : userDirectGroupSummaries(user);
+    const scopedDirectGroupIds = (user: OrchestrationUser): string[] =>
+      Array.from(new Set(scopedDirectSummaries(user).map((summary) => summary.groupId).filter(Boolean)));
+    const scopedAccounts = platformScope
+      ? accounts.filter((account) => normalizedPlatform(account.platform) === platformScope)
+      : accounts;
     const groupUserCounts = new Map<string, number>();
     const groupKeyCounts = new Map<string, number>();
     const groupAccountCounts = new Map<string, number>();
@@ -5685,7 +5710,7 @@ function ExistingOrchestrationView({
     const graphGroups = new Map<string, OrchestrationGroup>();
     const userKeyRows = users.flatMap((user) => {
       const userId = idValue(user.user_id);
-      const keys = apiKeysByUserId[userId] ?? (userId === selectedUserId ? apiKeys : []);
+      const keys = (apiKeysByUserId[userId] ?? (userId === selectedUserId ? apiKeys : [])).filter(keyInScope);
       return keys.map((key) => ({ user, userId, key }));
     });
     const keyGroupIdsByUserId = new Map<string, string[]>();
@@ -5699,8 +5724,14 @@ function ExistingOrchestrationView({
         keyGroupIdsByUserId.set(userId, [...existing, keyGroupId]);
       }
     });
+    const scopedUsers = platformScope
+      ? users.filter((user) => {
+          const userId = idValue(user.user_id);
+          return scopedDirectSummaries(user).length > 0 || (keyGroupIdsByUserId.get(userId) ?? []).length > 0;
+        })
+      : users;
     const relatedGroupIdsForUser = (user: OrchestrationUser, userId: string): string[] =>
-      Array.from(new Set([...userDirectGroupIds(user), ...(keyGroupIdsByUserId.get(userId) ?? [])]));
+      Array.from(new Set([...scopedDirectGroupIds(user), ...(keyGroupIdsByUserId.get(userId) ?? [])]));
     const upsertGraphGroup = (group: OrchestrationGroup) => {
       const groupValue = idValue(group.group_id);
       if (!groupValue) {
@@ -5710,11 +5741,11 @@ function ExistingOrchestrationView({
         graphGroups.set(groupValue, group);
       }
     };
-    groups.forEach(upsertGraphGroup);
-    users.forEach((user) => {
+    platformScopedGroups.forEach(upsertGraphGroup);
+    scopedUsers.forEach((user) => {
       // One entry per platform the user is assigned on, so a synthesized group node
       // still carries the platform it belongs to.
-      userDirectGroupSummaries(user).forEach((summary) => {
+      scopedDirectSummaries(user).forEach((summary) => {
         const groupValue = summary.groupId;
         groupUserCounts.set(groupValue, (groupUserCounts.get(groupValue) ?? 0) + 1);
         if (!graphGroups.has(groupValue)) {
@@ -5732,7 +5763,7 @@ function ExistingOrchestrationView({
         graphGroups.set(keyGroupValue, syntheticGroup(key.group_id, key.group_name || keyGroupValue, null));
       }
     });
-    accounts.forEach((account) => {
+    scopedAccounts.forEach((account) => {
       account.group_ids.forEach((groupId, index) => {
         const groupValue = idValue(groupId);
         if (!groupValue) {
@@ -5760,29 +5791,29 @@ function ExistingOrchestrationView({
     const groupOrder = Array.from(graphGroups.values())
       .map((group, fallbackIndex) => {
         const groupValue = idValue(group.group_id);
-        const userIndexes = users
-          .map((user, index) => ({ index, groupValues: userDirectGroupIds(user) }))
+        const userIndexes = scopedUsers
+          .map((user, index) => ({ index, groupValues: scopedDirectGroupIds(user) }))
           .filter((item) => item.groupValues.includes(groupValue))
           .map((item) => item.index);
         const keyIndexes = userKeyRows
           .map((row, index) => ({ index, groupValue: idValue(row.key.group_id) }))
           .filter((item) => item.groupValue === groupValue)
           .map((item) => item.index);
-        const accountIndexes = accounts
+        const accountIndexes = scopedAccounts
           .map((account, index) => ({ index, groupValues: account.group_ids.map(idValue) }))
           .filter((item) => item.groupValues.includes(groupValue))
           .map((item) => item.index);
         return {
           group,
           groupValue,
-          score: average([...userIndexes, ...keyIndexes, ...accountIndexes], users.length + fallbackIndex)
+          score: average([...userIndexes, ...keyIndexes, ...accountIndexes], scopedUsers.length + fallbackIndex)
         };
       })
       .sort((first, second) => first.score - second.score || first.groupValue.localeCompare(second.groupValue));
-    const userRows = users
+    const userRows = scopedUsers
       .map((user, fallbackIndex) => {
         const userId = idValue(user.user_id);
-        const userGroupValues = userDirectGroupIds(user);
+        const userGroupValues = scopedDirectGroupIds(user);
         const keyGroupIndexes = userKeyRows
           .filter((row) => row.userId === userId)
           .map((row) => groupOrder.findIndex((item) => item.groupValue === idValue(row.key.group_id)))
@@ -5809,7 +5840,7 @@ function ExistingOrchestrationView({
         groupOrder: groupOrder.findIndex((item) => item.groupValue === idValue(row.key.group_id))
       }))
       .sort((first, second) => first.userOrder - second.userOrder || first.groupOrder - second.groupOrder || idValue(first.key.key_id).localeCompare(idValue(second.key.key_id)));
-    const accountRows = accounts
+    const accountRows = scopedAccounts
       .map((account, fallbackIndex) => {
         const accountId = idValue(account.account_id);
         const relatedGroupIndexes = account.group_ids
@@ -5871,7 +5902,7 @@ function ExistingOrchestrationView({
         kind: "user",
         data: {
           userId,
-          directGroupIds: userDirectGroupIds(user),
+          directGroupIds: scopedDirectGroupIds(user),
           relatedGroupIds: relatedGroupIdsForUser(user, userId)
         },
         selected: userId === selectedUserId,
@@ -5881,7 +5912,7 @@ function ExistingOrchestrationView({
             title={userDisplayName(user)}
             subtitle={userEmailText(user)}
             tone={userId === selectedUserId ? "active" : "user"}
-            tags={userDirectGroupTags(user)}
+            tags={userDirectGroupTags(user, platformScope)}
             emptyTag="无直接用户组"
           />
         )
@@ -5935,7 +5966,7 @@ function ExistingOrchestrationView({
     );
     const nodes: OrchestrationGraphNode[] = [...keyNodes, ...userNodes, ...groupNodes, ...accountNodes];
     const edges: OrchestrationGraphEdge[] = [
-      ...accounts.flatMap((account) => {
+      ...scopedAccounts.flatMap((account) => {
         const accountId = idValue(account.account_id);
         return account.group_ids
           .map(idValue)
@@ -5951,10 +5982,10 @@ function ExistingOrchestrationView({
             })
           );
       }),
-      ...users
+      ...scopedUsers
         .flatMap((user) => {
           const userId = idValue(user.user_id);
-          return userDirectGroupIds(user).map((groupId) => {
+          return scopedDirectGroupIds(user).map((groupId) => {
             const isActive = userId === selectedUserId;
             return createGraphEdge({
               id: `group-user-${groupId}-${userId}`,
@@ -5989,7 +6020,7 @@ function ExistingOrchestrationView({
           const userId = idValue(user.user_id);
           // A key only gets its own route edge when it points somewhere other than any of
           // the user's per-platform groups.
-          const routesElsewhere = Boolean(keyGroupId) && !userDirectGroupIds(user).includes(keyGroupId);
+          const routesElsewhere = Boolean(keyGroupId) && !scopedDirectGroupIds(user).includes(keyGroupId);
           return routesElsewhere && (userId === selectedUserId || selectedKeySet.has(keyId));
         })
         .map(({ userId, key }) =>
@@ -6006,7 +6037,9 @@ function ExistingOrchestrationView({
           })
         )
     ];
-    const filteredGraph = filterGraphByGroups(nodes, edges, graphGroupFilterIds);
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const boundEdges = edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+    const filteredGraph = filterGraphByGroups(nodes, boundEdges, graphGroupFilterIds);
     const incompleteNodeIds = findIncompleteGraphNodeIds(filteredGraph.nodes, filteredGraph.edges);
     const laneNodes = filteredGraph.nodes.map((node) => {
       const lane: GraphNodeLane = incompleteNodeIds.has(node.id) ? "special" : "main";
@@ -6022,7 +6055,9 @@ function ExistingOrchestrationView({
     apiKeysByUserId,
     accounts,
     graphGroupFilterIds,
-    groups,
+    groupsById,
+    platformScope,
+    platformScopedGroups,
     selectedKeySet,
     selectedUserId,
     sourceGroupId,
