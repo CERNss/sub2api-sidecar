@@ -657,7 +657,7 @@ type CreditControlPolicy = {
   name: string;
   enabled: boolean;
   amount: number;
-  schedule_type: "one_time" | "recurring";
+  schedule_type: "one_time" | "recurring" | "interval";
   schedule?: string | null;
   timezone?: string | null;
   target_scope: "all" | "group" | "users" | "balance_threshold";
@@ -740,7 +740,7 @@ type CreditPolicyDraft = {
   name: string;
   enabled: boolean;
   amount: number;
-  schedule_type: "one_time" | "recurring";
+  schedule_type: "one_time" | "recurring" | "interval";
   schedule: string;
   timezone: string;
   target_scope: "all" | "group" | "users" | "balance_threshold";
@@ -7797,7 +7797,7 @@ function CreditControlView({
                         <Space wrap>
                           <Typography.Text strong>{policy.name}</Typography.Text>
                           <Tag color={policy.enabled ? "green" : "default"}>{policy.enabled ? "启用" : "停用"}</Tag>
-                          <Tag>{policy.schedule_type === "one_time" ? "一次性" : "周期"}</Tag>
+                          <Tag>{policy.schedule_type === "one_time" ? "一次性" : policy.schedule_type === "interval" ? "按间隔" : "周期"}</Tag>
                         </Space>
                       }
                       description={`${formatMoney(policy.amount)} · ${policy.schedule || "-"} · next ${policy.next_run_at ? formatDate(policy.next_run_at) : "-"}`}
@@ -7833,12 +7833,13 @@ function CreditControlView({
                   onChange={(value) => setPolicyDraft((current) => ({ ...current, schedule_type: value }))}
                   options={[
                     { label: "一次性", value: "one_time" },
-                    { label: "周期", value: "recurring" }
+                    { label: "周期", value: "recurring" },
+                    { label: "按间隔", value: "interval" }
                   ]}
                 />
                 <Input
                   value={policyDraft.schedule}
-                  placeholder={policyDraft.schedule_type === "one_time" ? "2026-05-14T10:00:00+08:00" : "0 9 * * 1"}
+                  placeholder={policyDraft.schedule_type === "one_time" ? "2026-05-14T10:00:00+08:00" : policyDraft.schedule_type === "interval" ? "60s / 5m / 1h" : "0 9 * * 1"}
                   disabled={defaultOnly}
                   onChange={(event) => setPolicyDraft((current) => ({ ...current, schedule: event.target.value }))}
                 />

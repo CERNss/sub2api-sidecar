@@ -4853,6 +4853,105 @@ def test_credit_control_policy_crud_preview_schedule_and_dedup(client) -> None:
     assert main.get_flow_store().get_credit_policy(policy_id) is None
 
 
+def test_credit_control_interval_policy_scans_with_users_only_refresh(client) -> None:
+    backend = FakeRotationSub2API()
+    login(client)
+    save_operational_snapshots(backend)
+    policy_payload = {
+        "name": "interval low balance recharge",
+        "enabled": True,
+        "amount": 2,
+        "schedule_type": "interval",
+        "schedule": "5m",
+        "timezone": "Asia/Shanghai",
+        "target_scope": "balance_threshold",
+        "target_balance_below": 5,
+        "reason_template": "interval top up",
+    }
+
+    with patch.object(requests.Session, "request", new=backend.request):
+        create = client.post("/api/credit-control/policies", json=policy_payload)
+
+    assert create.status_code == 200
+    item = create.json()["item"]
+    policy_id = item["policy_id"]
+    assert item["schedule_type"] == "interval"
+    assert item["schedule"] == "every 5m"
+    assert item["next_run_at"] is not None
+
+    service = main.get_credit_control_service()
+
+    class _RefreshSpy:
+        def __init__(self, real) -> None:
+            self.real = real
+            self.users_refresh_calls = 0
+            self.full_refresh_calls = 0
+
+        def refresh_users_snapshot(self):
+            self.users_refresh_calls += 1
+            return self.real.refresh_users_snapshot()
+
+        def refresh_before_mutation(self):
+            self.full_refresh_calls += 1
+            return self.real.refresh_before_mutation()
+
+    spy = _RefreshSpy(main.get_operational_data_refresher())
+    service.operational_data_refresher = spy
+    store = main.get_flow_store()
+
+    def force_due() -> None:
+        stored = store.get_credit_policy(policy_id)
+        stored.next_run_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        store.save_credit_policy(stored)
+
+    force_due()
+    with patch.object(requests.Session, "request", new=backend.request):
+        first_runs = service.tick()
+
+    assert len(first_runs) == 1
+    assert backend.balance_calls == [
+        {"user_id": 202, "balance": 2.0, "operation": "add", "notes": "interval top up"}
+    ]
+    advanced = store.get_credit_policy(policy_id)
+    assert advanced.next_run_at is not None
+    assert advanced.next_run_at > datetime.now(timezone.utc)
+
+    # The fake upstream applied the recharge (3.0 -> 5.0), so the next scan
+    # matches nobody and must not persist a run record.
+    force_due()
+    with patch.object(requests.Session, "request", new=backend.request):
+        second_runs = service.tick()
+        runs_response = client.get("/api/credit-control/runs")
+
+    assert second_runs == []
+    assert runs_response.status_code == 200
+    assert runs_response.json()["total"] == 1
+    assert spy.users_refresh_calls == 2
+    assert spy.full_refresh_calls == 0
+    empty_scan = store.get_credit_policy(policy_id)
+    assert empty_scan.next_run_at is not None
+    assert empty_scan.next_run_at > datetime.now(timezone.utc)
+
+
+def test_credit_control_interval_policy_rejects_invalid_intervals(client) -> None:
+    login(client)
+    payload = {
+        "name": "too fast",
+        "enabled": True,
+        "amount": 2,
+        "schedule_type": "interval",
+        "schedule": "30s",
+        "target_scope": "balance_threshold",
+        "target_balance_below": 5,
+    }
+    too_fast = client.post("/api/credit-control/policies", json=payload)
+    assert too_fast.status_code == 422
+    missing = client.post("/api/credit-control/policies", json={**payload, "schedule": None})
+    assert missing.status_code == 422
+    garbage = client.post("/api/credit-control/policies", json={**payload, "schedule": "soon"})
+    assert garbage.status_code == 422
+
+
 def test_credit_control_scheduler_status_requires_auth(client) -> None:
     response = client.get("/api/credit-control/scheduler")
     assert response.status_code == 401

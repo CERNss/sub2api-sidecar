@@ -51,8 +51,13 @@ class CreditControlError(Exception):
     """Raised when credit-control validation or execution fails."""
 
 
+MIN_INTERVAL_SECONDS = 60
+
+
 class OperationalDataRefresher(Protocol):
     def refresh_before_mutation(self) -> Any: ...
+
+    def refresh_users_snapshot(self) -> Any: ...
 
 
 class CreditControlService:
@@ -386,6 +391,11 @@ class CreditControlService:
         now = datetime.now(timezone.utc)
         records: list[CreditRechargeRunRecord] = []
         for policy in self.store.list_due_credit_policies(now):
+            if policy.schedule.kind == CreditScheduleKind.interval:
+                record = self._tick_interval_policy(policy, now=now)
+                if record is not None:
+                    records.append(record)
+                continue
             catch_up_guard = 0
             while policy.enabled and policy.next_run_at is not None and policy.next_run_at <= now:
                 scheduled_for = policy.next_run_at
@@ -410,6 +420,45 @@ class CreditControlService:
                     )
                     break
         return records
+
+    def _tick_interval_policy(
+        self, policy: CreditRechargePolicy, *, now: datetime
+    ) -> CreditRechargeRunRecord | None:
+        # Interval policies scan every tick, so failures stay contained to the
+        # policy (a full-refresh error must not abort the rest of the tick) and
+        # a failed users refresh skips the scan instead of acting on balances
+        # that may already include the previous occurrence's recharge.
+        scheduled_for = policy.next_run_at or now
+        try:
+            self._refresh_users_snapshot_before_scan()
+        except Exception:
+            logger.exception(
+                "Users snapshot refresh failed; skipping interval policy scan | policy_id=%s",
+                policy.policy_id,
+            )
+            return None
+        try:
+            record = self._execute_policy(
+                policy,
+                scheduled_for=scheduled_for,
+                actor="scheduler",
+                catch_up=False,
+            )
+        except Exception:
+            logger.exception(
+                "Interval policy execution failed | policy_id=%s", policy.policy_id
+            )
+            return None
+        if record.status == CreditRunStatus.skipped and not record.outcomes:
+            # Transient empty-scan record: nothing was persisted, keep it out
+            # of the scheduler's run count as well.
+            return None
+        return record
+
+    def _refresh_users_snapshot_before_scan(self) -> None:
+        if self.operational_data_refresher is None:
+            return
+        self.operational_data_refresher.refresh_users_snapshot()
 
     def list_runs(
         self, *, policy_id: str | None = None, limit: int = 50
@@ -481,6 +530,26 @@ class CreditControlService:
         existing = self.store.get_credit_run_by_occurrence(policy.policy_id, occurrence_key)
         if existing is not None:
             return existing
+        targets: list[CreditUserSnapshot] | None = None
+        if policy.schedule.kind == CreditScheduleKind.interval:
+            # An interval policy scans up to 1440 times a day; persisting a
+            # skipped run for every empty scan would drown the run history.
+            targets = self.resolve_target_scope(policy.target_scope)
+            if not targets:
+                self._advance_policy_after_occurrence(policy, scheduled_for, catch_up=catch_up)
+                return self._build_run_record(
+                    policy=policy,
+                    occurrence_key=occurrence_key,
+                    operation_type=CreditAuditOperation.automatic_recharge,
+                    status=CreditRunStatus.skipped,
+                    dry_run=False,
+                    amount=policy.amount,
+                    target_scope=policy.target_scope,
+                    reason=policy.reason_template,
+                    actor=actor,
+                    scheduled_for=scheduled_for,
+                    outcomes=[],
+                )
         placeholder = self._build_run_record(
             policy=policy,
             occurrence_key=occurrence_key,
@@ -501,7 +570,8 @@ class CreditControlService:
             if existing is not None:
                 return existing
             raise
-        targets = self.resolve_target_scope(policy.target_scope)
+        if targets is None:
+            targets = self.resolve_target_scope(policy.target_scope)
         record = self._execute_outcomes(
             targets=targets,
             amount=policy.amount,
@@ -869,6 +939,12 @@ class CreditControlService:
             raise CreditControlError("one-time policy start time must be in the future")
         if policy.schedule.end_at and policy.schedule.end_at < policy.schedule.start_at:
             raise CreditControlError("policy end time must be after start time")
+        if policy.schedule.kind == CreditScheduleKind.interval:
+            interval = policy.schedule.interval_seconds
+            if interval is None or interval < MIN_INTERVAL_SECONDS:
+                raise CreditControlError(
+                    f"interval policy requires interval_seconds >= {MIN_INTERVAL_SECONDS}"
+                )
 
     def _validate_target_scope(self, target_scope: CreditTargetScope) -> None:
         if target_scope.kind == CreditTargetScopeKind.explicit_user_ids and not target_scope.user_ids:
@@ -919,6 +995,18 @@ class CreditControlService:
         if schedule.kind == CreditScheduleKind.once:
             return current.astimezone(timezone.utc) if current >= reference else None
 
+        if schedule.kind == CreditScheduleKind.interval:
+            seconds = max(schedule.interval_seconds or MIN_INTERVAL_SECONDS, 1)
+            if current < reference:
+                # O(1) jump to the next grid point; a loop would walk every
+                # elapsed interval since start_at on each advancement.
+                elapsed = (reference - current).total_seconds()
+                steps = int(elapsed // seconds) + (1 if elapsed % seconds else 0)
+                current += timedelta(seconds=steps * seconds)
+            if schedule.end_at and current > schedule.end_at.astimezone(zone):
+                return None
+            return current.astimezone(timezone.utc)
+
         while current < reference:
             if schedule.kind == CreditScheduleKind.daily:
                 current += timedelta(days=1)
@@ -944,6 +1032,10 @@ class CreditControlService:
         if policy.schedule.kind == CreditScheduleKind.once:
             policy.next_run_at = None
             policy.enabled = False
+        elif policy.schedule.kind == CreditScheduleKind.interval:
+            # Always advance from now: replaying every missed interval after
+            # downtime would just hammer the upstream with no-op scans.
+            policy.next_run_at = self._next_run_at(policy.schedule, from_time=now)
         else:
             policy.next_run_at = self._next_run_at(
                 policy.schedule,

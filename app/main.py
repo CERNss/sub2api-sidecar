@@ -174,7 +174,11 @@ from app.services.api_key_automation import (
     ApiKeyCreateTargetError,
 )
 from app.services.dashboard import flow_detail_response, flow_summary_response
-from app.services.credit_control import CreditControlError, CreditControlService
+from app.services.credit_control import (
+    MIN_INTERVAL_SECONDS,
+    CreditControlError,
+    CreditControlService,
+)
 from app.services.credit_scheduler import CreditControlScheduler
 from app.services.group_usage import GroupUsageService
 from app.services.group_usage_scheduler import GroupUsageScheduler
@@ -1583,7 +1587,13 @@ def credit_policy_response(policy: CreditRechargePolicy) -> CreditControlPolicyR
         name=policy.name,
         enabled=policy.enabled,
         amount=policy.amount,
-        schedule_type="one_time" if policy.schedule.kind == CreditScheduleKind.once else "recurring",
+        schedule_type=(
+            "one_time"
+            if policy.schedule.kind == CreditScheduleKind.once
+            else "interval"
+            if policy.schedule.kind == CreditScheduleKind.interval
+            else "recurring"
+        ),
         schedule=policy_schedule_display(policy),
         timezone=policy.schedule.timezone,
         target_scope=target_scope,
@@ -1602,7 +1612,17 @@ def policy_schedule_display(policy: CreditRechargePolicy) -> str:
     start = policy.schedule.start_at.astimezone(ZoneInfo(policy.schedule.timezone))
     if policy.schedule.kind == CreditScheduleKind.once:
         return start.isoformat()
+    if policy.schedule.kind == CreditScheduleKind.interval:
+        return f"every {format_interval_seconds(policy.schedule.interval_seconds or 0)}"
     return f"{policy.schedule.kind.value} {start.strftime('%H:%M')}"
+
+
+def format_interval_seconds(seconds: int) -> str:
+    if seconds % 3600 == 0 and seconds >= 3600:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0 and seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 def credit_run_response(record: CreditRechargeRunRecord) -> CreditControlRunResponse:
@@ -1677,14 +1697,45 @@ def credit_schedule_from_request(
     payload: CreditControlPolicyRequest,
     zone: ZoneInfo,
 ) -> CreditRechargeSchedule:
+    if payload.schedule_type == "interval":
+        return CreditRechargeSchedule(
+            kind=CreditScheduleKind.interval,
+            start_at=datetime.now(zone),
+            timezone=str(zone),
+            interval_seconds=parse_interval_seconds(payload.schedule),
+        )
     start_at = parse_credit_schedule_start(payload.schedule, zone)
     if payload.schedule_type == "one_time":
         kind = CreditScheduleKind.once
     elif payload.schedule_type == "recurring":
         kind = parse_recurring_schedule_kind(payload.schedule)
     else:
-        raise CreditControlError("schedule_type must be one_time or recurring")
+        raise CreditControlError("schedule_type must be one_time, recurring, or interval")
     return CreditRechargeSchedule(kind=kind, start_at=start_at, timezone=str(zone))
+
+
+def parse_interval_seconds(value: str | None) -> int:
+    text = (value or "").strip().lower()
+    if not text:
+        raise CreditControlError("interval schedule requires an interval, e.g. 60s, 5m, 1h")
+    if text.startswith("every"):
+        text = text[len("every"):].strip()
+    unit_multipliers = {"s": 1, "m": 60, "h": 3600}
+    multiplier = 1
+    if text and text[-1] in unit_multipliers:
+        multiplier = unit_multipliers[text[-1]]
+        text = text[:-1].strip()
+    try:
+        seconds = int(float(text) * multiplier)
+    except ValueError as exc:
+        raise CreditControlError(
+            "interval must be a number with optional s/m/h unit, e.g. 60s, 5m, 1h"
+        ) from exc
+    if seconds < MIN_INTERVAL_SECONDS:
+        raise CreditControlError(
+            f"interval must be at least {MIN_INTERVAL_SECONDS} seconds"
+        )
+    return seconds
 
 
 def parse_credit_schedule_start(value: str | None, zone: ZoneInfo) -> datetime:

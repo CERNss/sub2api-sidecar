@@ -135,6 +135,14 @@ class OperationalDataRefresher:
             group_usage_count=group_usage_count,
         )
 
+    def refresh_users_snapshot(self, *, now: datetime | None = None) -> int:
+        collector = self.operational_data_collector
+        if not hasattr(collector, "collect_users_snapshot"):
+            raise OperationalDataRefreshError(
+                "operational data collector does not support users-only refresh"
+            )
+        return collector.collect_users_snapshot(now=now)
+
 
 class OperationalDataCollector:
     def __init__(
@@ -343,6 +351,30 @@ class OperationalDataCollector:
             finished_at=finished_at,
             error_message="; ".join(errors) if errors else None,
         )
+
+    def collect_users_snapshot(self, *, now: datetime | None = None) -> int:
+        # Interval-scan credit policies re-read balances every scheduler tick;
+        # a full collect() walks the upstream usage-log pagination (10-20s on
+        # prod), so they refresh just the users source instead.
+        started_at = now or datetime.now(timezone.utc)
+        users, status = self._fetch_source(
+            SOURCE_USERS,
+            self.client.list_users,
+            item_count=lambda value: len(value),
+        )
+        if status.status == "failed" or users is None:
+            raise OperationalDataRefreshError(
+                f"users snapshot refresh failed: {status.error_message or 'no payload'}"
+            )
+        self.store.save_operational_data_snapshot(
+            OperationalDataSnapshot(
+                source_key=self._source_key(SOURCE_USERS),
+                observed_at=started_at,
+                collected_at=datetime.now(timezone.utc),
+                payload=users,
+            )
+        )
+        return len(users)
 
     def _fetch_source(
         self,
@@ -751,6 +783,20 @@ class UpstreamOperationalDataCollector:
 class MultiUpstreamOperationalDataCollector:
     def __init__(self, collectors: list[UpstreamOperationalDataCollector]) -> None:
         self.collectors = collectors
+
+    def collect_users_snapshot(self, *, now: datetime | None = None) -> int:
+        # Credit control reads the un-prefixed "users" snapshot, which belongs
+        # to the default upstream (its collector is built with an empty
+        # source-key prefix). Non-default upstreams are irrelevant here.
+        target = next(
+            (item for item in self.collectors if item.collector.source_key_prefix == ""),
+            None,
+        )
+        if target is None:
+            raise OperationalDataRefreshError(
+                "no default upstream collector available for users refresh"
+            )
+        return target.collector.collect_users_snapshot(now=now)
 
     def collect(self, *, now: datetime | None = None) -> OperationalDataCollectionResult:
         started_at = now or datetime.now(timezone.utc)

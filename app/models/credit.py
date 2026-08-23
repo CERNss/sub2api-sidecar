@@ -32,6 +32,7 @@ class CreditScheduleKind(str, Enum):
     daily = "daily"
     weekly = "weekly"
     monthly = "monthly"
+    interval = "interval"
 
 
 class CreditRunStatus(str, Enum):
@@ -92,6 +93,7 @@ class CreditRechargeSchedule(BaseModel):
     start_at: datetime
     timezone: str = "Asia/Shanghai"
     end_at: datetime | None = None
+    interval_seconds: int | None = None
 
 
 class CreditRechargePolicy(BaseModel):
