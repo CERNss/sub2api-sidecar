@@ -1049,6 +1049,7 @@ class ProxyActionEnvelope(BaseModel):
 class ProxyAccountMoveResponse(BaseModel):
     account_id: str
     account_name: str = ""
+    platform: str | None = None
     from_proxy_id: str | None = None
     to_proxy_id: str | None = None
     status: str

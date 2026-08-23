@@ -190,6 +190,7 @@ from app.services.notification import (
 )
 from app.services.notification_delivery import NotificationDeliveryService
 from app.services.operational_data import (
+    SOURCE_ACCOUNTS,
     MultiUpstreamOperationalDataCollector,
     OperationalDataRefresher,
     OperationalDataRefreshError,
@@ -742,7 +743,30 @@ def proxy_health_runtime_settings_response(
     )
 
 
-def proxy_health_run_response(run: ProxyHealthRun) -> ProxyHealthRunResponse:
+def account_platform_index() -> dict[str, str]:
+    # Historical proxy-move records only store the account id/name; the platform
+    # is joined in at read time from the latest accounts snapshot.
+    snapshot = get_flow_store().get_latest_operational_data_snapshot(SOURCE_ACCOUNTS)
+    payload = snapshot.payload if snapshot else None
+    if not isinstance(payload, list):
+        return {}
+    index: dict[str, str] = {}
+    for account in payload:
+        if not isinstance(account, dict):
+            continue
+        account_id = account.get("id")
+        platform = account.get("platform")
+        if account_id in (None, "") or not platform:
+            continue
+        index[str(account_id)] = str(platform)
+    return index
+
+
+def proxy_health_run_response(
+    run: ProxyHealthRun,
+    platform_by_account_id: dict[str, str] | None = None,
+) -> ProxyHealthRunResponse:
+    platforms = platform_by_account_id or {}
     return ProxyHealthRunResponse(
         run_id=run.run_id,
         trigger=run.trigger,
@@ -756,6 +780,7 @@ def proxy_health_run_response(run: ProxyHealthRun) -> ProxyHealthRunResponse:
             ProxyAccountMoveResponse(
                 account_id=move.account_id,
                 account_name=move.account_name,
+                platform=platforms.get(str(move.account_id)),
                 from_proxy_id=move.from_proxy_id,
                 to_proxy_id=move.to_proxy_id,
                 status=move.status,
@@ -2379,9 +2404,9 @@ def proxy_health_rebalance(
         raise HTTPException(status_code=409, detail="探活或均衡正在进行中，请稍后重试")
     return JSONResponse(
         status_code=200,
-        content=ProxyHealthRunEnvelope(run=proxy_health_run_response(run)).model_dump(
-            mode="json"
-        ),
+        content=ProxyHealthRunEnvelope(
+            run=proxy_health_run_response(run, account_platform_index())
+        ).model_dump(mode="json"),
     )
 
 
@@ -2391,8 +2416,10 @@ def proxy_health_runs(
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
     runs = get_flow_store().list_proxy_health_runs(limit=max(1, min(limit, 200)))
+    platforms = account_platform_index()
     envelope = ProxyHealthRunsEnvelope(
-        items=[proxy_health_run_response(run) for run in runs], total=len(runs)
+        items=[proxy_health_run_response(run, platforms) for run in runs],
+        total=len(runs),
     )
     return JSONResponse(status_code=200, content=envelope.model_dump(mode="json"))
 
@@ -2407,9 +2434,9 @@ def proxy_health_run_detail(
         raise HTTPException(status_code=404, detail="Proxy health run not found")
     return JSONResponse(
         status_code=200,
-        content=ProxyHealthRunEnvelope(run=proxy_health_run_response(run)).model_dump(
-            mode="json"
-        ),
+        content=ProxyHealthRunEnvelope(
+            run=proxy_health_run_response(run, account_platform_index())
+        ).model_dump(mode="json"),
     )
 
 

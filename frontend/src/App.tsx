@@ -3188,6 +3188,7 @@ type ProxyHealthSettingsPayload = ApiPayload & { settings: ProxyHealthSettings &
 type ProxyRunMove = {
   account_id: string;
   account_name?: string;
+  platform?: string | null;
   from_proxy_id?: string | null;
   to_proxy_id?: string | null;
   status: string;
@@ -3242,6 +3243,7 @@ const emptyProxyForm = {
 type AccountHealthItem = ApiPayload & {
   id: unknown;
   name?: string;
+  platform?: string | null;
   status?: string;
   schedulable?: boolean | null;
   availability_status?: string;
@@ -4076,8 +4078,10 @@ function ProxyManagementView({
 }
 
 function ProxyMigrationsView({
+  platformScope,
   onAuthExpired
 }: {
+  platformScope: string | null;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [runs, setRuns] = useState<ProxyHealthRunItem[]>([]);
@@ -4106,6 +4110,16 @@ function ProxyMigrationsView({
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Moves carry the platform joined in by the backend; proxy-level runs without
+  // moves (probes, noops) are platform-neutral and stay visible under any scope.
+  const scopedMoves = (run: ProxyHealthRunItem) =>
+    platformScope
+      ? run.moves.filter((move) => normalizedPlatform(move.platform) === platformScope)
+      : run.moves;
+  const scopedRuns = platformScope
+    ? runs.filter((run) => run.moves.length === 0 || scopedMoves(run).length > 0)
+    : runs;
 
   const runColumns = [
     {
@@ -4143,10 +4157,19 @@ function ProxyMigrationsView({
     {
       title: "结果",
       key: "counts",
-      render: (_: unknown, run: ProxyHealthRunItem) =>
-        run.status === "noop"
-          ? "-"
-          : `移动 ${run.moved_count} / 跳过 ${run.skipped_count} / 失败 ${run.failed_count}`
+      render: (_: unknown, run: ProxyHealthRunItem) => {
+        if (run.status === "noop") {
+          return "-";
+        }
+        if (!platformScope) {
+          return `移动 ${run.moved_count} / 跳过 ${run.skipped_count} / 失败 ${run.failed_count}`;
+        }
+        const moves = scopedMoves(run);
+        const moved = moves.filter((move) => move.status === "moved").length;
+        const skipped = moves.filter((move) => move.status === "skipped").length;
+        const failed = moves.filter((move) => move.status === "failed").length;
+        return `移动 ${moved} / 跳过 ${skipped} / 失败 ${failed}`;
+      }
     }
   ];
 
@@ -4169,20 +4192,27 @@ function ProxyMigrationsView({
           style={{ marginTop: 16 }}
           rowKey={(run) => run.run_id}
           columns={runColumns}
-          dataSource={runs}
+          dataSource={scopedRuns}
           loading={runsLoading}
           pagination={false}
           expandable={{
-            rowExpandable: (run) => run.moves.length > 0,
+            rowExpandable: (run) => scopedMoves(run).length > 0,
             expandedRowRender: (run) => (
               <List
                 size="small"
-                dataSource={run.moves}
+                dataSource={scopedMoves(run)}
                 renderItem={(move) => (
                   <List.Item>
-                    <Typography.Text>
-                      {move.account_name || move.account_id}：{move.from_proxy_id ?? "直连"} → {move.to_proxy_id ?? "直连"}
-                    </Typography.Text>
+                    <Space size={6}>
+                      <Typography.Text>
+                        {move.account_name || move.account_id}：{move.from_proxy_id ?? "直连"} → {move.to_proxy_id ?? "直连"}
+                      </Typography.Text>
+                      {normalizedPlatform(move.platform) ? (
+                        <Tag color={platformTagColor(normalizedPlatform(move.platform)!)}>
+                          {normalizedPlatform(move.platform)}
+                        </Tag>
+                      ) : null}
+                    </Space>
                     <Tag
                       color={
                         move.status === "moved"
@@ -4215,8 +4245,10 @@ function ProxyMigrationsView({
 }
 
 function AccountHealthView({
+  platformScope,
   onAuthExpired
 }: {
+  platformScope: string | null;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [accounts, setAccounts] = useState<AccountHealthItem[]>([]);
@@ -4228,6 +4260,22 @@ function AccountHealthView({
   const [accountSettingsSaving, setAccountSettingsSaving] = useState(false);
   const [accountBusyIds, setAccountBusyIds] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState<StatusState>({ message: "", tone: "idle" });
+
+  // Health items report their own platform; disposal-run actions only carry the
+  // account id, so their platform is looked up through the loaded account list.
+  const scopedAccounts = platformScope
+    ? accounts.filter((account) => normalizedPlatform(account.platform) === platformScope)
+    : accounts;
+  const accountPlatformById = new Map(
+    accounts.map((account) => [idValue(account.id), normalizedPlatform(account.platform)])
+  );
+  const scopedRunActions = (run: AccountHealthRunItem) =>
+    platformScope
+      ? run.actions.filter((action) => accountPlatformById.get(String(action.account_id)) === platformScope)
+      : run.actions;
+  const scopedAccountRuns = platformScope
+    ? accountRuns.filter((run) => run.actions.length === 0 || scopedRunActions(run).length > 0)
+    : accountRuns;
 
   function markAccountBusy(accountId: string, busy: boolean) {
     setAccountBusyIds((previous) => {
@@ -4387,9 +4435,15 @@ function AccountHealthView({
             {
               title: "账号",
               key: "name",
-              render: (_: unknown, account: AccountHealthItem) => (
-                <strong>{account.name ?? idValue(account.id)}</strong>
-              )
+              render: (_: unknown, account: AccountHealthItem) => {
+                const platform = normalizedPlatform(account.platform);
+                return (
+                  <Space size={6}>
+                    <strong>{account.name ?? idValue(account.id)}</strong>
+                    {platform ? <Tag color={platformTagColor(platform)}>{platform}</Tag> : null}
+                  </Space>
+                );
+              }
             },
             {
               title: "上游状态",
@@ -4468,10 +4522,14 @@ function AccountHealthView({
               }
             }
           ]}
-          dataSource={accounts}
+          dataSource={scopedAccounts}
           loading={accountsLoading}
           pagination={false}
-          locale={{ emptyText: <Empty description="暂无账号" /> }}
+          locale={{
+            emptyText: (
+              <Empty description={platformScope ? `平台 ${platformScope} 上暂无账号` : "暂无账号"} />
+            )
+          }}
         />
         <div className="proxy-toolbar" style={{ marginTop: 24 }}>
           <div>
@@ -4501,19 +4559,27 @@ function AccountHealthView({
             {
               title: "结果",
               key: "counts",
-              render: (_: unknown, run: AccountHealthRunItem) =>
-                `驱逐 ${run.evicted_count} / 回归 ${run.rejoined_count} / 失败 ${run.failed_count}`
+              render: (_: unknown, run: AccountHealthRunItem) => {
+                if (!platformScope) {
+                  return `驱逐 ${run.evicted_count} / 回归 ${run.rejoined_count} / 失败 ${run.failed_count}`;
+                }
+                const actions = scopedRunActions(run);
+                const evicted = actions.filter((action) => action.action === "evict" && action.status === "done").length;
+                const rejoined = actions.filter((action) => action.action !== "evict" && action.status === "done").length;
+                const failed = actions.filter((action) => action.status !== "done").length;
+                return `驱逐 ${evicted} / 回归 ${rejoined} / 失败 ${failed}`;
+              }
             }
           ]}
-          dataSource={accountRuns}
+          dataSource={scopedAccountRuns}
           loading={accountRunsLoading}
           pagination={false}
           expandable={{
-            rowExpandable: (run) => run.actions.length > 0,
+            rowExpandable: (run) => scopedRunActions(run).length > 0,
             expandedRowRender: (run) => (
               <List
                 size="small"
-                dataSource={run.actions}
+                dataSource={scopedRunActions(run)}
                 renderItem={(action) => (
                   <List.Item>
                     <Typography.Text>
@@ -6586,6 +6652,22 @@ function ExistingOrchestrationView({
                 { label: "账号健康", value: "accountHealth", icon: <HeartOutlined /> }
               ]}
             />
+            {/* Workbench-wide platform scope: every tab below reads it, so it lives
+                beside the tab switcher rather than inside any single tab's form. */}
+            <Select
+              className="workbench-platform-select"
+              classNames={{ popup: { root: "platform-select-popup" } }}
+              value={platformFilter}
+              onChange={(value) => updatePlatformScope(value ?? allPlatformsFilterValue)}
+              options={platformFilterOptions}
+              optionRender={renderPlatformFilterOption}
+              labelRender={(item) =>
+                renderPlatformFilterBadge(
+                  platformFilterOptions.find((candidate) => candidate.value === item.value),
+                  item.label
+                )
+              }
+            />
             {isRelationshipTab ? (
               <AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadResources(selectedUserId)}>
                 刷新
@@ -6601,27 +6683,6 @@ function ExistingOrchestrationView({
                 <span className="manual-zone-step">1</span>
                 <Typography.Text strong id="manual-zone-target-title">选择对象</Typography.Text>
               </header>
-
-              <div className="ant-field manual-platform-field">
-                <Typography.Text strong>平台范围</Typography.Text>
-                <Select
-                  className="manual-platform-select"
-                  // The option rows render a platform badge, which needs the centered flex
-                  // layout `.platform-select-popup` applies; the popup is portalled, so the
-                  // hook has to be handed to antd rather than inherited from this subtree.
-                  classNames={{ popup: { root: "platform-select-popup" } }}
-                  value={platformFilter}
-                  onChange={(value) => updatePlatformScope(value ?? allPlatformsFilterValue)}
-                  options={platformFilterOptions}
-                  optionRender={renderPlatformFilterOption}
-                  labelRender={(item) =>
-                    renderPlatformFilterBadge(
-                      platformFilterOptions.find((candidate) => candidate.value === item.value),
-                      item.label
-                    )
-                  }
-                />
-              </div>
 
               <AntSegmented
                 className="manual-mode-switch"
@@ -6931,14 +6992,19 @@ function ExistingOrchestrationView({
           <DynamicOrchestrationView
             selectedUpstreamId={selectedUpstreamId}
             defaultUpstreamId={defaultUpstreamId}
+            platformScope={platformScope}
             onAuthExpired={onAuthExpired}
             onRunRecorded={() => setRecordsRefreshSignal((value) => value + 1)}
           />
         ) : null}
       </section>
 
-      {activeTab === "migrations" ? <ProxyMigrationsView onAuthExpired={onAuthExpired} /> : null}
-      {activeTab === "accountHealth" ? <AccountHealthView onAuthExpired={onAuthExpired} /> : null}
+      {activeTab === "migrations" ? (
+        <ProxyMigrationsView platformScope={platformScope} onAuthExpired={onAuthExpired} />
+      ) : null}
+      {activeTab === "accountHealth" ? (
+        <AccountHealthView platformScope={platformScope} onAuthExpired={onAuthExpired} />
+      ) : null}
       {isRelationshipTab ? (
         <>
 
@@ -8412,11 +8478,13 @@ function RunRecordsPanel({
 function DynamicOrchestrationView({
   selectedUpstreamId,
   defaultUpstreamId,
+  platformScope,
   onAuthExpired,
   onRunRecorded
 }: {
   selectedUpstreamId: string;
   defaultUpstreamId: string;
+  platformScope: string | null;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onRunRecorded: () => void;
 }) {
@@ -8437,10 +8505,14 @@ function DynamicOrchestrationView({
   const [running, setRunning] = useState<"preview" | "run" | null>(null);
   const [selectedPoolCandidateIds, setSelectedPoolCandidateIds] = useState<string[]>([]);
 
-  const selectedGroups = candidates.filter((group) => group.rotation_selected || group.selected);
-  const selectedLandingGroups = candidates.filter((group) => group.landing_selected);
-  const landingEligibleGroups = candidates.filter((group) => !group.is_subscription);
-  const rotationEligibleGroups = candidates.filter((group) => group.rotation_supported);
+  // The workbench-level platform scope narrows the whole rotation-pool view.
+  const scopedCandidates = platformScope
+    ? candidates.filter((group) => normalizedPlatform(group.platform) === platformScope)
+    : candidates;
+  const selectedGroups = scopedCandidates.filter((group) => group.rotation_selected || group.selected);
+  const selectedLandingGroups = scopedCandidates.filter((group) => group.landing_selected);
+  const landingEligibleGroups = scopedCandidates.filter((group) => !group.is_subscription);
+  const rotationEligibleGroups = scopedCandidates.filter((group) => group.rotation_supported);
   const selectedLandingCandidateGroups = landingEligibleGroups.filter((group) =>
     selectedPoolCandidateIds.includes(idValue(group.group_id))
   );
@@ -8451,7 +8523,7 @@ function DynamicOrchestrationView({
   const rotationPoolCandidates = selectedRotationCandidateGroups.filter(
     (group) => !(group.rotation_selected || group.selected)
   );
-  const poolCandidateOptions = candidates.map((group) =>
+  const poolCandidateOptions = scopedCandidates.map((group) =>
     buildGroupOption({
       group_id: group.group_id,
       name: group.name,

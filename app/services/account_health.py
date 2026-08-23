@@ -66,6 +66,7 @@ class AccountHealthService:
             item = {
                 "id": account.get("id"),
                 "name": account.get("name"),
+                "platform": account.get("platform"),
                 "status": account.get("status"),
                 "schedulable": account.get("schedulable"),
                 "availability_status": account.get("availability_status"),

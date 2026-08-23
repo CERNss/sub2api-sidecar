@@ -3157,6 +3157,11 @@ pre {
   width: 100%;
 }
 
+/* Header-level platform scope beside the workbench tab switcher. */
+.workbench-platform-select {
+  min-width: 168px;
+}
+
 /* Fills the option row so the group count stays pinned to the right edge even once the row
    itself is laid out as a flex line (see .platform-select-popup below). */
 .platform-filter-option {
