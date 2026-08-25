@@ -100,10 +100,13 @@ DEFAULT_TEMPORARY_UNSCHEDULABLE_RULES: tuple[TemporaryUnschedulableRule, ...] = 
 
 
 DEFAULT_ACCOUNT_MODEL_WHITELIST: tuple[str, ...] = (
-    "gpt-5.3-codex",
-    "gpt-5.4",
-    "gpt-5.4-mini",
+    "codex-auto-review",
+    "gpt-5.3-codex-spark",
     "gpt-5.5",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-image-2",
 )
 
 
@@ -127,7 +130,7 @@ class Sub2APIProvisioningDefaults:
     # Scoped to `account_platform` — see DEFAULT_PLATFORM_ONLY_FIELDS. Other
     # platforms send no websockets extras unless they set this themselves.
     account_ws_mode: str = "context_pool"
-    account_concurrency: int = 5
+    account_concurrency: int = 6
     account_temporary_unschedulable: bool = True
     account_temporary_unschedulable_rules: tuple[TemporaryUnschedulableRule, ...] = (
         DEFAULT_TEMPORARY_UNSCHEDULABLE_RULES
@@ -617,7 +620,7 @@ def _provisioning_defaults_setting(config: Mapping[str, Any]) -> Sub2APIProvisio
             config,
             "SUB2API_ACCOUNT_CONCURRENCY",
             ("sub2api", "provisioning_defaults", "account_concurrency"),
-            default=5,
+            default=6,
         ),
         account_temporary_unschedulable=_bool_setting(
             config,

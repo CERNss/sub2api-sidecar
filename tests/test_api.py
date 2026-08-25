@@ -65,10 +65,13 @@ EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES = [
     },
 ]
 EXPECTED_MODEL_WHITELIST_MAPPING = {
-    "gpt-5.3-codex": "gpt-5.3-codex",
-    "gpt-5.4": "gpt-5.4",
-    "gpt-5.4-mini": "gpt-5.4-mini",
+    "codex-auto-review": "codex-auto-review",
+    "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
     "gpt-5.5": "gpt-5.5",
+    "gpt-5.6-luna": "gpt-5.6-luna",
+    "gpt-5.6-sol": "gpt-5.6-sol",
+    "gpt-5.6-terra": "gpt-5.6-terra",
+    "gpt-image-2": "gpt-image-2",
 }
 EXPECTED_DEFAULT_SCHEDULED_TEST_PLAN = {
     "model_id": "gpt-5.5",
@@ -580,7 +583,7 @@ class FakeRotationSub2API:
             )
             assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
             assert json["group_ids"]
-            assert json["concurrency"] == 5
+            assert json["concurrency"] == 6
             assert json["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
             return FakeResponse(
                 200,
@@ -1370,7 +1373,7 @@ def fake_sub2api_request(self, method: str, url: str, json=None, params=None, ti
         assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
         assert json["extra"]["openai_oauth_responses_websockets_v2_mode"] == "context_pool"
         assert json["extra"]["openai_oauth_responses_websockets_v2_enabled"] is True
-        assert json["concurrency"] == 5
+        assert json["concurrency"] == 6
         return FakeResponse(
             200,
             {
@@ -2409,7 +2412,7 @@ def test_sub2api_client_builds_grok_oauth_account_payload() -> None:
     # base template, not from a grok override).
     assert payload["priority"] == 1
     assert payload["rate_multiplier"] == 1
-    assert payload["concurrency"] == 5
+    assert payload["concurrency"] == 6
 
 
 def test_sub2api_client_grok_oauth_credentials_skip_unknown_exchange_fields() -> None:
@@ -2700,7 +2703,7 @@ def test_sub2api_client_configures_existing_oauth_account_preserving_credentials
     # account must not drop the groups it already serves.
     assert payload["group_ids"] == [11, 33, 77]
     assert payload["confirm_mixed_channel_risk"] is True
-    assert payload["concurrency"] == 5
+    assert payload["concurrency"] == 6
     assert payload["credentials"]["access_token"] == "keep-access"
     assert payload["credentials"]["refresh_token"] == "keep-refresh"
     assert payload["credentials"]["id_token"] == "keep-id"
@@ -2750,7 +2753,7 @@ def test_sub2api_client_sends_no_model_mapping_for_an_unconfigured_platform() ->
     # The cross-platform half of the template still applies.
     assert credentials["temp_unschedulable_enabled"] is True
     assert credentials["temp_unschedulable_rules"] == EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES
-    assert calls[0]["json"]["concurrency"] == 5
+    assert calls[0]["json"]["concurrency"] == 6
 
 
 def test_sub2api_client_sends_a_model_mapping_a_platform_opted_into() -> None:
@@ -3816,7 +3819,7 @@ def test_sub2api_client_builds_apikey_account_payload() -> None:
     assert payload["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
     assert payload["credentials"]["temp_unschedulable_enabled"] is True
     assert payload["group_ids"] == ["g-7"]
-    assert payload["concurrency"] == 5
+    assert payload["concurrency"] == 6
     assert payload["extra"] == {}
     # API key accounts must not carry OAuth token fields.
     assert "access_token" not in payload["credentials"]
@@ -3859,7 +3862,7 @@ def test_provision_apikey_start_creates_account_without_oauth(client) -> None:
             assert json["credentials"]["model_mapping"] == EXPECTED_MODEL_WHITELIST_MAPPING
             assert json["credentials"]["temp_unschedulable_enabled"] is True
             assert json["group_ids"] == ["g-1"]
-            assert json["concurrency"] == 5
+            assert json["concurrency"] == 6
             assert "access_token" not in json["credentials"]
             return FakeResponse(200, {"account_id": "oa-key-1", "name": json["name"]})
         if method == "POST" and path == "/api/v1/admin/scheduled-test-plans":
@@ -7748,7 +7751,7 @@ def test_provision_start_configures_existing_oauth_account_without_authorization
     assert update_payload["platform"] == "openai"
     assert update_payload["type"] == "oauth"
     assert update_payload["group_ids"] == [77]
-    assert update_payload["concurrency"] == 5
+    assert update_payload["concurrency"] == 6
     assert update_payload["credentials"]["access_token"] == "keep-access"
     assert update_payload["credentials"]["refresh_token"] == "keep-refresh"
     assert update_payload["credentials"]["temp_unschedulable_enabled"] is True

@@ -81,12 +81,13 @@ sub2api:
     account_apikey_type: api_key
     account_ws_mode: context_pool
     account_model_whitelist:
-      - gpt-5.3-codex
-      - gpt-5.4
-      - gpt-5.4-mini
-      - gpt-5.5
       - codex-auto-review
-      - gpt-images-2
+      - gpt-5.3-codex-spark
+      - gpt-5.5
+      - gpt-5.6-luna
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - gpt-image-2
     account_temporary_unschedulable: true
     account_temporary_unschedulable_rules:
       - error_code: "529"
