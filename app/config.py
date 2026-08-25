@@ -102,6 +102,7 @@ DEFAULT_TEMPORARY_UNSCHEDULABLE_RULES: tuple[TemporaryUnschedulableRule, ...] = 
 DEFAULT_ACCOUNT_MODEL_WHITELIST: tuple[str, ...] = (
     "codex-auto-review",
     "gpt-5.3-codex-spark",
+    "gpt-5.4-mini",
     "gpt-5.5",
     "gpt-5.6-luna",
     "gpt-5.6-sol",
