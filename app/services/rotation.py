@@ -1732,6 +1732,7 @@ class RotationService:
         trigger_type: RotationTrigger = RotationTrigger.automatic_api,
         *,
         dry_run: bool = False,
+        platform: str | None = None,
     ) -> OrchestrationRunRecord:
         runtime_config = self.get_auto_rotation_config()
         if not dry_run and not runtime_config.enabled:
@@ -1744,13 +1745,31 @@ class RotationService:
         if not dry_run:
             self._refresh_operational_data_before_mutation()
 
+        group_index = self._upstream_group_index()
+        # An optional platform scope, applied once, here: the pool is the single
+        # entry point every later step reads from. The assignment sync only ever
+        # touches users whose current group is in the pool it is handed, the
+        # in-pool filter below rebuilds the candidate list from the same pool, and
+        # the balancing loops bucket that pool per platform anyway -- so dropping
+        # the other platforms' pool rows leaves their users, groups and assignments
+        # completely untouched without the rotation logic itself knowing about the
+        # scope. None (the interval scheduler, and any caller that omits it) keeps
+        # the previous whole-pool behaviour.
+        wanted_platform = self._normalize_platform(platform)
+        if wanted_platform is not None:
+            pool_groups = self._pool_groups_on_platform(pool_groups, wanted_platform, group_index)
+            landing_groups = self._pool_groups_on_platform(landing_groups, wanted_platform, group_index)
+            if not pool_groups:
+                raise RotationPoolEmptyError(
+                    f"No rotation pool groups are available on platform {wanted_platform}"
+                )
+
         sync_result = self._sync_existing_user_assignments(
             pool_groups,
             landing_groups=landing_groups,
             runtime_config=runtime_config,
             persist=not dry_run,
         )
-        group_index = self._upstream_group_index()
         # Keyed per (user, platform): one user can hold a dedicated group on each
         # platform, and those bindings rotate independently of one another.
         assignments_by_key = {
@@ -3725,6 +3744,26 @@ class RotationService:
             self._normalize_key(group.group_id) == assignment_group_key
             for group in pool_groups
         )
+
+    def _pool_groups_on_platform(
+        self,
+        pool_groups: list[RotationPoolGroup],
+        platform: str,
+        group_index: dict[str, dict[str, Any]] | None = None,
+    ) -> list[RotationPoolGroup]:
+        group_index = group_index if group_index is not None else self._upstream_group_index()
+        return [
+            pool_group
+            for pool_group in pool_groups
+            if self._normalize_platform(self._pool_group_platform(pool_group, group_index))
+            == platform
+        ]
+
+    def _normalize_platform(self, value: Any) -> str | None:
+        # Callers spell a platform however the upstream did ("OpenAI" on one row,
+        # "openai" on another); casing is noise, not identity.
+        text = str(value or "").strip().lower()
+        return text or None
 
     def _normalize_key(self, value: Any) -> str:
         return str(value)

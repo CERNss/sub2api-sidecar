@@ -822,6 +822,10 @@ class RotationExecutionResponse(BaseModel):
 
 class AutoRotationRunRequest(BaseModel):
     dry_run: bool = False
+    # Optional scope: restrict the run to the rotation/landing pool groups of one
+    # platform. None -- the default, and what the interval scheduler keeps using --
+    # runs the whole stored pool exactly as before.
+    platform: str | None = None
 
 
 class AutoRotationRunResponse(BaseModel):

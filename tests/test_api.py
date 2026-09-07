@@ -9512,6 +9512,136 @@ def test_auto_rotation_balances_inside_each_platform_only(client, monkeypatch) -
     assert store.get_user_assignment(101, "grok") is None
 
 
+def two_platform_rotation_backend() -> FakeRotationSub2API:
+    """openai load sits in group 22, grok load in group 72; 11 and 71 are idle."""
+    backend = FakeRotationSub2API()
+    backend.users = [
+        {
+            "id": 101,
+            "email": "openai-busy@example.com",
+            "name": "openai-busy@example.com",
+            "status": "active",
+            "group_id": 22,
+            "group_name": "rotation-high",
+        },
+        {
+            "id": 202,
+            "email": "openai-idle@example.com",
+            "name": "openai-idle@example.com",
+            "status": "active",
+            "group_id": 22,
+            "group_name": "rotation-high",
+        },
+        {
+            "id": 808,
+            "email": "grok-busy@example.com",
+            "name": "grok-busy@example.com",
+            "status": "active",
+            "group_id": 72,
+            "group_name": "grok-high",
+        },
+        {
+            "id": 909,
+            "email": "grok-idle@example.com",
+            "name": "grok-idle@example.com",
+            "status": "active",
+            "group_id": 72,
+            "group_name": "grok-high",
+        },
+    ]
+    backend.user_api_keys[101] = [{"id": "key-101", "group_id": 22}]
+    backend.user_api_keys[202] = [{"id": "key-202", "group_id": 22}]
+    backend.user_api_keys[808] = [{"id": "key-808", "group_id": 72}]
+    backend.user_api_keys[909] = [{"id": "key-909", "group_id": 72}]
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=22, actual_cost=1.5),
+        usage_log_item(user_id=202, group_id=22, actual_cost=0.2),
+        usage_log_item(user_id=808, group_id=72, actual_cost=1.0),
+        usage_log_item(user_id=909, group_id=72, actual_cost=0.1),
+    ]
+    return backend
+
+
+def seed_two_platform_rotation_pool(store) -> None:
+    for priority, (group_id, group_name, platform) in enumerate(
+        [
+            (11, "rotation-low", "openai"),
+            (22, "rotation-high", "openai"),
+            (71, "grok-low", "grok"),
+            (72, "grok-high", "grok"),
+        ]
+    ):
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=group_id,
+                group_name=group_name,
+                platform=platform,
+                status="active",
+                is_exclusive=True,
+                priority=priority,
+            )
+        )
+
+
+def test_auto_rotation_platform_scope_rotates_only_that_platform(client, monkeypatch) -> None:
+    backend = two_platform_rotation_backend()
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        seed_two_platform_rotation_pool(store)
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run", json={"platform": "openai"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    # The scoped run drops the grok pool rows before anything else reads the pool, so
+    # the grok users are never candidates: only openai's busiest user moves, and the
+    # grok groups are left exactly as they were.
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 22, "new_group_id": 11},
+    ]
+    assert {str(item["user_id"]) for item in payload["moved"]} == {"101"}
+    assert {str(item["user_id"]) for item in payload["skipped"]} == {"202"}
+    store = main.get_flow_store()
+    assert str(store.get_user_assignment(101, "openai").current_group_id) == "11"
+    # Not merely "not moved": the grok bindings were never even synced into the
+    # local assignment table by this run.
+    assert store.get_user_assignment(808, "grok") is None
+    assert store.get_user_assignment(909, "grok") is None
+
+
+def test_auto_rotation_without_platform_rotates_every_platform(client, monkeypatch) -> None:
+    backend = two_platform_rotation_backend()
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        seed_two_platform_rotation_pool(store)
+        with patch.object(requests.Session, "request", new=backend.request):
+            # No `platform` field at all: the whole stored pool still runs, which is
+            # what the interval scheduler relies on.
+            response = auto_client.post("/rotation/auto/run", json={"dry_run": False})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 22, "new_group_id": 11},
+        {"user_id": 808, "old_group_id": 72, "new_group_id": 71},
+    ]
+    assert {str(item["user_id"]) for item in payload["moved"]} == {"101", "808"}
+    assert {str(item["user_id"]) for item in payload["skipped"]} == {"202", "909"}
+    store = main.get_flow_store()
+    assert str(store.get_user_assignment(101, "openai").current_group_id) == "11"
+    assert str(store.get_user_assignment(808, "grok").current_group_id) == "71"
+
+
 def test_auto_rotation_syncs_one_assignment_per_platform(client, monkeypatch) -> None:
     backend = FakeRotationSub2API()
     backend.users = [

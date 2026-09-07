@@ -3241,7 +3241,10 @@ def rotation_auto_run(
     payload: AutoRotationRunRequest | None = None,
     _: AuthSession = Depends(require_api_auth),
 ) -> JSONResponse:
-    record = get_rotation_service().run_auto_rotation(dry_run=payload.dry_run if payload else False)
+    record = get_rotation_service().run_auto_rotation(
+        dry_run=payload.dry_run if payload else False,
+        platform=payload.platform if payload else None,
+    )
     return JSONResponse(
         status_code=200,
         content=auto_rotation_run_response(record).model_dump(mode="json"),
