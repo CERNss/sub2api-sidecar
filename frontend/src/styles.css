@@ -461,53 +461,219 @@ pre {
 
 .form-panel,
 .result-panel,
-.operator-toolbar,
 .dashboard-list-panel,
 .detail-panel {
   padding: 22px;
 }
 
+/* The operator toolbar has two blocks side by side: the scope block on the left -- a
+   two-row grid of labelled pickers, with the signed-in user beside the upstream picker on
+   its first row -- and the view tabs on the right, top-aligned with that first row.
+   `min-width: 0` matters: .operator-stack is a grid, and a grid item's automatic minimum
+   is its min-content width -- without this the tab strip, which is wide and never wraps,
+   would push the whole panel past the viewport instead of scrolling inside itself.
+   `nowrap` is deliberate: when the strip cannot fit beside the scope block it scrolls
+   inside itself (see .segmented's overflow-x) instead of breaking the bar apart. Below
+   1150px the strip does move to a row of its own -- see the media query further down. */
 .operator-toolbar {
+  min-width: 0;
+  padding: 10px 18px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
+  flex-wrap: nowrap;
 }
 
-.operator-current-context {
-  min-width: min(100%, 360px);
+/* The scope block: three columns (label, control, trailing) over two rows --
+     上游 | [upstream select] | [user chip]
+     平台 | [platform select] | [load-error warning]
+   Both pickers are the same width and sit in the same column, so their edges line up on
+   both sides; the labels share column 1 and are right-aligned against them. The two
+   .toolbar-field wrappers are `display: contents` so their label and control drop into
+   this grid directly -- the wrappers stay in the DOM purely as hooks (.upstream-switcher,
+   .platform-switcher) that the demo/screenshot tooling selects on. */
+.toolbar-scope {
+  /* Never shrinks: above 1150px any squeeze belongs entirely to the tab
+     strip, which can scroll it away. A shrinking grid here would clip the user chip. */
+  flex: 0 0 auto;
+  min-width: 0;
   display: grid;
-  gap: 8px;
-}
-
-.upstream-switcher {
-  display: grid;
-  grid-template-columns: auto minmax(150px, max-content);
+  grid-template-columns: auto auto auto;
   align-items: center;
-  gap: 6px 10px;
-  color: #526174;
+  gap: 8px 10px;
+}
+
+.toolbar-field {
+  display: contents;
+}
+
+.toolbar-field-label {
+  justify-self: end;
+  color: #64748b;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
 }
 
-.upstream-switcher > code {
-  grid-column: 1 / -1;
-  max-width: min(66vw, 420px);
-  padding: 3px 7px;
-  border: 1px solid #dbe4ee;
-  border-radius: 6px;
+.upstream-switcher-select,
+.platform-switcher-select {
+  width: 220px;
+}
+
+/* The collapsed upstream value is the name alone, on one line: the base_url is in the
+   option list and in the trigger's tooltip. */
+.upstream-select-label {
+  display: block;
   overflow: hidden;
-  color: #334155;
-  background: #f8fafc;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.upstream-switcher-select {
-  min-width: min(56vw, 260px);
+/* Stands in for the picker when only one upstream is configured. Not interactive, but
+   the same box and the same height as the select it replaces. */
+.toolbar-pill {
+  width: 220px;
+  height: 32px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  color: #1f2937;
+  background: #ffffff;
+  font-size: 14px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Warning coloured: the switcher still works, it is just running on a remembered
+   value. Icon plus retry link, inline on the row so the bar keeps its height. */
+.platform-switcher-error {
+  justify-self: start;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.platform-switcher-error-icon {
+  color: #d97706;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.platform-switcher-error .ant-btn-link {
+  height: auto;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* The tab strip: pushed to the right edge of the bar and hung from the top so it lines
+   up with the first row of the scope block rather than floating between the two rows.
+   .segmented keeps its own overflow-x, so a strip with nowhere left to grow scrolls
+   inside itself instead of pushing the page wide. */
+.toolbar-tabs {
+  align-self: flex-start;
+  margin-left: auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* Column 3 of the scope grid's first row, beside the upstream picker. */
+.toolbar-user {
+  justify-self: start;
+  margin-left: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.toolbar-user-name {
+  color: #1f2937;
+}
+
+.toolbar-logout {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #dbe4ee;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  background: #ffffff;
+  cursor: pointer;
+  transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease;
+}
+
+.toolbar-logout:hover:not(:disabled) {
+  border-color: #dc2626;
+  color: #dc2626;
+  background: #fef2f2;
+}
+
+.toolbar-logout:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+/* Below 1150px there is no room for the strip beside the scope block, so it drops to a
+   row of its own under it, full width and still scrolling inside itself. */
+@media (max-width: 1150px) {
+  .operator-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .toolbar-scope {
+    order: 0;
+  }
+
+  .toolbar-tabs {
+    order: 2;
+    flex: 1 1 100%;
+    align-self: stretch;
+    margin-left: 0;
+  }
+}
+
+/* Phone widths (390px and friends): the fixed 220px pickers no longer fit, so the control
+   column takes whatever width is left and the pickers fill it. The user chip moves to the
+   far end of the first row; the tab strip keeps its own scrollable line below. */
+@media (max-width: 640px) {
+  .toolbar-scope {
+    flex: 1 1 100%;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .toolbar-user {
+    justify-self: end;
+    margin-left: 8px;
+  }
+
+  .upstream-switcher-select,
+  .platform-switcher-select,
+  .toolbar-pill {
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+}
+
+/* Shown instead of a view while the platform list loads, or when the upstream has none. */
+.platform-gate {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 48px 22px;
+  text-align: center;
 }
 
 .upstream-option {
@@ -527,13 +693,6 @@ pre {
 .upstream-option small {
   color: #64748b;
   font-size: 12px;
-}
-
-.toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 .segmented {
@@ -571,6 +730,13 @@ pre {
   color: #0f766e;
   background: #e7f6f3;
   box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.16);
+}
+
+/* A mode the current platform cannot use is shown, not hidden: the operator has to be
+   able to see that the option exists and why it is out of reach. */
+.segmented button:disabled {
+  color: #9aa6b6;
+  cursor: not-allowed;
 }
 
 .panel-title-row {
@@ -688,17 +854,24 @@ pre {
 }
 
 .provision-platform-field {
-  max-width: 260px;
+  max-width: 320px;
 }
 
-/* The picker shows the same platform badge every other platform-aware control uses,
-   so the target platform reads identically here and on groups, users and keys. */
-.provision-platform-select {
-  width: 100%;
+/* The platform is the app-wide scope, so the form states it with the same badge every
+   other platform-aware control uses instead of offering a second place to change it. */
+.provision-platform-scope {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.provision-platform-select .platform-tag {
+.provision-platform-scope .platform-tag {
   margin: 0;
+}
+
+.provision-platform-alert {
+  margin-bottom: 4px;
 }
 
 .provision-callback-form {
@@ -941,6 +1114,12 @@ pre {
   margin-right: 12px;
 }
 
+/* `.platform-tag` zeroes its own margin, so the badge needs the gap the antd Tag beside
+   it already has. */
+.data-sync-key-list .data-sync-key-row .platform-tag {
+  margin-inline-end: 8px;
+}
+
 .data-sync-table .ant-table-cell,
 .data-sync-key-list .ant-list-item-meta-title,
 .data-sync-key-list .ant-list-item-meta-description {
@@ -1002,8 +1181,16 @@ pre {
   font-size: 12px;
 }
 
-.api-token-platform-select {
-  width: 100%;
+/* The platform is the app-wide scope, so it is stated here, not picked here. */
+.api-token-platform-scope {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.api-token-platform-scope .platform-tag {
+  margin-inline-end: 0;
 }
 
 .api-token-api-item pre {
@@ -1082,10 +1269,21 @@ pre {
   min-width: 0;
 }
 
+/* Says where the app-wide platform bites on this tab, and where it deliberately does not. */
+.credit-platform-hint {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+}
+
 .credit-filter-grid {
   display: grid;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.credit-group-filter {
+  min-width: 0;
 }
 
 .credit-filter-row {
@@ -1095,8 +1293,10 @@ pre {
   align-items: center;
 }
 
+/* The 4th column holds the group filter: a name plus a platform badge needs more room
+   than the bare group id it replaced. */
 .credit-filter-row-primary {
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, 150px) minmax(100px, 120px) minmax(120px, 140px) minmax(110px, 130px) auto;
+  grid-template-columns: minmax(200px, 1fr) minmax(130px, 150px) minmax(100px, 120px) minmax(150px, 190px) minmax(110px, 130px) auto;
 }
 
 .credit-filter-row-range {
@@ -1357,14 +1557,26 @@ pre {
   height: 100%;
 }
 
+/* The platform scope line under the title gives this header a second row, so it wraps
+   like every other section head instead of squeezing the 保存设置 button onto one line
+   with it. The basis stays well under the 320px default because this panel lives in the
+   narrow island column. */
 .notif-section-head.notif-whitelist-head {
-  flex-wrap: nowrap;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  row-gap: 8px;
 }
 
 .notif-section-head.notif-whitelist-head > div:first-child {
   min-width: 0;
-  flex: 0 1 auto;
+  flex: 1 1 180px;
+}
+
+/* Stays on the title's line while there is room, drops to its own right-aligned row
+   when there is not. */
+.notif-whitelist-head .notif-section-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .notif-whitelist-head .notif-section-actions .button {
@@ -3123,7 +3335,7 @@ pre {
   color: oklch(0.55 0.02 250);
 }
 
-/* One badge per platform the selected user holds a dedicated group on. */
+/* The selected user's group on the platform in force (or the fact that they have none). */
 .manual-user-platforms {
   min-width: 0;
   display: grid;
@@ -3146,20 +3358,6 @@ pre {
   font-size: 12px;
   line-height: 1.5;
   color: oklch(0.55 0.02 250);
-}
-
-/* Step 1 scope picker: narrows every mode below it to a single platform. */
-.manual-platform-field > .ant-typography {
-  font-size: 12px;
-}
-
-.manual-platform-select {
-  width: 100%;
-}
-
-/* Header-level platform scope beside the workbench tab switcher. */
-.workbench-platform-select {
-  min-width: 168px;
 }
 
 /* Fills the option row so the group count stays pinned to the right edge even once the row
@@ -3519,8 +3717,7 @@ pre {
    longer emits — styling those nodes here has no effect. The collapsed-value selectors carry
    the extra `.ant-select-single` / `.ant-select-content-has-value` qualifiers only to out-rank
    antd's own three-class `display: block` on that node. */
-.provision-platform-select.ant-select-single .ant-select-content.ant-select-content-has-value,
-.manual-platform-select.ant-select-single .ant-select-content.ant-select-content-has-value {
+.platform-switcher-select.ant-select-single .ant-select-content.ant-select-content-has-value {
   min-width: 0;
   /* A flex container has no strut, so this box would otherwise shrink to the badge and take
      the control down with it. antd sizes the control off this very token, so re-asserting it
@@ -4170,11 +4367,17 @@ pre {
   user-select: none;
 }
 
+/* Tall cards. min-height (not height) so a card can never clip its last row; the values
+   mirror graphAccountNodeSize / graphGroupNodeSize in App.tsx, which dagre uses for layout. */
 .graph-node:has(.account-usage-grid),
 .graph-node:has(.group-capacity-grid) {
   width: 272px;
-  height: 184px;
+  min-height: 184px;
   align-content: start;
+}
+
+.graph-node:has(.group-capacity-grid) {
+  min-height: 216px;
 }
 
 .graph-node-target {
@@ -4829,8 +5032,6 @@ pre {
     grid-template-columns: 1fr 1fr;
   }
 
-  .operator-toolbar,
-  .toolbar-actions,
   .canvas-filter-row,
   .canvas-title-row,
   .panel-title-row,
@@ -4913,4 +5114,40 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+/* Account rows carry the platform badge every other platform-aware list uses. */
+.proxy-assignment-account {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.proxy-assignment-account .platform-tag {
+  margin-inline-end: 0;
+}
+
+.proxy-management .proxy-assignment-scope-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+
+/* notifications: platform scope */
+.notif-whitelist-scope {
+  /* Its own row under the title, so a long platform name wraps inside this line rather
+     than pushing the header wider. */
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.notif-whitelist-scope .ant-tag {
+  margin-inline-end: 0;
+  font-size: 12px;
+  line-height: 18px;
 }

@@ -503,7 +503,14 @@ export async function sendNotificationTest(ruleId: string): Promise<Notification
   return hydrateTestResult(payload);
 }
 
-export type WhitelistOption = { value: string; label: string };
+export type WhitelistOption = { value: string; label: string; platform: string | null };
+
+// Platforms are opaque upstream strings (openai / grok / zhipu ...); compare them
+// trimmed and lowercased so scoping never trips over casing or stray spaces.
+export function normalizedPlatform(value: unknown): string | null {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return text || null;
+}
 
 export async function loadAccountWhitelistOptions(): Promise<WhitelistOption[]> {
   const payload = await requestNotificationJson<ApiPayload>(
@@ -519,7 +526,7 @@ export async function loadAccountWhitelistOptions(): Promise<WhitelistOption[]> 
       const name = typeof item.name === "string" ? item.name : "";
       const email = typeof item.email === "string" ? item.email : "";
       const label = [name, email].filter(Boolean).join(" · ") || value;
-      return { value, label };
+      return { value, label, platform: normalizedPlatform(item.platform) };
     })
     .filter((option) => option.value);
 }
@@ -536,7 +543,7 @@ export async function loadGroupWhitelistOptions(): Promise<WhitelistOption[]> {
       const item = (raw ?? {}) as ApiPayload;
       const value = item.group_id === undefined || item.group_id === null ? "" : String(item.group_id);
       const name = typeof item.name === "string" ? item.name : "";
-      return { value, label: name || value };
+      return { value, label: name || value, platform: normalizedPlatform(item.platform) };
     })
     .filter((option) => option.value);
 }
@@ -557,7 +564,8 @@ export async function loadProxyWhitelistOptions(): Promise<WhitelistOption[]> {
       const port = item.port === undefined || item.port === null ? "" : String(item.port);
       const endpoint = host && port ? `${host}:${port}` : host;
       const label = [name || value, endpoint].filter(Boolean).join("（") + (endpoint ? "）" : "");
-      return { value, label };
+      // Proxies are shared across platforms, so they carry no platform scope.
+      return { value, label, platform: null };
     })
     .filter((option) => option.value);
 }

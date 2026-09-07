@@ -29,13 +29,15 @@ import {
 type StatusTone = "idle" | "info" | "success" | "error";
 type Status = { message: string; tone: StatusTone };
 type Props = {
+  // The app-wide platform scope, followed by the alert whitelist selectors.
+  platform: string;
   onAuthExpired: (error: unknown, setStatus?: (status: Status) => void) => boolean;
 };
 
 const emptyStatus: Status = { message: "", tone: "idle" };
 const emptyDeliveryHistory: NotificationDeliveryHistory = { items: [], total: 0 };
 
-export function NotificationPanel({ onAuthExpired }: Props) {
+export function NotificationPanel({ platform, onAuthExpired }: Props) {
   const [settings, setSettings] = useState<NotificationSettings>(() => ({
     webhooks: [makeDefaultWebhook()],
     rules: [],
@@ -371,6 +373,7 @@ export function NotificationPanel({ onAuthExpired }: Props) {
         />
         <WhitelistPanel
           settings={settings}
+          platform={platform}
           onChangeAccountWhitelist={updateAccountWhitelist}
           onChangeGroupWhitelist={updateGroupWhitelist}
           renderSaveAction={renderSaveAction}

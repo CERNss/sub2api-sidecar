@@ -66,6 +66,7 @@ import {
   SwapOutlined,
   SyncOutlined,
   UserOutlined,
+  WarningOutlined,
   QuestionCircleOutlined
 } from "@ant-design/icons";
 import {
@@ -323,14 +324,18 @@ type UserSelectOption = {
   label: string;
   searchText: string;
   emailText: string;
-  platforms: string[];
+  // The row talks about the platform in force only: `platformGroupName` is the user's
+  // group there, or null when the user holds none (still selectable — assigning a
+  // first group is a real operation).
+  platformGroupName: string | null;
 };
 
 type PlatformFilterOption = {
   value: string;
   label: string;
-  // null on the "all platforms" entry, otherwise the platform the option scopes to.
-  platform: string | null;
+  // The platform this option selects. There is no neutral entry: a platform is always
+  // in force, app-wide.
+  platform: string;
   groupCount: number;
 };
 
@@ -518,6 +523,10 @@ type AutoRotationRunsPayload = ApiPayload & {
 
 type RunRecordsPanelProps = {
   className?: string;
+  // The app-wide platform. A record is placed on a platform by resolving the group ids
+  // its executions carry; records whose groups cannot be resolved stay visible.
+  platform: string;
+  groupsById: Map<string, OrchestrationGroup>;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   refreshSignal?: number;
   onStatus?: (status: StatusState) => void;
@@ -755,9 +764,6 @@ const DEFAULT_AUTH_USERNAME = "admin";
 const DEFAULT_KEY_TRANSFER_SOURCE_SEARCH = "admin";
 const KEY_TRANSFER_NAME_PATTERN = "服务:环境:对象:版本号:邮箱";
 const FIXED_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback";
-// Only the pre-selection, and only until GET /api/provisioning/settings answers with
-// the real list — the picker's contents always come from the backend.
-const DEFAULT_PROVISION_PLATFORM = "openai";
 // Placeholders only: leaving the field empty lets the backend apply the platform's
 // own default API host.
 const API_BASE_URL_PLACEHOLDERS: Record<string, string> = {
@@ -765,7 +771,11 @@ const API_BASE_URL_PLACEHOLDERS: Record<string, string> = {
   grok: "https://api.x.ai/v1"
 };
 const graphCompactNodeSize = { width: 272, height: 82 };
-const graphTallNodeSize = { width: 272, height: 184 };
+// Must match the min-heights in styles.css (.graph-node:has(.group-capacity-grid) /
+// :has(.account-usage-grid)): dagre lays nodes out with these boxes, and a card taller
+// than its box either clips its last row or overlaps the next rank.
+const graphGroupNodeSize = { width: 272, height: 216 };
+const graphAccountNodeSize = { width: 272, height: 184 };
 const graphLayerOrder: Record<GraphNodeKind, number> = { key: 0, user: 1, group: 2, account: 3 };
 const graphLeftX = 32;
 const graphColumnStepX = 400;
@@ -778,9 +788,10 @@ const ungroupedGraphFilterValue = "__ungrouped__";
 // palette by hashing the value instead of being mapped per known platform.
 const platformTagColors = ["blue", "purple", "geekblue", "magenta", "cyan", "orange", "volcano", "green"] as const;
 const unknownPlatformLabel = "未标注平台";
-// Sentinel for "no platform scope" in the manual panel's platform picker. A real platform
-// is an opaque upstream string, so the neutral entry needs a value that cannot collide.
-const allPlatformsFilterValue = "__all_platforms__";
+// The app-wide platform selection survives a reload. A platform is an opaque upstream
+// string, so nothing is validated here beyond "non-empty"; the resolver below drops a
+// stored value the current upstream no longer offers.
+const platformStorageKey = "sub2api-sidecar.platform";
 const usageWindowOptions = [
   { label: "最近 5 小时", value: "5h" },
   { label: "最近 1 天", value: "1d" },
@@ -1218,8 +1229,14 @@ function idValue(value: unknown): string {
 // and never derives one from a group name suffix; everything below reads the
 // `platform` field that groups and assignments carry.
 
+// Trimmed and lowercased, matching what the backend stores and compares (see
+// `_normalize_platform` in app/services/proxy_health.py and the `.strip().lower()`
+// comparisons in app/services/provisioning.py). Casing is upstream noise, not identity:
+// folding it here is what keeps "OpenAI" on an account and "openai" on a group the same
+// scope. Everything that displays, colours, stores or compares a platform goes through
+// this one function, so the folded value is the only one the UI ever sees.
 function normalizedPlatform(value: string | null | undefined): string | null {
-  const text = (value ?? "").trim();
+  const text = (value ?? "").trim().toLowerCase();
   return text || null;
 }
 
@@ -1252,6 +1269,41 @@ function PlatformTag({ platform }: { platform: string | null | undefined }) {
       {value}
     </Tag>
   );
+}
+
+// localStorage is unavailable in a few real setups (private windows, blocked site data),
+// and every access can throw rather than return null. A failure just means "nothing
+// stored": the picker still works for this session, it only stops surviving a reload.
+function readStoredPlatform(): string | null {
+  try {
+    return normalizedPlatform(window.localStorage.getItem(platformStorageKey));
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPlatform(platform: string): void {
+  try {
+    window.localStorage.setItem(platformStorageKey, platform);
+  } catch {
+    // Swallowed on purpose, see readStoredPlatform.
+  }
+}
+
+// Keeps the current (or stored) platform when the upstream still offers it, otherwise
+// falls back to the busiest platform — ties broken alphabetically so the choice is
+// stable across reloads. An upstream with no platform at all resolves to null.
+function resolvePlatformSelection(current: string | null, options: PlatformFilterOption[]): string | null {
+  if (options.length === 0) {
+    return null;
+  }
+  if (current && options.some((option) => option.value === current)) {
+    return current;
+  }
+  const ranked = [...options].sort(
+    (first, second) => second.groupCount - first.groupCount || first.value.localeCompare(second.value)
+  );
+  return ranked[0]?.value ?? options[0].value;
 }
 
 function userAssignments(user: OrchestrationUser | null | undefined): OrchestrationUserAssignment[] {
@@ -1322,7 +1374,10 @@ function average(values: number[], fallback: number) {
 }
 
 function graphNodeSize(kind: GraphNodeKind) {
-  return kind === "group" || kind === "account" ? graphTallNodeSize : graphCompactNodeSize;
+  if (kind === "group") {
+    return graphGroupNodeSize;
+  }
+  return kind === "account" ? graphAccountNodeSize : graphCompactNodeSize;
 }
 
 function graphEdgeMinlen(sourceKind: GraphNodeKind, targetKind: GraphNodeKind): number {
@@ -1493,17 +1548,20 @@ function userEmailText(user: OrchestrationUser): string {
   return user.email.trim() || "未提供 email";
 }
 
-function buildUserOption(user: OrchestrationUser): UserSelectOption {
+// The option is about one platform only — the group the user holds there, or nothing.
+// A platform is always in force app-wide, so there is no unscoped shape to build.
+function buildUserOption(user: OrchestrationUser, platform: string): UserSelectOption {
   const displayName = userDisplayName(user);
   const emailText = userEmailText(user);
   const userIdText = unknownToText(user.user_id);
-  const platforms = userPlatforms(user);
+  const platformGroupName =
+    userDirectGroupSummaries(user).find((summary) => summary.platform === platform)?.groupName ?? null;
   return {
     value: idValue(user.user_id),
     label: displayName,
-    searchText: `${displayName} ${emailText} ${userIdText} ${platforms.join(" ")}`.trim(),
+    searchText: `${displayName} ${emailText} ${userIdText} ${platformGroupName ?? ""}`.trim(),
     emailText,
-    platforms
+    platformGroupName
   };
 }
 
@@ -1519,14 +1577,17 @@ function UserIdentity({ name, email, extra }: { name: ReactNode; email: ReactNod
 
 function renderUserOption(option: { label?: ReactNode; data: UserSelectOption }) {
   const userOption = option.data;
-  const platforms = userOption?.platforms ?? [];
   return (
     <UserIdentity
       name={option.label}
       email={userOption.emailText}
-      extra={platforms.map((platform) => (
-        <PlatformTag key={platform} platform={platform} />
-      ))}
+      extra={
+        userOption?.platformGroupName ? (
+          <Tag color="blue">{userOption.platformGroupName}</Tag>
+        ) : (
+          <Tag color="default">本平台无分组</Tag>
+        )
+      }
     />
   );
 }
@@ -1565,13 +1626,18 @@ function buildGroupOption(group: OrchestrationGroup, disabled = false): GroupSel
 }
 
 // Buckets flat group options into antd option groups, one per platform, so a dropdown
-// never mixes platforms in a single visual run.
+// never mixes platforms in a single visual run. Inside the platform-scoped workbench
+// there is only ever one bucket, and a lone "平台 X" header is pure noise — so a single
+// bucket is returned flat.
 function groupOptionsByPlatform(options: GroupSelectOption[]): GroupSelectOption[] {
   const buckets = new Map<string, GroupSelectOption[]>();
   options.forEach((option) => {
     const key = option.platform ?? "";
     buckets.set(key, [...(buckets.get(key) ?? []), option]);
   });
+  if (buckets.size <= 1) {
+    return options;
+  }
   return Array.from(buckets.entries())
     .sort(([first], [second]) => Number(!first) - Number(!second) || first.localeCompare(second))
     .map(([platform, items]) => ({
@@ -1620,6 +1686,7 @@ function renderGroupSelectLabel(options: GroupSelectOption[], item: { value?: un
 // scope in force reads the same as the platform shown on groups, users and keys.
 function renderPlatformFilterBadge(option: PlatformFilterOption | undefined, label: ReactNode) {
   const platform = option?.platform ?? null;
+  // The fallback only covers a value the option list does not (yet) know about.
   return platform ? <PlatformTag platform={platform} /> : <span className="platform-filter-all">{label}</span>;
 }
 
@@ -1643,17 +1710,6 @@ function apiKeyRouteLabel(key: OrchestrationApiKey): string {
   }
   const groupName = key.group_name?.trim();
   return groupName ? `路由组 ${groupName} (${groupId})` : `路由组 ${groupId}`;
-}
-
-// Every platform the user has a dedicated group on, in the order the backend reports.
-function userPlatforms(user: OrchestrationUser | null | undefined): string[] {
-  return Array.from(
-    new Set(
-      userAssignments(user)
-        .map((assignment) => normalizedPlatform(assignment.platform))
-        .filter((platform): platform is string => Boolean(platform))
-    )
-  );
 }
 
 // One entry per platform the user is assigned on. Falls back to the transitional
@@ -1707,15 +1763,14 @@ function apiKeyOwnerLabel(key: OrchestrationApiKey): string {
   return userId ? `User ${userId}` : "未知用户";
 }
 
-// One badge per platform, e.g. "openai · Codex 可用组 A". Platforms the user has no
-// group on are simply absent. With a platform scope, badges from other platforms are
-// trimmed so a scoped view never shows out-of-scope assignments.
+// The user's group badge on one platform, e.g. "openai · Codex 可用组 A". Assignments on
+// other platforms are trimmed, so a scoped view never shows an out-of-scope group.
 function userDirectGroupTags(
   user: OrchestrationUser,
-  platformScope: string | null = null
+  platform: string
 ): { key: string; text: string; color?: string }[] {
   return userDirectGroupSummaries(user)
-    .filter((summary) => !platformScope || summary.platform === platformScope)
+    .filter((summary) => summary.platform === platform)
     .map((summary) => ({
     key: `${summary.platform ?? unknownPlatformLabel}-${summary.groupId}`,
     text: summary.platform ? `${summary.platform} · ${summary.groupName}` : summary.groupName,
@@ -2915,7 +2970,18 @@ function OperatorWorkspace() {
     creditControlTabFromPath(currentLogicalPathname())
   );
   const [upstreams, setUpstreams] = useState<UpstreamInfo[]>([]);
+  const [upstreamsLoaded, setUpstreamsLoaded] = useState(false);
   const [selectedUpstreamId, setSelectedUpstreamId] = useState("");
+  // The app-wide platform. Restored from localStorage so a reload lands where the
+  // operator left off, then reconciled against what the upstream actually offers.
+  const [platform, setPlatform] = useState<string | null>(() => readStoredPlatform());
+  const [platformOptions, setPlatformOptions] = useState<PlatformFilterOption[]>([]);
+  const [platformsLoaded, setPlatformsLoaded] = useState(false);
+  // Set when the group fetch that feeds the platform list failed for a reason other than
+  // an expired session. "The upstream is unreachable" and "the upstream has no platform"
+  // are opposite situations and must never render as the same empty state.
+  const [platformLoadError, setPlatformLoadError] = useState<string | null>(null);
+  const [platformReloadTick, setPlatformReloadTick] = useState(0);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const selectedUpstream =
     upstreams.find((upstream) => upstream.upstream_id === selectedUpstreamId) ?? upstreams[0] ?? null;
@@ -2935,10 +3001,98 @@ function OperatorWorkspace() {
         if (!handleAuthExpired(error)) {
           setUpstreams([]);
         }
+      } finally {
+        setUpstreamsLoaded(true);
       }
     }
     void loadUpstreams();
   }, []);
+
+  // The platform list is the union of what the upstream's groups declare and what the
+  // backend can provision an OAuth account for: a platform with no group yet still has
+  // to be reachable, and it simply carries a count of 0.
+  useEffect(() => {
+    if (!upstreamsLoaded) {
+      return;
+    }
+    if (!effectiveUpstreamId) {
+      setPlatformOptions([]);
+      setPlatform(null);
+      setPlatformLoadError(null);
+      setPlatformsLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    setPlatformsLoaded(false);
+    void (async () => {
+      const counts = new Map<string, number>();
+      let groupsError: string | null = null;
+      try {
+        const groupsPayload = await requestJson<OrchestrationGroupsPayload>(
+          `/orchestration/groups?${compactParams({ upstream_id: effectiveUpstreamId })}`,
+          { method: "GET" },
+          "加载平台列表失败"
+        );
+        groupsPayload.items.forEach((group) => {
+          const value = groupPlatform(group);
+          if (value) {
+            counts.set(value, (counts.get(value) ?? 0) + 1);
+          }
+        });
+      } catch (error: unknown) {
+        if (handleAuthExpired(error)) {
+          return;
+        }
+        groupsError = getErrorMessage(error, "加载平台列表失败");
+      }
+      try {
+        const settingsPayload = await requestJson<ProvisioningSettingsPayload>(
+          "/api/provisioning/settings",
+          { method: "GET" },
+          "加载预配平台列表失败"
+        );
+        (settingsPayload.supported_oauth_platforms ?? []).forEach((entry) => {
+          const value = normalizedPlatform(entry);
+          if (value && !counts.has(value)) {
+            counts.set(value, 0);
+          }
+        });
+      } catch (error: unknown) {
+        if (handleAuthExpired(error)) {
+          return;
+        }
+        // Stays silent on purpose: this call only contributes zero-count platforms, so
+        // losing it narrows the list without invalidating it.
+      }
+      if (cancelled) {
+        return;
+      }
+      // A lost group list must not look like "this upstream has no platforms". The
+      // selection the operator was last on is carried over — with a count of 0, since
+      // the real count is exactly what could not be read — so the switcher keeps its
+      // value and the views below still mount and report their own failures.
+      const fallback = groupsError ? platform ?? readStoredPlatform() : null;
+      if (fallback && !counts.has(fallback)) {
+        counts.set(fallback, 0);
+      }
+      const options = Array.from(counts.entries())
+        .sort(([first], [second]) => first.localeCompare(second))
+        .map(([value, groupCount]) => ({ value, label: value, platform: value, groupCount }));
+      setPlatformOptions(options);
+      setPlatform((current) => resolvePlatformSelection(current, options));
+      setPlatformLoadError(groupsError);
+      setPlatformsLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveUpstreamId, platformReloadTick, upstreamsLoaded]);
+
+  useEffect(() => {
+    if (platform) {
+      writeStoredPlatform(platform);
+    }
+  }, [platform]);
 
   useEffect(() => {
     function syncViewFromPath() {
@@ -3009,38 +3163,112 @@ function OperatorWorkspace() {
 
   return (
     <main className="operator-stack">
+      {/* Left block: a two-row grid of labelled scope pickers, with the signed-in user
+          sitting beside the upstream picker on the first row. Right block: the view tabs,
+          top-aligned with that first row and flush to the right edge of the bar. */}
       <section className="panel operator-toolbar">
-        <div className="operator-current-context">
-          <p className="eyebrow">当前用户</p>
-          <h2>{DEFAULT_AUTH_USERNAME}</h2>
-          <div className="upstream-switcher" aria-label="Sub2API 上游">
-            <span>Sub2API</span>
+        <div className="toolbar-scope">
+          <div className="toolbar-field upstream-switcher">
+            <span className="toolbar-field-label">上游</span>
             {upstreams.length > 1 ? (
-              <Select
-                aria-label="选择 Sub2API 上游"
-                value={selectedUpstreamId}
-                onChange={changeSelectedUpstream}
-                popupMatchSelectWidth={false}
-                className="upstream-switcher-select"
-                options={upstreams.map((upstream) => ({
-                  value: upstream.upstream_id,
-                  label: (
-                    <div className="upstream-option">
-                      <strong>{upstream.name}</strong>
-                      <small>{upstream.base_url}</small>
-                    </div>
-                  )
-                }))}
-              />
-            ) : selectedUpstream ? (
-              <strong>{selectedUpstream.name}</strong>
+              /* The trigger shows the name alone; the base_url stays in the option list and
+                 in this tooltip, so the control does not grow a second line. */
+              <Tooltip title={selectedUpstream?.base_url ?? ""}>
+                <Select
+                  aria-label="选择 Sub2API 上游"
+                  value={selectedUpstreamId}
+                  onChange={changeSelectedUpstream}
+                  popupMatchSelectWidth={false}
+                  className="upstream-switcher-select"
+                  options={upstreams.map((upstream) => ({
+                    value: upstream.upstream_id,
+                    label: (
+                      <div className="upstream-option">
+                        <strong>{upstream.name}</strong>
+                        <small>{upstream.base_url}</small>
+                      </div>
+                    )
+                  }))}
+                  labelRender={(item) => (
+                    <span className="upstream-select-label">
+                      {upstreams.find((candidate) => candidate.upstream_id === item.value)?.name ??
+                        item.label}
+                    </span>
+                  )}
+                />
+              </Tooltip>
             ) : (
-              <strong>未配置</strong>
+              /* A lone upstream is not a choice, but it still has to read as the same control
+                 as the platform picker beside it. */
+              <Tooltip title={selectedUpstream?.base_url ?? ""}>
+                <span className="toolbar-pill">{selectedUpstream?.name ?? "未配置"}</span>
+              </Tooltip>
             )}
-            {selectedUpstream ? <code>{selectedUpstream.base_url}</code> : null}
+          </div>
+          {/* Sits on row 1 of the scope grid, immediately after the upstream picker. */}
+          <div className="toolbar-user">
+            <UserRound size={16} aria-hidden="true" />
+            <span className="toolbar-user-name">{DEFAULT_AUTH_USERNAME}</span>
+            <Tooltip title="退出登录">
+              <button
+                className="toolbar-logout"
+                type="button"
+                aria-label="退出登录"
+                onClick={logout}
+                disabled={logoutBusy}
+              >
+                {logoutBusy ? (
+                  <LoaderCircle className="spin" size={16} aria-hidden="true" />
+                ) : (
+                  <LogOut size={16} aria-hidden="true" />
+                )}
+              </button>
+            </Tooltip>
+          </div>
+          {/* The platform is a mandatory, app-wide scope: every view below is built for
+              exactly one platform, so the switcher lives here rather than inside a view. */}
+          <div className="toolbar-field platform-switcher">
+            <span className="toolbar-field-label">平台</span>
+            <Select
+              aria-label="选择平台"
+              className="platform-switcher-select"
+              classNames={{ popup: { root: "platform-select-popup" } }}
+              value={platform ?? undefined}
+              placeholder={platformsLoaded ? "无可用平台" : "加载中"}
+              disabled={platformOptions.length === 0}
+              popupMatchSelectWidth={false}
+              onChange={(value) => value && setPlatform(value)}
+              options={platformOptions}
+              optionRender={renderPlatformFilterOption}
+              labelRender={(item) =>
+                renderPlatformFilterBadge(
+                  platformOptions.find((candidate) => candidate.value === item.value),
+                  item.label
+                )
+              }
+            />
+            {/* The picker still works, it is just running on a remembered value — a footnote
+                on the row, not a line of its own that would push the bar taller. */}
+            {platformLoadError ? (
+              <span className="platform-switcher-error">
+                <Tooltip title="平台列表加载失败，沿用上次选择">
+                  <WarningOutlined
+                    className="platform-switcher-error-icon"
+                    aria-label="平台列表加载失败，沿用上次选择"
+                  />
+                </Tooltip>
+                <AntButton
+                  type="link"
+                  size="small"
+                  onClick={() => setPlatformReloadTick((value) => value + 1)}
+                >
+                  重试
+                </AntButton>
+              </span>
+            ) : null}
           </div>
         </div>
-        <div className="toolbar-actions">
+        <div className="toolbar-tabs">
           <div className="segmented" role="tablist" aria-label="编排视图">
             <button
               className={activeView === "orchestration" ? "active" : ""}
@@ -3091,36 +3319,56 @@ function OperatorWorkspace() {
               IP 代理
             </button>
           </div>
-          <button className="button secondary compact" type="button" onClick={logout} disabled={logoutBusy}>
-            {logoutBusy ? (
-              <LoaderCircle className="spin" size={17} aria-hidden="true" />
-            ) : (
-              <LogOut size={17} aria-hidden="true" />
-            )}
-            退出登录
-          </button>
         </div>
       </section>
 
-      {activeView === "notification" ? (
-        <NotificationPanel onAuthExpired={handleAuthExpired} />
+      {!platform ? (
+        <section className="panel platform-gate">
+          {!platformsLoaded ? (
+            <>
+              <Spin />
+              <Typography.Text type="secondary">正在加载平台列表</Typography.Text>
+            </>
+          ) : platformLoadError ? (
+            // Nothing to fall back on: no stored platform either, so this really is a
+            // dead end until the upstream answers. Say that, do not claim it is empty.
+            <>
+              <Empty description="平台列表加载失败" />
+              <Typography.Text type="secondary">{platformLoadError}</Typography.Text>
+              <AntButton
+                type="primary"
+                icon={<ReloadOutlined />}
+                onClick={() => setPlatformReloadTick((value) => value + 1)}
+              >
+                重试
+              </AntButton>
+            </>
+          ) : (
+            <Empty description="当前上游没有任何平台，无法继续" />
+          )}
+        </section>
+      ) : activeView === "notification" ? (
+        <NotificationPanel platform={platform} onAuthExpired={handleAuthExpired} />
       ) : activeView === "proxyManagement" ? (
-        <ProxyManagementView onAuthExpired={handleAuthExpired} />
+        <ProxyManagementView platform={platform} onAuthExpired={handleAuthExpired} />
       ) : activeView === "creditControl" ? (
         <CreditControlView
           activeTab={activeCreditTab}
           onTabChange={navigateCreditTab}
+          platform={platform}
           selectedUpstreamId={effectiveUpstreamId}
           defaultUpstreamId={upstreams.find((upstream) => upstream.is_default)?.upstream_id ?? upstreams[0]?.upstream_id ?? ""}
           onAuthExpired={handleAuthExpired}
         />
       ) : activeView === "keyTransfer" ? (
         <KeyTransferView
+          platform={platform}
           selectedUpstreamId={effectiveUpstreamId}
           onAuthExpired={handleAuthExpired}
         />
       ) : activeView === "provision" ? (
         <ProvisionForm
+          platform={platform}
           selectedUpstreamId={effectiveUpstreamId}
           onAuthExpired={handleAuthExpired}
           onFlowChanged={() => undefined}
@@ -3129,6 +3377,7 @@ function OperatorWorkspace() {
         <ExistingOrchestrationView
           activeTab={activeOrchestrationTab}
           onTabChange={navigateOrchestrationTab}
+          platform={platform}
           selectedUpstreamId={effectiveUpstreamId}
           defaultUpstreamId={upstreams.find((upstream) => upstream.is_default)?.upstream_id ?? upstreams[0]?.upstream_id ?? ""}
           onAuthExpired={handleAuthExpired}
@@ -3310,6 +3559,9 @@ const ACCOUNT_AVAILABILITY_LABELS: Record<string, string> = {
 type ProxyAccountAssignment = {
   account_id: string;
   account_name: string;
+  // The upstream account's platform. Absent/null when upstream never labelled it —
+  // such an account stays visible under every scope rather than disappearing.
+  platform?: string | null;
   proxy_id: string | null;
   pinned_proxy_id: string | null;
   pinned_at: string | null;
@@ -3322,8 +3574,12 @@ type ProxyAccountAssignmentsPayload = ApiPayload & {
 };
 
 function ProxyManagementView({
+  platform,
   onAuthExpired
 }: {
+  // The app-wide platform scope. Proxies themselves are platform-neutral hardware, so
+  // only the account-binding table below follows it.
+  platform: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [proxies, setProxies] = useState<ProxyItem[]>([]);
@@ -3768,12 +4024,27 @@ function ProxyManagementView({
     }
   ];
 
+  // Accounts belong to a platform, proxies do not. An account upstream never labelled
+  // has no platform to clash with, so it stays listed under every scope — hiding it
+  // would strand it with no way to pin it anywhere.
+  const scopedAssignments = useMemo(
+    () =>
+      assignments.filter((item) => {
+        const value = normalizedPlatform(item.platform);
+        return !value || value === platform;
+      }),
+    [assignments, platform]
+  );
+
   const assignmentColumns = [
     {
       title: "账号",
       key: "account",
       render: (_: unknown, item: ProxyAccountAssignment) => (
-        <strong>{item.account_name || item.account_id}</strong>
+        <span className="proxy-assignment-account">
+          <strong>{item.account_name || item.account_id}</strong>
+          <PlatformTag platform={item.platform} />
+        </span>
       )
     },
     {
@@ -3905,6 +4176,9 @@ function ProxyManagementView({
             <Typography.Text type="secondary">
               默认由自动均衡分配。钉住后该账号固定走指定代理、不再被均衡挪走；万一那个代理挂了会临时接管保证不断流，代理恢复后自动送回。
             </Typography.Text>
+            <Typography.Text type="secondary" className="proxy-assignment-scope-hint">
+              仅显示 {platform} 平台的账号；代理本身不分平台。
+            </Typography.Text>
           </div>
           <AntButton
             icon={<ReloadOutlined />}
@@ -3918,10 +4192,10 @@ function ProxyManagementView({
           style={{ marginTop: 16 }}
           rowKey={(item) => item.account_id}
           columns={assignmentColumns}
-          dataSource={assignments}
+          dataSource={scopedAssignments}
           loading={assignmentsLoading}
           pagination={false}
-          locale={{ emptyText: <Empty description="暂无账号" /> }}
+          locale={{ emptyText: <Empty description={`平台 ${platform} 上暂无账号`} /> }}
         />
       </div>
 
@@ -4078,10 +4352,10 @@ function ProxyManagementView({
 }
 
 function ProxyMigrationsView({
-  platformScope,
+  platform,
   onAuthExpired
 }: {
-  platformScope: string | null;
+  platform: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [runs, setRuns] = useState<ProxyHealthRunItem[]>([]);
@@ -4112,14 +4386,17 @@ function ProxyMigrationsView({
   }, []);
 
   // Moves carry the platform joined in by the backend; proxy-level runs without
-  // moves (probes, noops) are platform-neutral and stay visible under any scope.
+  // moves (probes, noops) are platform-neutral and stay visible on every platform.
+  // A move whose platform the join could not resolve is platform-neutral too: only a
+  // resolved, *different* platform hides it, the same rule the assignment table below
+  // 代理管理 follows. Every count and expander here goes through this one helper, so
+  // the row header and its expanded moves can never disagree.
   const scopedMoves = (run: ProxyHealthRunItem) =>
-    platformScope
-      ? run.moves.filter((move) => normalizedPlatform(move.platform) === platformScope)
-      : run.moves;
-  const scopedRuns = platformScope
-    ? runs.filter((run) => run.moves.length === 0 || scopedMoves(run).length > 0)
-    : runs;
+    run.moves.filter((move) => {
+      const value = normalizedPlatform(move.platform);
+      return !value || value === platform;
+    });
+  const scopedRuns = runs.filter((run) => run.moves.length === 0 || scopedMoves(run).length > 0);
 
   const runColumns = [
     {
@@ -4160,9 +4437,6 @@ function ProxyMigrationsView({
       render: (_: unknown, run: ProxyHealthRunItem) => {
         if (run.status === "noop") {
           return "-";
-        }
-        if (!platformScope) {
-          return `移动 ${run.moved_count} / 跳过 ${run.skipped_count} / 失败 ${run.failed_count}`;
         }
         const moves = scopedMoves(run);
         const moved = moves.filter((move) => move.status === "moved").length;
@@ -4245,10 +4519,10 @@ function ProxyMigrationsView({
 }
 
 function AccountHealthView({
-  platformScope,
+  platform,
   onAuthExpired
 }: {
-  platformScope: string | null;
+  platform: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [accounts, setAccounts] = useState<AccountHealthItem[]>([]);
@@ -4263,19 +4537,26 @@ function AccountHealthView({
 
   // Health items report their own platform; disposal-run actions only carry the
   // account id, so their platform is looked up through the loaded account list.
-  const scopedAccounts = platformScope
-    ? accounts.filter((account) => normalizedPlatform(account.platform) === platformScope)
-    : accounts;
+  // An unresolved platform never hides anything: an account the upstream never
+  // labelled would otherwise be strandable nowhere, and an action whose account is
+  // missing from the separately loaded list (load-order race, failed load, account
+  // deleted upstream) would silently empty the whole 处置记录 table. Only a resolved,
+  // different platform scopes a row out.
+  const scopedAccounts = accounts.filter((account) => {
+    const value = normalizedPlatform(account.platform);
+    return !value || value === platform;
+  });
   const accountPlatformById = new Map(
     accounts.map((account) => [idValue(account.id), normalizedPlatform(account.platform)])
   );
   const scopedRunActions = (run: AccountHealthRunItem) =>
-    platformScope
-      ? run.actions.filter((action) => accountPlatformById.get(String(action.account_id)) === platformScope)
-      : run.actions;
-  const scopedAccountRuns = platformScope
-    ? accountRuns.filter((run) => run.actions.length === 0 || scopedRunActions(run).length > 0)
-    : accountRuns;
+    run.actions.filter((action) => {
+      const value = accountPlatformById.get(String(action.account_id)) ?? null;
+      return !value || value === platform;
+    });
+  const scopedAccountRuns = accountRuns.filter(
+    (run) => run.actions.length === 0 || scopedRunActions(run).length > 0
+  );
 
   function markAccountBusy(accountId: string, busy: boolean) {
     setAccountBusyIds((previous) => {
@@ -4527,7 +4808,7 @@ function AccountHealthView({
           pagination={false}
           locale={{
             emptyText: (
-              <Empty description={platformScope ? `平台 ${platformScope} 上暂无账号` : "暂无账号"} />
+              <Empty description={`平台 ${platform} 上暂无账号`} />
             )
           }}
         />
@@ -4560,9 +4841,6 @@ function AccountHealthView({
               title: "结果",
               key: "counts",
               render: (_: unknown, run: AccountHealthRunItem) => {
-                if (!platformScope) {
-                  return `驱逐 ${run.evicted_count} / 回归 ${run.rejoined_count} / 失败 ${run.failed_count}`;
-                }
                 const actions = scopedRunActions(run);
                 const evicted = actions.filter((action) => action.action === "evict" && action.status === "done").length;
                 const rejoined = actions.filter((action) => action.action !== "evict" && action.status === "done").length;
@@ -4672,9 +4950,13 @@ function AccountHealthView({
 }
 
 function KeyTransferView({
+  platform,
   selectedUpstreamId,
   onAuthExpired
 }: {
+  // The app-wide platform scope. A key has no platform of its own: it inherits the
+  // one of the group it routes into, exactly as the orchestration workbench reads it.
+  platform: string;
   selectedUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
@@ -4693,24 +4975,17 @@ function KeyTransferView({
   const [apiToken, setApiToken] = useState<ApiTokenPayload | null>(null);
   const [tokenBusy, setTokenBusy] = useState(false);
   const [groups, setGroups] = useState<OrchestrationGroup[]>([]);
-  const [createKeyPlatform, setCreateKeyPlatform] = useState("");
+  // Groups are what give a key its platform, so the list has to wait for them. Set on
+  // failure too: a groups outage must degrade to "platform unknown" rows, never to a
+  // screen that hides every key.
+  const [groupsLoaded, setGroupsLoaded] = useState(false);
   const apiTokenValue = apiToken?.access_key || "$SIDECAR_API_TOKEN";
   const apiKeyEndpointUrl = `${window.location.origin}${apiUrl("/api/v1/apikey")}`;
-  // The choices are whatever platforms the loaded groups declare; nothing is hardcoded.
-  const platformOptions = useMemo(
-    () =>
-      Array.from(
-        new Set(groups.map(groupPlatform).filter((platform): platform is string => Boolean(platform)))
-      )
-        .sort()
-        .map((platform) => ({ value: platform, label: platform })),
-    [groups]
-  );
   const createApiKeyPayload = JSON.stringify({
     action: "create",
     name: "service:prod:object:v1:user@example.com",
     target: "user@example.com",
-    ...(createKeyPlatform ? { platform: createKeyPlatform } : {}),
+    platform,
     quota: 0
   });
   const listApiKeyPayload = '{"action":"list","email":"user@example.com"}';
@@ -4723,7 +4998,35 @@ function KeyTransferView({
 -H "Content-Type: application/json"
 -d '${listApiKeyPayload}'`;
   const selectedUser = users.find((user) => idValue(user.user_id) === sourceUserId) ?? null;
-  const transferKeys = useMemo(() => apiKeys.filter(isTransferKey), [apiKeys]);
+  const groupsById = useMemo(() => {
+    const index = new Map<string, OrchestrationGroup>();
+    groups.forEach((group) => {
+      const groupValue = idValue(group.group_id);
+      if (groupValue) {
+        index.set(groupValue, group);
+      }
+    });
+    return index;
+  }, [groups]);
+  // A key's platform is the platform of the group it routes into. When that cannot be
+  // resolved — no routing group, a group this payload does not carry, or a group with
+  // no platform of its own — the key has no platform to clash with and stays listed.
+  function keyPlatform(key: OrchestrationApiKey): string | null {
+    return groupPlatform(groupsById.get(idValue(key.group_id)) ?? null);
+  }
+  const transferKeys = useMemo(
+    () =>
+      groupsLoaded
+        ? apiKeys.filter((key) => {
+            if (!isTransferKey(key)) {
+              return false;
+            }
+            const value = groupPlatform(groupsById.get(idValue(key.group_id)) ?? null);
+            return !value || value === platform;
+          })
+        : [],
+    [apiKeys, groupsById, groupsLoaded, platform]
+  );
   const transferKeyIds = useMemo(() => transferKeys.map((key) => idValue(key.key_id)).filter(Boolean), [transferKeys]);
   const selectedTransferKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
   const selectedTransferKeys = useMemo(
@@ -4732,7 +5035,9 @@ function KeyTransferView({
   );
   const allTransferKeysSelected =
     transferKeyIds.length > 0 && transferKeyIds.every((keyId) => selectedTransferKeySet.has(keyId));
-  const userOptions = users.map(buildUserOption);
+  // Both halves have to be in before a key can be shown with a platform on it.
+  const keyListLoading = loadingKeys || !groupsLoaded;
+  const userOptions = users.map((user) => buildUserOption(user, platform));
   const isAllUsersScope = transferScope === "all_users";
 
   async function loadSourceUsers(searchOverride = sourceSearch) {
@@ -4840,9 +5145,10 @@ function KeyTransferView({
     }
   }
 
-  // Groups are loaded only to learn which platforms exist, so the create-key snippet can
-  // offer real values instead of a hardcoded list.
-  async function loadPlatformGroups() {
+  // Groups are what give a key its platform: the key payload carries only a group id,
+  // so this list is the lookup table behind every platform badge and every scoped count
+  // on this screen.
+  async function loadGroups() {
     if (!selectedUpstreamId) {
       return;
     }
@@ -4857,6 +5163,8 @@ function KeyTransferView({
       if (!onAuthExpired(error, setStatus)) {
         setGroups([]);
       }
+    } finally {
+      setGroupsLoaded(true);
     }
   }
 
@@ -4867,8 +5175,9 @@ function KeyTransferView({
     setApiKeys([]);
     setSelectedKeyIds([]);
     setTransferResult(null);
-    setCreateKeyPlatform("");
-    void loadPlatformGroups();
+    setGroups([]);
+    setGroupsLoaded(false);
+    void loadGroups();
     void loadSourceKeys("", { clearResult: false });
   }, [selectedUpstreamId]);
 
@@ -5151,7 +5460,7 @@ function KeyTransferView({
           </Space>
           <Space wrap>
             {transferResult ? <Tag>{transferResult.items.length} 条结果</Tag> : <Tag>{selectedTransferKeys.length} / {transferKeys.length} 已选</Tag>}
-            {loadingKeys ? (
+            {keyListLoading ? (
               <Spin size="small" />
             ) : transferResult ? null : (
               <>
@@ -5190,6 +5499,19 @@ function KeyTransferView({
               { title: "目标用户", dataIndex: "target_user_id", render: (value) => unknownToText(value) },
               { title: "目标分组", dataIndex: "target_group_id", render: (value) => unknownToText(value) },
               {
+                title: "平台",
+                key: "platform",
+                // The backend keeps the destination group on the source key's platform,
+                // so either end resolves to the same badge; the target is only missing
+                // on a skipped or failed row, where the source still tells the story.
+                render: (_: unknown, item: KeyTransferItem) => {
+                  const value =
+                    groupPlatform(groupsById.get(idValue(item.target_group_id)) ?? null) ??
+                    groupPlatform(groupsById.get(idValue(item.source_group_id)) ?? null);
+                  return value ? <PlatformTag platform={value} /> : "-";
+                }
+              },
+              {
                 title: "状态",
                 dataIndex: "status",
                 render: (value: string) => <Tag color={transferStatusColor(value)}>{value}</Tag>
@@ -5202,7 +5524,14 @@ function KeyTransferView({
             className="data-sync-key-list"
             size="small"
             dataSource={transferKeys}
-            locale={{ emptyText: loadingKeys ? "正在加载 Key" : isAllUsersScope ? "全部用户暂无可转移 Key" : "当前 admin 用户暂无可转移 Key" }}
+            loading={keyListLoading}
+            locale={{
+              emptyText: keyListLoading
+                ? "正在加载 Key"
+                : isAllUsersScope
+                ? `平台 ${platform} 上全部用户暂无可转移 Key`
+                : `平台 ${platform} 上当前 admin 用户暂无可转移 Key`
+            }}
             renderItem={(key) => {
               const keyId = idValue(key.key_id);
               const checked = selectedTransferKeySet.has(keyId);
@@ -5222,6 +5551,11 @@ function KeyTransferView({
                     title={key.name || unknownToText(key.key_id)}
                     description={`${isAllUsersScope ? `${apiKeyOwnerLabel(key)} · ` : ""}${apiKeyRouteLabel(key)} · Key ID ${unknownToText(key.key_id)}`}
                   />
+                  {keyPlatform(key) ? (
+                    <PlatformTag platform={keyPlatform(key)} />
+                  ) : (
+                    <Tag color="default">平台未知</Tag>
+                  )}
                   <Tag color={statusTagColor(key.status)}>{key.status || "unknown"}</Tag>
                 </List.Item>
               );
@@ -5280,16 +5614,11 @@ function KeyTransferView({
               </Space>
               <Typography.Text type="secondary">创建指定名称的 API key，name 使用 {KEY_TRANSFER_NAME_PATTERN} 格式，quota=0 表示无限制。</Typography.Text>
               <div className="api-token-platform-field">
-                <Typography.Text>目标平台</Typography.Text>
-                <Select
-                  className="api-token-platform-select"
-                  value={createKeyPlatform || undefined}
-                  placeholder="默认 openai（不传 platform）"
-                  allowClear
-                  options={platformOptions}
-                  onChange={(value) => setCreateKeyPlatform(value ?? "")}
-                  notFoundContent="当前分组数据里没有平台信息"
-                />
+                <span className="api-token-platform-scope">
+                  <Typography.Text>目标平台</Typography.Text>
+                  <PlatformTag platform={platform} />
+                  <Typography.Text type="secondary">在顶部切换平台</Typography.Text>
+                </span>
                 <Typography.Text type="secondary">
                   Key 会落到目标用户在该平台上的分组；该用户在这个平台没有分组时接口返回 400，错误消息会说明是哪个平台。
                 </Typography.Text>
@@ -5318,20 +5647,21 @@ function KeyTransferView({
 function ExistingOrchestrationView({
   activeTab,
   onTabChange,
+  platform,
   selectedUpstreamId,
   defaultUpstreamId,
   onAuthExpired
 }: {
   activeTab: OrchestrationTab;
   onTabChange: (tab: OrchestrationTab) => void;
+  // The app-wide platform. Every list, count and submission in this workbench is hard
+  // scoped to it; there is no "all platforms" state to fall back to.
+  platform: string;
   selectedUpstreamId: string;
   defaultUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
 }) {
   const [mode, setMode] = useState<OrchestrationMode>("replace_group");
-  // Panel-level scope for step 1. Holds `allPlatformsFilterValue` when nothing is scoped,
-  // in which case every list below behaves exactly as it did before the picker existed.
-  const [platformFilter, setPlatformFilter] = useState(allPlatformsFilterValue);
   const [users, setUsers] = useState<OrchestrationUser[]>([]);
   const [groups, setGroups] = useState<OrchestrationGroup[]>([]);
   const [accounts, setAccounts] = useState<OrchestrationAccount[]>([]);
@@ -5367,7 +5697,7 @@ function ExistingOrchestrationView({
 
   const selectedUser = users.find((user) => idValue(user.user_id) === selectedUserId) ?? null;
   const selectedKeySet = useMemo(() => new Set(selectedKeyIds), [selectedKeyIds]);
-  const userOptions = useMemo(() => users.map(buildUserOption), [users]);
+  const userOptions = useMemo(() => users.map((user) => buildUserOption(user, platform)), [platform, users]);
   const groupsById = useMemo(() => {
     const index = new Map<string, OrchestrationGroup>();
     groups.forEach((group) => {
@@ -5378,33 +5708,11 @@ function ExistingOrchestrationView({
     });
     return index;
   }, [groups]);
-  // Whatever platforms the loaded groups actually declare. Never a hardcoded list.
-  const availablePlatforms = useMemo(
-    () =>
-      Array.from(
-        new Set(groups.map(groupPlatform).filter((platform): platform is string => Boolean(platform)))
-      ).sort(),
-    [groups]
-  );
-  // null while the panel is unscoped; otherwise the one platform step 1 is narrowed to.
-  const platformScope = platformFilter === allPlatformsFilterValue ? null : platformFilter;
-  // Every group list in this panel starts from here, so a single scope narrows the
-  // target dropdown, the migration sources and the key list at once.
+  // Every group list in this workbench starts from here, so the app-wide platform
+  // narrows the target dropdown, the migration sources and the key list at once.
   const platformScopedGroups = useMemo(
-    () => (platformScope ? groups.filter((group) => groupPlatform(group) === platformScope) : groups),
-    [groups, platformScope]
-  );
-  const platformFilterOptions = useMemo<PlatformFilterOption[]>(
-    () => [
-      { value: allPlatformsFilterValue, label: "全部平台", platform: null, groupCount: groups.length },
-      ...availablePlatforms.map((platform) => ({
-        value: platform,
-        label: platform,
-        platform,
-        groupCount: groups.filter((group) => groupPlatform(group) === platform).length
-      }))
-    ],
-    [availablePlatforms, groups]
+    () => groups.filter((group) => groupPlatform(group) === platform),
+    [groups, platform]
   );
   // Key id to the platform of its routing group, across every user the canvas knows about.
   // A key without a routing group (or on a group of unknown platform) maps to null and is
@@ -5423,29 +5731,40 @@ function ExistingOrchestrationView({
     return index;
   }, [apiKeys, apiKeysByUserId, groupsById]);
   const visibleApiKeys = useMemo(
-    () =>
-      platformScope
-        ? apiKeys.filter((key) => groupPlatform(groupsById.get(idValue(key.group_id)) ?? null) === platformScope)
-        : apiKeys,
-    [apiKeys, groupsById, platformScope]
+    () => apiKeys.filter((key) => groupPlatform(groupsById.get(idValue(key.group_id)) ?? null) === platform),
+    [apiKeys, groupsById, platform]
   );
+  // The users that hold something on this platform: a dedicated group here, or a key
+  // routed into a group here. The canvas and the step-1 summary both read this one set.
+  const platformScopedUsers = useMemo(() => {
+    const keyInScope = (key: OrchestrationApiKey) =>
+      groupPlatform(groupsById.get(idValue(key.group_id)) ?? null) === platform;
+    return users.filter((user) => {
+      if (userDirectGroupSummaries(user).some((summary) => summary.platform === platform)) {
+        return true;
+      }
+      const userId = idValue(user.user_id);
+      const keys = apiKeysByUserId[userId] ?? (userId === selectedUserId ? apiKeys : []);
+      return keys.some(keyInScope);
+    });
+  }, [apiKeys, apiKeysByUserId, groupsById, platform, selectedUserId, users]);
   // Reads the visible keys only: a selection the scope hides must never reach a request.
   const selectedKeys = useMemo(
     () => visibleApiKeys.filter((key) => selectedKeySet.has(idValue(key.key_id))),
     [selectedKeySet, visibleApiKeys]
   );
-  // The selected user's dedicated group per platform, resolved against the group list so
-  // every entry carries a real platform even when the group was not in the payload.
-  const selectedUserAssignmentGroups = useMemo(
-    () =>
-      userDirectGroupSummaries(selectedUser)
-        .map((summary) => ({
-          platform: summary.platform,
-          group: groupsById.get(summary.groupId) ?? syntheticGroup(summary.groupId, summary.groupName, summary.platform)
-        }))
-        .filter((entry) => Boolean(idValue(entry.group.group_id))),
-    [groupsById, selectedUser]
-  );
+  // The selected user's dedicated group ON THIS PLATFORM, resolved against the group list
+  // so it carries a real platform even when the group was not in the groups payload. It is
+  // known as soon as a user is picked — nothing waits on a target being chosen.
+  const selectedUserDirectGroup = useMemo(() => {
+    const summary = userDirectGroupSummaries(selectedUser).find((entry) => entry.platform === platform);
+    if (!summary) {
+      return null;
+    }
+    const group =
+      groupsById.get(summary.groupId) ?? syntheticGroup(summary.groupId, summary.groupName, summary.platform);
+    return idValue(group.group_id) ? group : null;
+  }, [groupsById, platform, selectedUser]);
   // The routing group of every selected key, resolved against the group list so each
   // one carries a real platform. A multi-key move is submitted key by key, so the whole
   // selection — not just the first key — decides what the operation is allowed to do.
@@ -5490,39 +5809,6 @@ function ExistingOrchestrationView({
     }
     return groupsById.get(sourceGroupId) ?? null;
   }, [groupsById, mode, sourceGroupId]);
-  const selectedTargetGroup = useMemo(
-    () => (targetGroupId ? groupsById.get(targetGroupId) ?? null : null),
-    [groupsById, targetGroupId]
-  );
-  // The platform the current operation runs on. For a user-level replacement it is the
-  // platform of the chosen target group: that is what decides which of the user's
-  // dedicated groups is the source, and it is the same rule the backend enforces.
-  const activePlatform = useMemo(() => {
-    if (mode === "api_key") {
-      // Only a selection that agrees on one platform names an active platform;
-      // a split selection is ambiguous, so nothing is claimed.
-      return selectedKeyPlatforms.length === 1 ? selectedKeyPlatforms[0] : null;
-    }
-    if (mode === "group_migration") {
-      return groupPlatform(selectedGroupMigrationSourceGroup);
-    }
-    return groupPlatform(selectedTargetGroup);
-  }, [mode, selectedGroupMigrationSourceGroup, selectedKeyPlatforms, selectedTargetGroup]);
-  const selectedUserPlatformTags = useMemo(
-    () => (selectedUser ? userDirectGroupTags(selectedUser) : []),
-    [selectedUser]
-  );
-  const selectedUserDirectGroup = useMemo(() => {
-    if (!selectedUser) {
-      return null;
-    }
-    if (!activePlatform) {
-      // No target platform decided yet: a single assignment is unambiguous, more than
-      // one would be a guess, so show nothing until a target is picked.
-      return selectedUserAssignmentGroups.length === 1 ? selectedUserAssignmentGroups[0].group : null;
-    }
-    return selectedUserAssignmentGroups.find((entry) => entry.platform === activePlatform)?.group ?? null;
-  }, [activePlatform, selectedUser, selectedUserAssignmentGroups]);
   const sourceGroups = useMemo(() => {
     const primaryGroup =
       mode === "api_key"
@@ -5539,27 +5825,11 @@ function ExistingOrchestrationView({
       ? "选择源分组"
       : !selectedUser
       ? "先选择用户"
-      : !targetGroupId && selectedUserAssignmentGroups.length > 1
-      ? "选择目标分组后按平台匹配"
-      : activePlatform
-      ? `该用户在 ${activePlatform} 上无分组，将直接分配`
-      : "无源分组，将直接分配";
-  // Single-key moves and group migrations keep the source fixed, so the target must stay
-  // on the source's platform. A user replacement instead derives its source from whichever
-  // target is chosen, so every platform stays selectable there and nothing is constrained.
-  const targetPlatformConstraint = useMemo(
-    () =>
-      mode === "api_key"
-        ? // The whole selection has to fit one target, so the constraint is the
-          // selection's single known platform — never just the first key's.
-          selectedKeyPlatforms.length === 1
-          ? selectedKeyPlatforms[0]
-          : null
-        : mode === "group_migration"
-        ? groupPlatform(selectedGroupMigrationSourceGroup)
-        : null,
-    [mode, selectedGroupMigrationSourceGroup, selectedKeyPlatforms]
-  );
+      : `该用户在 ${platform} 上无分组，将直接分配`;
+  // Every operation runs inside the app-wide platform, so the target is constrained to it
+  // in every mode. The per-selection platform checks further down stay as defensive guards
+  // against a canvas click or a stale payload sneaking a foreign group in.
+  const targetPlatformConstraint = platform;
   const targetGroups = useMemo(() => {
     if (mode !== "group_migration" && !selectedUser) {
       return [];
@@ -5668,17 +5938,13 @@ function ExistingOrchestrationView({
     }
   }
 
-  // Narrowing the panel drops whatever the new scope no longer offers, so a selection made
-  // on one platform can never be carried into a submission on another. Widening back to
-  // "all platforms" keeps the current selection: nothing on screen becomes invalid.
-  function updatePlatformScope(nextValue: string) {
-    setPlatformFilter(nextValue || allPlatformsFilterValue);
-    const nextPlatform = nextValue === allPlatformsFilterValue ? null : normalizedPlatform(nextValue);
-    if (!nextPlatform) {
-      return;
-    }
+  // Switching the app-wide platform drops whatever the new one no longer offers, so a
+  // selection made on one platform can never be carried into a submission on another.
+  // Keyed on the platform alone on purpose: re-running it when the group list reloads
+  // would wipe a selection the operator just made.
+  useEffect(() => {
     const outOfScope = (groupId: string) =>
-      Boolean(groupId) && groupPlatform(groupsById.get(groupId) ?? null) !== nextPlatform;
+      Boolean(groupId) && groupPlatform(groupsById.get(groupId) ?? null) !== platform;
     if (outOfScope(targetGroupId)) {
       setTargetGroupId("");
     }
@@ -5688,13 +5954,17 @@ function ExistingOrchestrationView({
       setSourceGroupId("");
       updateGraphGroupFilters([]);
     }
-    setSelectedKeyIds((current) => current.filter((keyId) => keyPlatformById.get(keyId) === nextPlatform));
+    setSelectedKeyIds((current) => {
+      const next = current.filter((keyId) => keyPlatformById.get(keyId) === platform);
+      return next.length === current.length ? current : next;
+    });
     setGraphGroupFilterIds((current) => {
       const next = current.filter((groupId) => groupId === ungroupedGraphFilterValue || !outOfScope(groupId));
       return next.length === current.length ? current : next;
     });
     refreshGraphLayout();
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [platform]);
 
   const groupMigrationScope = useMemo(() => {
     if (!sourceGroupId) {
@@ -5754,20 +6024,16 @@ function ExistingOrchestrationView({
     );
   };
   const graph = useMemo(() => {
-    // The graph follows the panel's platform scope: with a scope active it only shows
-    // that platform's groups and accounts, the users that hold assets there, and the
-    // keys routing there. Cross-platform users keep only their in-scope edges.
+    // The graph is hard scoped to the app-wide platform: it only shows that platform's
+    // groups and accounts, the users that hold assets there, and the keys routing there.
+    // Cross-platform users keep only their in-scope edges.
     const keyInScope = (key: OrchestrationApiKey) =>
-      !platformScope || groupPlatform(groupsById.get(idValue(key.group_id)) ?? null) === platformScope;
+      groupPlatform(groupsById.get(idValue(key.group_id)) ?? null) === platform;
     const scopedDirectSummaries = (user: OrchestrationUser) =>
-      platformScope
-        ? userDirectGroupSummaries(user).filter((summary) => summary.platform === platformScope)
-        : userDirectGroupSummaries(user);
+      userDirectGroupSummaries(user).filter((summary) => summary.platform === platform);
     const scopedDirectGroupIds = (user: OrchestrationUser): string[] =>
       Array.from(new Set(scopedDirectSummaries(user).map((summary) => summary.groupId).filter(Boolean)));
-    const scopedAccounts = platformScope
-      ? accounts.filter((account) => normalizedPlatform(account.platform) === platformScope)
-      : accounts;
+    const scopedAccounts = accounts.filter((account) => normalizedPlatform(account.platform) === platform);
     const groupUserCounts = new Map<string, number>();
     const groupKeyCounts = new Map<string, number>();
     const groupAccountCounts = new Map<string, number>();
@@ -5790,12 +6056,8 @@ function ExistingOrchestrationView({
         keyGroupIdsByUserId.set(userId, [...existing, keyGroupId]);
       }
     });
-    const scopedUsers = platformScope
-      ? users.filter((user) => {
-          const userId = idValue(user.user_id);
-          return scopedDirectSummaries(user).length > 0 || (keyGroupIdsByUserId.get(userId) ?? []).length > 0;
-        })
-      : users;
+    // The same set the step-1 summary counts, hoisted out of here so the two can never drift.
+    const scopedUsers = platformScopedUsers;
     const relatedGroupIdsForUser = (user: OrchestrationUser, userId: string): string[] =>
       Array.from(new Set([...scopedDirectGroupIds(user), ...(keyGroupIdsByUserId.get(userId) ?? [])]));
     const upsertGraphGroup = (group: OrchestrationGroup) => {
@@ -5978,7 +6240,7 @@ function ExistingOrchestrationView({
             title={userDisplayName(user)}
             subtitle={userEmailText(user)}
             tone={userId === selectedUserId ? "active" : "user"}
-            tags={userDirectGroupTags(user, platformScope)}
+            tags={userDirectGroupTags(user, platform)}
             emptyTag="无直接用户组"
           />
         )
@@ -6122,8 +6384,9 @@ function ExistingOrchestrationView({
     accounts,
     graphGroupFilterIds,
     groupsById,
-    platformScope,
+    platform,
     platformScopedGroups,
+    platformScopedUsers,
     selectedKeySet,
     selectedUserId,
     sourceGroupId,
@@ -6325,11 +6588,8 @@ function ExistingOrchestrationView({
     }
     if (selection.kind === "key" && nextKeyId) {
       setMode("api_key");
-      // The canvas is never platform scoped, so picking a key from outside the current
-      // scope widens the panel instead of selecting a row the key list would hide.
-      if (platformScope && keyPlatformById.get(nextKeyId) !== platformScope) {
-        setPlatformFilter(allPlatformsFilterValue);
-      }
+      // The canvas is scoped to the app-wide platform, so an out-of-scope key is never
+      // on screen to be clicked in the first place.
       setSelectedKeyIds((current) => (current.includes(nextKeyId) ? current : [...current, nextKeyId]));
       return;
     }
@@ -6590,8 +6850,8 @@ function ExistingOrchestrationView({
       description={
         loadingKeys
           ? "正在加载 API Keys"
-          : platformScope && apiKeys.length > 0
-          ? `该用户在平台 ${platformScope} 上无 API Key`
+          : apiKeys.length > 0
+          ? `该用户在平台 ${platform} 上无 API Key`
           : "暂无 API Keys"
       }
     />
@@ -6651,22 +6911,6 @@ function ExistingOrchestrationView({
                 { label: "搬迁记录", value: "migrations", icon: <SwapOutlined /> },
                 { label: "账号健康", value: "accountHealth", icon: <HeartOutlined /> }
               ]}
-            />
-            {/* Workbench-wide platform scope: every tab below reads it, so it lives
-                beside the tab switcher rather than inside any single tab's form. */}
-            <Select
-              className="workbench-platform-select"
-              classNames={{ popup: { root: "platform-select-popup" } }}
-              value={platformFilter}
-              onChange={(value) => updatePlatformScope(value ?? allPlatformsFilterValue)}
-              options={platformFilterOptions}
-              optionRender={renderPlatformFilterOption}
-              labelRender={(item) =>
-                renderPlatformFilterBadge(
-                  platformFilterOptions.find((candidate) => candidate.value === item.value),
-                  item.label
-                )
-              }
             />
             {isRelationshipTab ? (
               <AntButton icon={<ReloadOutlined />} loading={loading} onClick={() => void loadResources(selectedUserId)}>
@@ -6775,17 +7019,15 @@ function ExistingOrchestrationView({
               )}
 
               {mode !== "group_migration" && selectedUser ? (
-                <div className="manual-user-platforms" aria-label="用户各平台当前分组">
-                  <Typography.Text type="secondary">各平台当前分组</Typography.Text>
+                <div className="manual-user-platforms" aria-label={`用户在平台 ${platform} 的当前分组`}>
+                  <Typography.Text type="secondary">当前分组</Typography.Text>
                   <Space size={4} wrap>
-                    {selectedUserPlatformTags.length === 0 ? (
-                      <Tag color="default">所有平台均无专属分组</Tag>
+                    {selectedUserDirectGroup ? (
+                      <Tag color={platformTagColor(platform)}>
+                        {selectedUserDirectGroup.name || unknownToText(selectedUserDirectGroup.group_id)}
+                      </Tag>
                     ) : (
-                      selectedUserPlatformTags.map((badge) => (
-                        <Tag key={badge.key} color={badge.color}>
-                          {badge.text}
-                        </Tag>
-                      ))
+                      <Tag color="default">本平台无专属分组</Tag>
                     )}
                   </Space>
                 </div>
@@ -6794,9 +7036,7 @@ function ExistingOrchestrationView({
               <Typography.Text type="secondary" className="manual-zone-hint">
                 {mode === "group_migration"
                   ? `${platformScopedGroups.filter((group) => group.rotation_supported).length} 可迁移分组 · ${groupMigrationScope.sourceUserCount} 相关用户`
-                  : `${users.length} 用户 · ${platformScopedGroups.length} 分组 · ${
-                      platformScope ? 1 : availablePlatforms.length || "0"
-                    } 平台`}
+                  : `${platformScopedUsers.length} 用户 · ${platformScopedGroups.length} 分组`}
               </Typography.Text>
             </section>
 
@@ -6842,11 +7082,9 @@ function ExistingOrchestrationView({
                     optionRender={renderGroupOption}
                     labelRender={(item) => renderGroupSelectLabel(targetGroupOptions, item)}
                     notFoundContent={
-                      activePlatform && mode !== "replace_group"
-                        ? `平台 ${activePlatform} 上暂无其他可用分组`
-                        : platformScope
-                        ? `平台 ${platformScope} 上暂无可用分组`
-                        : "暂无可用分组"
+                      mode === "replace_group"
+                        ? `平台 ${platform} 上暂无可用分组`
+                        : `平台 ${platform} 上暂无其他可用分组`
                     }
                   />
                 </div>
@@ -6854,19 +7092,17 @@ function ExistingOrchestrationView({
 
               {mode === "replace_group" ? (
                 <Typography.Text type="secondary" className="manual-platform-hint">
-                  {activePlatform
-                    ? `目标分组在平台 ${activePlatform}，当前分组已按该平台自动匹配。`
-                    : "目标分组决定操作的平台，当前分组会按该平台自动匹配；跨平台组合无法选中。"}
+                  {`本次操作固定在平台 ${platform}，当前分组已按该平台匹配。`}
                 </Typography.Text>
-              ) : mode === "group_migration" && activePlatform ? (
+              ) : mode === "group_migration" ? (
                 <Typography.Text type="secondary" className="manual-platform-hint">
-                  {`仅可迁移到平台 ${activePlatform} 上的分组。`}
+                  {`仅可迁移到平台 ${platform} 上的分组。`}
                 </Typography.Text>
-              ) : mode === "api_key" && activePlatform ? (
+              ) : (
                 <Typography.Text type="secondary" className="manual-platform-hint">
-                  {`所选 Key 的路由组在平台 ${activePlatform}，目标只列该平台的分组。`}
+                  {`所选 Key 的路由组在平台 ${platform}，目标只列该平台的分组。`}
                 </Typography.Text>
-              ) : null}
+              )}
 
               {mode === "group_migration" ? (
                 <section className="orchestration-keys-panel manual-keys-panel manual-group-migration-panel" aria-label="整组迁移范围">
@@ -6992,7 +7228,7 @@ function ExistingOrchestrationView({
           <DynamicOrchestrationView
             selectedUpstreamId={selectedUpstreamId}
             defaultUpstreamId={defaultUpstreamId}
-            platformScope={platformScope}
+            platform={platform}
             onAuthExpired={onAuthExpired}
             onRunRecorded={() => setRecordsRefreshSignal((value) => value + 1)}
           />
@@ -7000,10 +7236,10 @@ function ExistingOrchestrationView({
       </section>
 
       {activeTab === "migrations" ? (
-        <ProxyMigrationsView platformScope={platformScope} onAuthExpired={onAuthExpired} />
+        <ProxyMigrationsView platform={platform} onAuthExpired={onAuthExpired} />
       ) : null}
       {activeTab === "accountHealth" ? (
-        <AccountHealthView platformScope={platformScope} onAuthExpired={onAuthExpired} />
+        <AccountHealthView platform={platform} onAuthExpired={onAuthExpired} />
       ) : null}
       {isRelationshipTab ? (
         <>
@@ -7031,7 +7267,7 @@ function ExistingOrchestrationView({
                 optionRender={renderGroupOption}
                 maxTagCount="responsive"
                 onChange={updateGraphGroupFilters}
-                notFoundContent={loading ? <Spin size="small" /> : "暂无分组"}
+                notFoundContent={loading ? <Spin size="small" /> : `平台 ${platform} 上暂无分组`}
               />
               <Tag color={graphGroupFilterIds.length > 0 ? "blue" : "default"}>
                 {graphGroupFilterIds.length > 0 ? `${graphGroupFilterIds.length} 个分组` : "全部"}
@@ -7055,6 +7291,8 @@ function ExistingOrchestrationView({
 
       <RunRecordsPanel
         className="orchestration-records-island"
+        platform={platform}
+        groupsById={groupsById}
         onAuthExpired={onAuthExpired}
         refreshSignal={recordsRefreshSignal}
         onStatus={setStatus}
@@ -7068,12 +7306,17 @@ function ExistingOrchestrationView({
 function CreditControlView({
   activeTab,
   onTabChange,
+  platform,
   selectedUpstreamId,
   defaultUpstreamId,
   onAuthExpired
 }: {
   activeTab: CreditControlTab;
   onTabChange: (tab: CreditControlTab) => void;
+  // The app-wide platform scope. Credit rows carry no platform of their own and the
+  // list is paged server side, so the scope lands on the group filter — see the note
+  // above `scopedGroupOptions`.
+  platform: string;
   selectedUpstreamId: string;
   defaultUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
@@ -7124,20 +7367,37 @@ function CreditControlView({
   const [loadingRuns, setLoadingRuns] = useState(false);
   const [loadingAudit, setLoadingAudit] = useState(false);
   const [selectedPayload, setSelectedPayload] = useState<ApiPayload | null>(null);
+  const [groups, setGroups] = useState<OrchestrationGroup[]>([]);
 
   const selectedUserSet = useMemo(() => new Set(selectedUserIds), [selectedUserIds]);
+  // Credit rows carry group_id / group_name but no platform, so the platform of a
+  // group is read from /orchestration/groups — the same lookup KeyTransferView does.
+  // The list itself is paged by the backend (limit / offset / total), so filtering
+  // rows here would desync every page count; the scope lands on the filter instead,
+  // and a scoped group id is what the backend then filters on.
+  const scopedGroupOptions = useMemo(
+    () =>
+      groups
+        .filter((group) => groupPlatform(group) === platform)
+        .map((group) => buildGroupOption(group))
+        .sort((first, second) => first.label.localeCompare(second.label)),
+    [groups, platform]
+  );
 
-  function userListQuery(nextPage = page) {
+  // `activeFilters` defaults to the rendered filters, and is only ever passed
+  // explicitly by the platform-switch effect: that effect has to query with the
+  // filters it just reset, which the `filters` state does not carry yet.
+  function userListQuery(nextPage = page, activeFilters: CreditUserFilters = filters) {
     return compactParams({
-      window: filters.window,
-      search: filters.search.trim(),
-      status: filters.status,
-      group_id: filters.groupId.trim(),
-      usage_segment: filters.usageSegment,
-      balance_min: parseOptionalNumber(filters.balanceMin),
-      balance_max: parseOptionalNumber(filters.balanceMax),
-      consumption_min: parseOptionalNumber(filters.consumptionMin),
-      consumption_max: parseOptionalNumber(filters.consumptionMax),
+      window: activeFilters.window,
+      search: activeFilters.search.trim(),
+      status: activeFilters.status,
+      group_id: activeFilters.groupId.trim(),
+      usage_segment: activeFilters.usageSegment,
+      balance_min: parseOptionalNumber(activeFilters.balanceMin),
+      balance_max: parseOptionalNumber(activeFilters.balanceMax),
+      consumption_min: parseOptionalNumber(activeFilters.consumptionMin),
+      consumption_max: parseOptionalNumber(activeFilters.consumptionMax),
       limit: nextPage.limit,
       offset: nextPage.offset
     });
@@ -7166,7 +7426,7 @@ function CreditControlView({
     };
   }
 
-  async function loadUsers(nextPage = page) {
+  async function loadUsers(nextPage = page, activeFilters: CreditUserFilters = filters) {
     if (defaultOnly) {
       setUsers([]);
       setTotal(0);
@@ -7178,7 +7438,7 @@ function CreditControlView({
     setLoadingUsers(true);
     try {
       const payload = await requestJson<CreditControlUsersPayload>(
-        `/api/credit-control/users?${userListQuery(nextPage)}`,
+        `/api/credit-control/users?${userListQuery(nextPage, activeFilters)}`,
         { method: "GET" },
         "加载余额用户失败"
       );
@@ -7487,6 +7747,53 @@ function CreditControlView({
     }
   }
 
+  // Groups are the only source of platform on this screen, so they are loaded once per
+  // upstream and re-read by the filter for whatever platform is in force.
+  async function loadGroups() {
+    if (!selectedUpstreamId) {
+      setGroups([]);
+      return;
+    }
+    try {
+      const payload = await requestJson<OrchestrationGroupsPayload>(
+        `/orchestration/groups?${compactParams({ upstream_id: selectedUpstreamId })}`,
+        { method: "GET" },
+        "加载分组失败"
+      );
+      setGroups(payload.items);
+    } catch (error: unknown) {
+      if (!onAuthExpired(error, setStatus)) {
+        setGroups([]);
+      }
+    }
+  }
+
+  useEffect(() => {
+    void loadGroups();
+  }, [selectedUpstreamId]);
+
+  // A group id picked on another platform must not survive the switch: it would keep
+  // filtering the list by something the dropdown no longer offers. Dropping the id is
+  // only half the job — everything derived from it is stale the moment it goes:
+  //   * the table still shows the previous platform's page, so re-query from offset 0;
+  //   * a filter-mode adjustment preview describes a target set the emptied filter no
+  //     longer produces, and 确认执行 rebuilds its payload from the *current* filter —
+  //     leaving it live would let one click adjust every user the unscoped query
+  //     matches. Clearing the preview also disables 确认执行 until a fresh 预览.
+  // The policy preview is not touched on purpose: it is built from the policy draft
+  // (its own free-text 目标分组 field), not from these filters, so a platform switch
+  // leaves it describing exactly the draft still on screen.
+  useEffect(() => {
+    if (!filters.groupId || scopedGroupOptions.some((option) => option.value === filters.groupId)) {
+      return;
+    }
+    const nextFilters = { ...filters, groupId: "" };
+    setFilters(nextFilters);
+    setAdjustmentPreview(null);
+    void loadUsers({ ...page, offset: 0 }, nextFilters);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedGroupOptions]);
+
   useEffect(() => {
     if (defaultOnly) {
       setUsers([]);
@@ -7599,6 +7906,9 @@ function CreditControlView({
         {activeTab === "users" ? (
           <div className="credit-users-layout">
             <section className="credit-main-pane">
+              <Typography.Text type="secondary" className="credit-platform-hint">
+                余额按用户计、不分平台；分组筛选只列出 {platform} 平台的分组。
+              </Typography.Text>
               <form className="credit-filter-grid" onSubmit={applyUserFilters}>
                 <div className="credit-filter-row credit-filter-row-primary">
                   <Input
@@ -7625,11 +7935,19 @@ function CreditControlView({
                     disabled={defaultOnly}
                     onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
                   />
-                  <Input
-                    value={filters.groupId}
-                    placeholder="Group ID"
+                  <Select
+                    className="credit-group-filter"
+                    value={filters.groupId || undefined}
+                    placeholder={`${platform} 分组`}
                     disabled={defaultOnly}
-                    onChange={(event) => setFilters((current) => ({ ...current, groupId: event.target.value }))}
+                    allowClear
+                    showSearch
+                    optionFilterProp="searchText"
+                    options={scopedGroupOptions}
+                    optionRender={renderGroupOption}
+                    labelRender={(item) => renderGroupSelectLabel(scopedGroupOptions, item)}
+                    notFoundContent={`平台 ${platform} 上暂无分组`}
+                    onChange={(value) => setFilters((current) => ({ ...current, groupId: value ?? "" }))}
                   />
                   <Select
                     value={filters.usageSegment}
@@ -8231,8 +8549,31 @@ function GraphNode({
   );
 }
 
+// Every platform a run touched, resolved from the source/target groups its executions
+// name. An empty result means "unknown", not "no platform": the groups may already be
+// gone, and such a record must not be hidden from every platform at once.
+function runRecordPlatforms(
+  record: AutoRotationRunPayload,
+  groupsById: Map<string, OrchestrationGroup>
+): string[] {
+  const platforms = new Set<string>();
+  [record.planned, record.moved, record.skipped, record.failed, record.rollback_results].forEach((executions) => {
+    (executions ?? []).forEach((execution) => {
+      [execution.source_group_id, execution.target_group_id].forEach((groupId) => {
+        const value = groupPlatform(groupsById.get(idValue(groupId)) ?? null);
+        if (value) {
+          platforms.add(value);
+        }
+      });
+    });
+  });
+  return Array.from(platforms);
+}
+
 function RunRecordsPanel({
   className,
+  platform,
+  groupsById,
   onAuthExpired,
   refreshSignal = 0,
   onStatus
@@ -8289,18 +8630,27 @@ function RunRecordsPanel({
     void loadRecords();
   }, [refreshSignal]);
 
+  const scopedRecords = useMemo(
+    () =>
+      records.filter((record) => {
+        const platforms = runRecordPlatforms(record, groupsById);
+        return platforms.length === 0 || platforms.includes(platform);
+      }),
+    [groupsById, platform, records]
+  );
+
   const stats = useMemo(() => {
-    const rollbackable = records.filter((record) => {
+    const rollbackable = scopedRecords.filter((record) => {
       const counts = runCounts(record);
       return record.run_kind !== "manual" && !record.dry_run && counts.moved > 0 && !record.rollback_status;
     }).length;
     return {
-      total: records.length,
-      manual: records.filter((record) => record.run_kind === "manual").length,
-      automatic: records.filter((record) => record.run_kind !== "manual").length,
+      total: scopedRecords.length,
+      manual: scopedRecords.filter((record) => record.run_kind === "manual").length,
+      automatic: scopedRecords.filter((record) => record.run_kind !== "manual").length,
       rollbackable
     };
-  }, [records]);
+  }, [scopedRecords]);
 
   return (
     <section
@@ -8343,11 +8693,19 @@ function RunRecordsPanel({
         </div>
       </div>
       <div className="run-record-list-shell">
-        {records.length === 0 ? (
-          <Empty description={loading ? "正在加载运行记录" : "暂无运行记录"} />
+        {scopedRecords.length === 0 ? (
+          <Empty
+            description={
+              loading
+                ? "正在加载运行记录"
+                : records.length > 0
+                ? `平台 ${platform} 上暂无运行记录`
+                : "暂无运行记录"
+            }
+          />
         ) : (
           <div className="run-record-list" role="list">
-            {records.map((run) => {
+            {scopedRecords.map((run) => {
               const counts = runCounts(run);
               const sync = runSyncSummary(run);
               const hint = emptyRunHint(run);
@@ -8478,13 +8836,13 @@ function RunRecordsPanel({
 function DynamicOrchestrationView({
   selectedUpstreamId,
   defaultUpstreamId,
-  platformScope,
+  platform,
   onAuthExpired,
   onRunRecorded
 }: {
   selectedUpstreamId: string;
   defaultUpstreamId: string;
-  platformScope: string | null;
+  platform: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onRunRecorded: () => void;
 }) {
@@ -8505,10 +8863,8 @@ function DynamicOrchestrationView({
   const [running, setRunning] = useState<"preview" | "run" | null>(null);
   const [selectedPoolCandidateIds, setSelectedPoolCandidateIds] = useState<string[]>([]);
 
-  // The workbench-level platform scope narrows the whole rotation-pool view.
-  const scopedCandidates = platformScope
-    ? candidates.filter((group) => normalizedPlatform(group.platform) === platformScope)
-    : candidates;
+  // The app-wide platform scopes the whole rotation-pool view.
+  const scopedCandidates = candidates.filter((group) => normalizedPlatform(group.platform) === platform);
   const selectedGroups = scopedCandidates.filter((group) => group.rotation_selected || group.selected);
   const selectedLandingGroups = scopedCandidates.filter((group) => group.landing_selected);
   const landingEligibleGroups = scopedCandidates.filter((group) => !group.is_subscription);
@@ -8583,6 +8939,20 @@ function DynamicOrchestrationView({
     }
     void loadDynamicConfig();
   }, [defaultOnly]);
+
+  // A candidate ticked on another platform must not survive the switch: the picker
+  // only offers this platform's groups, so a leftover id is invisible on screen yet
+  // still feeds 加入轮转池 / 加入 Landing 池. Prune it against what the current scope
+  // shows — the same pruning loadDynamicConfig does when the candidate list itself
+  // changes (there against eligibility, here against the platform).
+  useEffect(() => {
+    const visibleIds = new Set(scopedCandidates.map((group) => idValue(group.group_id)));
+    setSelectedPoolCandidateIds((current) => {
+      const next = current.filter((id) => visibleIds.has(id));
+      return next.length === current.length ? current : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [platform, candidates]);
 
   async function saveConfig(nextConfig = config, { showStatus = true } = {}) {
     if (defaultOnly) {
@@ -8751,11 +9121,15 @@ function DynamicOrchestrationView({
         return;
       }
       setStatus({ message: dryRun ? "正在预览动态编排" : "正在执行动态编排", tone: "info" });
+      // The panel only ever shows this platform's pool, so the run has to be scoped to
+      // it too: without `platform` the backend rotates every platform's pool groups,
+      // i.e. far more than the Rotation N tag above claims. The scheduled runs keep
+      // sending no platform and so keep covering everything.
       const payload = await requestJson<AutoRotationRunPayload>(
         "/rotation/auto/run",
         {
           method: "POST",
-          body: JSON.stringify({ dry_run: dryRun })
+          body: JSON.stringify({ dry_run: dryRun, platform })
         },
         dryRun ? "动态编排预览失败" : "动态编排执行失败"
       );
@@ -8763,8 +9137,8 @@ function DynamicOrchestrationView({
       const failed = payload.failed?.length ?? 0;
       setStatus({
         message: dryRun
-          ? `预览完成：计划 ${payload.planned?.length ?? 0}，跳过 ${payload.skipped?.length ?? 0}，失败 ${failed}`
-          : `执行完成：迁移 ${payload.moved?.length ?? 0}，跳过 ${payload.skipped?.length ?? 0}，失败 ${failed}`,
+          ? `预览完成（仅 ${platform}）：计划 ${payload.planned?.length ?? 0}，跳过 ${payload.skipped?.length ?? 0}，失败 ${failed}`
+          : `执行完成（仅 ${platform}）：迁移 ${payload.moved?.length ?? 0}，跳过 ${payload.skipped?.length ?? 0}，失败 ${failed}`,
         tone: failed > 0 ? "error" : "success"
       });
     } catch (error: unknown) {
@@ -8974,6 +9348,9 @@ function DynamicOrchestrationView({
               message={status.message}
             />
           ) : null}
+          <Typography.Text type="secondary">
+            {`预览与执行只覆盖 ${platform} 平台的轮转池（Rotation ${selectedGroups.length} / Landing ${selectedLandingGroups.length}），其他平台的池不受影响；定时任务仍覆盖全部平台。`}
+          </Typography.Text>
           <Space wrap>
             <AntButton
               type="primary"
@@ -8990,7 +9367,7 @@ function DynamicOrchestrationView({
               disabled={defaultOnly || running !== null || loading || selectedGroups.length === 0}
               onClick={() => void runDynamic(true)}
             >
-              预览动态编排
+              {`预览动态编排（${platform}）`}
             </AntButton>
             <AntButton
               danger
@@ -8999,7 +9376,7 @@ function DynamicOrchestrationView({
               disabled={defaultOnly || running !== null || loading || selectedGroups.length === 0 || !config.enabled}
               onClick={() => void runDynamic(false)}
             >
-              执行动态编排
+              {`执行动态编排（${platform}）`}
             </AntButton>
           </Space>
         </div>
@@ -9021,10 +9398,14 @@ function summarizeReasons(items?: RotationExecutionPayload[]): RunReasonSummary[
 }
 
 function ProvisionForm({
+  platform,
   selectedUpstreamId,
   onAuthExpired,
   onFlowChanged
 }: {
+  // The app-wide platform scope: the target platform of everything this form creates.
+  // There is no local picker any more — switching platforms is a toolbar action.
+  platform: string;
   selectedUpstreamId: string;
   onAuthExpired: (error: unknown, setStatus?: (status: StatusState) => void) => boolean;
   onFlowChanged: () => void;
@@ -9038,12 +9419,13 @@ function ProvisionForm({
   const [startPayload, setStartPayload] = useState<ProvisionStartPayload | null>(null);
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [busyAction, setBusyAction] = useState<"start" | "complete" | "apikey" | null>(null);
-  const [platform, setPlatform] = useState(DEFAULT_PROVISION_PLATFORM);
-  const [supportedPlatforms, setSupportedPlatforms] = useState<string[]>([DEFAULT_PROVISION_PLATFORM]);
+  // null until the backend answers: "not loaded yet" must not read as "unsupported",
+  // or the form would disable OAuth for a heartbeat on every mount.
+  const [supportedPlatforms, setSupportedPlatforms] = useState<string[] | null>(null);
 
-  // The platform list is a backend capability, never a hardcoded enum here: a
-  // platform gains a picker entry the moment the backend can provision it. Fetched
-  // once on mount — the capability does not change while the page is open.
+  // Which platforms the backend can drive an OAuth handoff for is a backend
+  // capability, never a hardcoded enum here. Fetched once on mount — the capability
+  // does not change while the page is open.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -9058,10 +9440,9 @@ function ProvisionForm({
           return;
         }
         setSupportedPlatforms(platforms);
-        setPlatform((current) => (platforms.includes(current) ? current : platforms[0]));
       } catch {
-        // Swallowed on purpose: the form stays usable on the default platform, and a
-        // real problem (expired session included) surfaces on submit.
+        // Swallowed on purpose: the form stays usable, and a real problem (expired
+        // session included) surfaces on submit.
       }
     })();
     return () => {
@@ -9069,31 +9450,50 @@ function ProvisionForm({
     };
   }, []);
 
-  const platformOptions = useMemo(
-    () => supportedPlatforms.map((value) => ({ value, label: value })),
-    [supportedPlatforms]
-  );
+  // Only the OAuth flow is narrowed: it needs per-platform endpoints and credential
+  // assembly. The API-key flow takes any platform the operator names — upstream applies
+  // no platform whitelist to account creation — so it stays available everywhere.
+  const oauthSupported = supportedPlatforms === null || supportedPlatforms.includes(platform);
   const apiBaseUrlPlaceholder = API_BASE_URL_PLACEHOLDERS[platform] ?? "https://api.example.com/v1";
 
+  // A platform without OAuth provisioning leaves API Key as the only way in, so the
+  // form lands there instead of on a mode it cannot submit.
+  useEffect(() => {
+    if (!oauthSupported) {
+      setMode("apikey");
+    }
+  }, [oauthSupported]);
+
   function switchMode(next: "oauth" | "apikey") {
+    if (next === "oauth" && !oauthSupported) {
+      return;
+    }
     setMode(next);
     setStatus(emptyStatus);
   }
 
+  // The platform is the app-wide scope now, so it is stated here, not chosen here.
   const platformField = (
-    <label className="field provision-platform-field">
+    <div className="field provision-platform-field">
       <span>平台</span>
-      <Select
-        className="provision-platform-select"
-        // Same badge, same centering hook as the orchestration platform picker.
-        classNames={{ popup: { root: "platform-select-popup" } }}
-        value={platform}
-        options={platformOptions}
-        onChange={(value) => setPlatform(value)}
-        optionRender={(option) => <PlatformTag platform={String(option.value)} />}
-        labelRender={(item) => <PlatformTag platform={String(item.value)} />}
-      />
-    </label>
+      <div className="provision-platform-scope">
+        <PlatformTag platform={platform} />
+        <Typography.Text type="secondary">在顶部切换平台</Typography.Text>
+      </div>
+    </div>
+  );
+
+  const oauthUnsupportedAlert = oauthSupported ? null : (
+    <Alert
+      className="provision-platform-alert"
+      showIcon
+      type="warning"
+      message={`平台 ${platform} 不支持 OAuth 预配${
+        supportedPlatforms && supportedPlatforms.length > 0
+          ? `，可用平台：${supportedPlatforms.join("、")}`
+          : ""
+      }。已切换到 API Key 方式，该方式不限平台。`}
+    />
   );
 
   const oauthUrl = typeof startPayload?.oauth_url === "string" ? startPayload.oauth_url : "";
@@ -9247,6 +9647,8 @@ function ProvisionForm({
           <button
             className={mode === "oauth" ? "active" : ""}
             type="button"
+            disabled={!oauthSupported}
+            title={oauthSupported ? undefined : `平台 ${platform} 不支持 OAuth 预配`}
             onClick={() => switchMode("oauth")}
           >
             OAuth 登录
@@ -9259,6 +9661,7 @@ function ProvisionForm({
             API Key
           </button>
         </div>
+        {oauthUnsupportedAlert}
         {mode === "oauth" ? (
         <>
         <form className="form-stack" onSubmit={startProvision}>

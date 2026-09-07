@@ -1,4 +1,4 @@
-import { Select } from "antd";
+import { Select, Tag } from "antd";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -13,12 +13,14 @@ import {
   loadGroupWhitelistOptions,
   loadHealthAlertWhitelist,
   loadProxyWhitelistOptions,
+  normalizedPlatform,
   saveHealthAlertWhitelist
 } from "./api";
 import { notifyError, notifySuccess } from "../notify";
 
 type Props = {
   settings: NotificationSettings;
+  platform: string;
   onChangeAccountWhitelist: (partial: Partial<AccountAlertWhitelist>) => void;
   onChangeGroupWhitelist: (partial: Partial<GroupAlertWhitelist>) => void;
   renderSaveAction: (scope: string) => ReactNode;
@@ -29,18 +31,45 @@ function withStoredValues(options: WhitelistOption[], values: string[]): Whiteli
   const known = new Set(options.map((option) => option.value));
   const extras = values
     .filter((value) => value && !known.has(value))
-    .map((value) => ({ value, label: value }));
+    .map((value) => ({ value, label: value, platform: null }));
   return [...options, ...extras];
+}
+
+// Account / group selectors follow the app-wide platform: the dropdown only offers
+// entries of that platform (plus the ones whose platform is unknown), while ids that
+// were stored under another platform stay selected — and say so — so nothing silently
+// drops out of a whitelist the operator cannot see any more.
+function withPlatformScope(
+  options: WhitelistOption[],
+  values: string[],
+  platform: string
+): WhitelistOption[] {
+  const scope = normalizedPlatform(platform);
+  const all = withStoredValues(options, values);
+  if (!scope) return all;
+  const selected = new Set(values.filter(Boolean));
+  return all
+    .filter(
+      (option) =>
+        option.platform === null || option.platform === scope || selected.has(option.value)
+    )
+    .map((option) =>
+      option.platform && option.platform !== scope
+        ? { ...option, label: `${option.label} · ${option.platform}` }
+        : option
+    );
 }
 
 export function WhitelistPanel({
   settings,
+  platform,
   onChangeAccountWhitelist,
   onChangeGroupWhitelist,
   renderSaveAction
 }: Props) {
   const account = settings.account_alert_whitelist;
   const group = settings.group_alert_whitelist;
+  const scope = normalizedPlatform(platform);
 
   const [accountOptions, setAccountOptions] = useState<WhitelistOption[]>([]);
   const [groupOptions, setGroupOptions] = useState<WhitelistOption[]>([]);
@@ -107,6 +136,11 @@ export function WhitelistPanel({
       <header className="notif-section-head notif-whitelist-head">
         <div>
           <h3>告警白名单</h3>
+          {scope ? (
+            <p className="notif-whitelist-scope">
+              当前平台 <Tag>{scope}</Tag>
+            </p>
+          ) : null}
         </div>
         <div className="notif-section-actions">{renderSaveAction("whitelist")}</div>
       </header>
@@ -122,11 +156,11 @@ export function WhitelistPanel({
             optionFilterProp="label"
             maxTagCount="responsive"
             loading={loading}
-            options={withStoredValues(accountOptions, account.ids)}
+            options={withPlatformScope(accountOptions, account.ids, platform)}
             onChange={(values) =>
               onChangeAccountWhitelist({ ids: values as string[] })
             }
-            notFoundContent={loading ? "加载中…" : "暂无账号"}
+            notFoundContent={loading ? "加载中…" : scope ? `平台 ${scope} 上暂无账号` : "暂无账号"}
           />
           <small>选中的账号即使失效也不会触发「账号失效」告警</small>
         </label>
@@ -140,9 +174,9 @@ export function WhitelistPanel({
             optionFilterProp="label"
             maxTagCount="responsive"
             loading={loading}
-            options={withStoredValues(groupOptions, group.ids)}
+            options={withPlatformScope(groupOptions, group.ids, platform)}
             onChange={(values) => onChangeGroupWhitelist({ ids: values as string[] })}
-            notFoundContent={loading ? "加载中…" : "暂无分组"}
+            notFoundContent={loading ? "加载中…" : scope ? `平台 ${scope} 上暂无分组` : "暂无分组"}
           />
           <small>选中的分组即使容量跑满也不会触发「分组容量满载」告警</small>
         </label>
@@ -160,7 +194,7 @@ export function WhitelistPanel({
             onChange={(values) => void persistHealthWhitelist("proxy", values as string[])}
             notFoundContent={loading ? "加载中…" : "暂无代理"}
           />
-          <small>选中的代理判死也不会告警，仍照常探活和搬迁账号（改动即时生效）</small>
+          <small>选中的代理判死也不会告警，仍照常探活和搬迁账号（代理不分平台，改动即时生效）</small>
         </label>
         <label className="notif-field">
           <span>驱逐白名单{evictionMuted.length > 0 ? ` (${evictionMuted.length})` : ""}</span>
@@ -172,9 +206,9 @@ export function WhitelistPanel({
             optionFilterProp="label"
             maxTagCount="responsive"
             loading={loading || savingScope === "account"}
-            options={withStoredValues(accountOptions, evictionMuted)}
+            options={withPlatformScope(accountOptions, evictionMuted, platform)}
             onChange={(values) => void persistHealthWhitelist("account", values as string[])}
-            notFoundContent={loading ? "加载中…" : "暂无账号"}
+            notFoundContent={loading ? "加载中…" : scope ? `平台 ${scope} 上暂无账号` : "暂无账号"}
           />
           <small>选中的账号被健康巡检驱逐时不会告警，驱逐动作照常执行（改动即时生效）</small>
         </label>
