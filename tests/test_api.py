@@ -9849,7 +9849,9 @@ def test_proxy_health_account_pin_endpoints(client) -> None:
         "proxies": [
             {"id": 9, "name": "us-node", "host": "1.2.3.4", "port": 1080, "status": "active"}
         ],
-        "accounts": [{"id": 3, "name": "acct-3", "proxy_id": None}],
+        "accounts": [
+            {"id": 3, "name": "acct-3", "platform": "OpenAI", "proxy_id": None}
+        ],
     }
 
     def fake_request(self, method: str, url: str, json=None, params=None, timeout=None):
@@ -9867,6 +9869,10 @@ def test_proxy_health_account_pin_endpoints(client) -> None:
         listed = client.get("/api/proxy-health/account-assignments")
         assert listed.status_code == 200
         assert listed.json()["items"][0]["pinned_proxy_id"] is None
+        # The console scopes this table to the platform in force, so the account's
+        # own platform has to reach the client, normalised the way every other
+        # platform comparison in the backend does it.
+        assert listed.json()["items"][0]["platform"] == "openai"
 
         pinned = client.put(
             "/api/proxy-health/account-assignments/3/pin", json={"proxy_id": "9"}

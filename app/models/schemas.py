@@ -1060,6 +1060,8 @@ class ProxyAccountMoveResponse(BaseModel):
 class ProxyAccountAssignmentResponse(BaseModel):
     account_id: str
     account_name: str = ""
+    # Opaque upstream platform of the account; None when upstream did not name one.
+    platform: str | None = None
     proxy_id: str | None = None
     pinned_proxy_id: str | None = None
     pinned_at: str | None = None

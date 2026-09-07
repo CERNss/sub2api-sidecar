@@ -58,11 +58,18 @@ def _proxy(proxy_id: int, name: str = "", status: str = "active") -> dict:
     return {"id": proxy_id, "name": name or f"proxy-{proxy_id}", "status": status}
 
 
-def _account(account_id: int, proxy_id: int | None) -> dict:
+def _account(
+    account_id: int, proxy_id: int | None, platform: str | None = "openai"
+) -> dict:
     raw = {"id": account_id, "name": f"acct-{account_id}"}
     if proxy_id is not None:
         raw["proxy_id"] = proxy_id
-    return {"id": account_id, "name": f"acct-{account_id}", "raw": raw}
+    return {
+        "id": account_id,
+        "name": f"acct-{account_id}",
+        "platform": platform,
+        "raw": raw,
+    }
 
 
 def _service(
@@ -226,6 +233,27 @@ def test_rebalance_evenly_splits_with_minimal_moves(app_env) -> None:
     assert counts == {"1": 2, "2": 2, "3": 2}
     # The direct account still has no proxy.
     assert "proxy_id" not in fake.accounts[6]["raw"]
+
+
+def test_account_assignments_carry_the_account_platform(app_env) -> None:
+    fake = FakeProxyClient()
+    fake.proxies = [_proxy(1)]
+    fake.accounts = [
+        _account(11, 1),
+        _account(12, 1, platform="  Grok "),
+        _account(13, None, platform=None),
+    ]
+    service, _ = _service(app_env, fake, ProxyHealthRuntimeSettings())
+
+    platforms = {
+        item["account_id"]: item["platform"]
+        for item in service.list_accounts_with_assignment()
+    }
+
+    # The console scopes this table by platform, so it must survive the projection,
+    # trimmed and case folded; an account upstream left unlabelled stays None so the
+    # UI can keep showing it rather than hiding it behind a guess.
+    assert platforms == {"11": "openai", "12": "grok", "13": None}
 
 
 def test_pin_binds_account_and_survives_rebalance(app_env) -> None:

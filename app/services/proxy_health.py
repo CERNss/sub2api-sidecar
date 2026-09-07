@@ -32,6 +32,19 @@ class ProxyHealthError(ProvisioningError):
     """Raised when a proxy-health operation cannot proceed."""
 
 
+def _normalize_platform(value: Any) -> str | None:
+    """Trim an upstream-supplied platform down to "named" or "not named".
+
+    Mirrors ``normalize_optional_platform`` in app.main (deliberately duplicated
+    rather than imported, so a service never depends on the API layer) plus the
+    case folding every platform comparison in the services already does, e.g.
+    ``app/services/provisioning.py``. Platform stays an opaque string: nothing is
+    validated against a list.
+    """
+    text = str(value or "").strip().lower()
+    return text or None
+
+
 def _optional_float(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -108,6 +121,9 @@ class ProxyHealthService:
                 {
                     "account_id": account_id,
                     "account_name": str(account.get("name") or ""),
+                    # The console scopes this table to the platform in force, so the
+                    # account's own platform has to survive the projection.
+                    "platform": _normalize_platform(account.get("platform")),
                     "proxy_id": None if proxy_id in (None, "", 0) else str(proxy_id),
                     "pinned_proxy_id": pin.proxy_id if pin else None,
                     "pinned_at": pin.pinned_at.isoformat() if pin else None,
