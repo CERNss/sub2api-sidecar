@@ -88,6 +88,7 @@ sub2api:
       - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
+      - gpt-6-astra
       - gpt-image-2
     account_temporary_unschedulable: true
     account_temporary_unschedulable_rules:
