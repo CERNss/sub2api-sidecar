@@ -443,7 +443,7 @@ https://sub2api.example.com/sidecar/
 - 创建 OAuth 账号时携带 `wsmode=context_pool`
 - 创建 OAuth 账号时携带 `concurrency=6`
 - 创建 OAuth 账号时打开 `temporary_unschedulable`
-- 创建 OAuth 账号时附带模型白名单：`gpt-5.3-codex`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.5`、`codex-auto-review`、`gpt-images-2`
+- 创建 OAuth 账号时附带模型白名单：`codex-auto-review`、`gpt-5.3-codex-spark`、`gpt-5.5`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-6-astra`、`gpt-image-2`
 - 创建 OAuth 账号时附带三条默认停调规则：
   - `529` -> 暂停 `60` 分钟，关键词 `overloaded, too many`
   - `429` -> 暂停 `10` 分钟，关键词 `rate limit, too many requests`
