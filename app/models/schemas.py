@@ -775,6 +775,10 @@ class AutoRotationConfigResponse(BaseModel):
     imbalance_epsilon: float = 0.0
     improvement_delta: float = 0.0
     schedule_source_group_ids: list[Any] = Field(default_factory=list)
+    evacuate_unschedulable_sources: bool = True
+    evacuate_quota_used_percent: float | None = 95.0
+    capacity_weighted_targets: bool = True
+    protected_user_ids: list[Any] = Field(default_factory=list)
 
 
 class AutoRotationConfigRequest(BaseModel):
@@ -786,6 +790,12 @@ class AutoRotationConfigRequest(BaseModel):
     imbalance_epsilon: float = Field(default=0.0, ge=0.0)
     improvement_delta: float = Field(default=0.0, ge=0.0)
     schedule_source_group_ids: list[Any] = Field(default_factory=list)
+    # Evacuation triggers: emptying a group whose accounts can no longer serve
+    # traffic. null on the quota percent turns that half of it off.
+    evacuate_unschedulable_sources: bool = True
+    evacuate_quota_used_percent: float | None = Field(default=95.0, gt=0.0, le=100.0)
+    capacity_weighted_targets: bool = True
+    protected_user_ids: list[Any] = Field(default_factory=list)
 
 
 class AutoRotationConfigEnvelope(BaseModel):

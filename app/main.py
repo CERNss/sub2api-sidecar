@@ -3114,6 +3114,10 @@ def auto_rotation_config_response() -> AutoRotationConfigEnvelope:
             imbalance_epsilon=config.imbalance_epsilon,
             improvement_delta=config.improvement_delta,
             schedule_source_group_ids=list(config.schedule_source_group_ids),
+            evacuate_unschedulable_sources=config.evacuate_unschedulable_sources,
+            evacuate_quota_used_percent=config.evacuate_quota_used_percent,
+            capacity_weighted_targets=config.capacity_weighted_targets,
+            protected_user_ids=list(config.protected_user_ids),
         ),
         landing_pool=landing_pool,
         rotation_pool=rotation_pool,
@@ -3150,6 +3154,10 @@ def rotation_auto_config_update(
         imbalance_epsilon=payload.imbalance_epsilon,
         improvement_delta=payload.improvement_delta,
         schedule_source_group_ids=tuple(payload.schedule_source_group_ids),
+        evacuate_unschedulable_sources=payload.evacuate_unschedulable_sources,
+        evacuate_quota_used_percent=payload.evacuate_quota_used_percent,
+        capacity_weighted_targets=payload.capacity_weighted_targets,
+        protected_user_ids=tuple(payload.protected_user_ids),
     )
     return JSONResponse(
         status_code=200,

@@ -41,6 +41,11 @@ KEY_NAME_PATTERN = "service:environment:object:version:email"
 # Platforms are opaque strings coming from the upstream group objects; nothing in
 # this module may enumerate or parse them (group names are never parsed either).
 DEFAULT_PLATFORM = "openai"
+# Weight given to a group whose accounts publish no quota reading at all (every
+# platform except openai today). Any constant works as long as every such group
+# gets the same one -- equal weights make capacity balancing collapse back into
+# plain load balancing for that platform instead of skewing it.
+_NEUTRAL_CAPACITY_WEIGHT = 100.0
 
 
 @dataclass
@@ -1821,6 +1826,26 @@ class RotationService:
         group_load_state = self._initial_pool_group_loads(sorted_pool, ordered_candidates)
         target_loads = group_load_state.loads
         target_availability = self._target_group_availability()
+        # Groups that must be emptied (account switched off, or quota spent), and
+        # therefore must also never be handed a user by any other decision below.
+        evacuation_reasons = self._evacuation_reasons_by_group_key(
+            sorted_pool,
+            availability=target_availability,
+            runtime_config=runtime_config,
+        )
+        healthy_pool_by_platform: dict[str | None, list[RotationPoolGroup]] = {
+            platform: [
+                pool_group
+                for pool_group in groups
+                if self._normalize_key(pool_group.group_id) not in evacuation_reasons
+            ]
+            for platform, groups in pool_by_platform.items()
+        }
+        if evacuation_reasons:
+            logger.info(
+                "Auto-rotation evacuation targets | groups=%s",
+                ",".join(f"{key}={reason}" for key, reason in sorted(evacuation_reasons.items())),
+            )
 
         if runtime_config.auto_assign_new_users:
             for assignment in sync_result.new_user_candidates:
@@ -1828,7 +1853,7 @@ class RotationService:
                 usage_value = float(usage_snapshot["usage_value"])
                 assignment.has_api_keys = usage_snapshot["has_api_keys"]
                 platform = self._assignment_platform(assignment, group_index)
-                platform_pool = pool_by_platform.get(platform, [])
+                platform_pool = healthy_pool_by_platform.get(platform, [])
                 if not platform_pool:
                     skipped.append(
                         self._skipped_result(
@@ -1842,7 +1867,12 @@ class RotationService:
                         )
                     )
                     continue
-                target_group = self._select_least_loaded_usage_group(platform_pool, target_loads)
+                target_group = self._select_landing_target_group(
+                    platform_pool,
+                    target_loads,
+                    availability=target_availability,
+                    runtime_config=runtime_config,
+                )
                 target_key = self._normalize_key(target_group.group_id)
                 reason = f"auto assign new user by usage load window={usage_snapshot['usage_window'].value} usage={usage_value}"
                 group_loads_before = self._group_load_metadata(
@@ -1900,13 +1930,34 @@ class RotationService:
         for candidate in ordered_candidates:
             assignment = candidate.assignment
             platform = self._assignment_platform(assignment, group_index)
-            platform_pool = pool_by_platform.get(platform, [])
+            source_key = self._normalize_key(assignment.current_group_id)
+            evacuation_reason = evacuation_reasons.get(source_key)
+            if self._user_is_protected(assignment.user_id, runtime_config):
+                # Pinned relay identities: their keys sit on a specific group on
+                # purpose, so they are exempt even from an evacuation.
+                skipped.append(
+                    self._skipped_result(
+                        assignment=assignment,
+                        trigger_type=trigger_type,
+                        reason="User is protected from automatic rotation",
+                        usage_window=candidate.usage_snapshot["usage_window"],
+                        usage_value=candidate.usage_value,
+                        usage_snapshot=candidate.usage_snapshot,
+                        persist=not dry_run,
+                    )
+                )
+                continue
+            platform_pool = healthy_pool_by_platform.get(platform, [])
             if not platform_pool:
                 skipped.append(
                     self._skipped_result(
                         assignment=assignment,
                         trigger_type=trigger_type,
-                        reason=f"No rotation pool groups are available on platform {platform}",
+                        reason=(
+                            f"No healthy rotation pool groups are available on platform {platform}"
+                            if pool_by_platform.get(platform)
+                            else f"No rotation pool groups are available on platform {platform}"
+                        ),
                         usage_window=candidate.usage_snapshot["usage_window"],
                         usage_value=candidate.usage_value,
                         usage_snapshot=candidate.usage_snapshot,
@@ -1921,20 +1972,43 @@ class RotationService:
                 for pool_group in platform_pool
                 if self._normalize_key(pool_group.group_id) in target_loads
             }
-            if imbalance_epsilon > 0 and platform_loads:
+            # The dead band asks "is the pool balanced enough to leave alone?".
+            # For an evacuation that question is irrelevant: the user is sitting on
+            # an account that cannot serve them, however tidy the load chart looks.
+            if evacuation_reason is None and imbalance_epsilon > 0 and platform_loads:
                 spread = max(platform_loads.values()) - min(platform_loads.values())
                 if spread <= imbalance_epsilon:
                     dead_band_skipped = True
                     continue
-            source_key = self._normalize_key(assignment.current_group_id)
-            target_group, selection = self._select_usage_balancing_target_group(
-                candidate,
-                platform_pool,
-                target_loads,
-                improvement_delta=improvement_delta,
-            )
+            if evacuation_reason is not None:
+                target_group = self._select_landing_target_group(
+                    platform_pool,
+                    target_loads,
+                    availability=target_availability,
+                    runtime_config=runtime_config,
+                )
+                selection = {
+                    "selection_reason": "source_group_evacuation",
+                    "evacuation_reason": evacuation_reason,
+                    "before_gap": None,
+                    "after_gap": None,
+                    "spread_improvement": 0.0,
+                }
+            else:
+                target_group, selection = self._select_usage_balancing_target_group(
+                    candidate,
+                    platform_pool,
+                    target_loads,
+                    improvement_delta=improvement_delta,
+                    availability=target_availability,
+                    runtime_config=runtime_config,
+                )
             target_key = self._normalize_key(target_group.group_id)
-            reason = f"auto rotation by usage load window={candidate.usage_snapshot['usage_window'].value} usage={candidate.usage_value}"
+            reason = (
+                f"evacuate source group ({evacuation_reason})"
+                if evacuation_reason is not None
+                else f"auto rotation by usage load window={candidate.usage_snapshot['usage_window'].value} usage={candidate.usage_value}"
+            )
             before_loads = self._group_load_metadata(
                 target_loads,
                 group_load_state.sources,
@@ -1947,7 +2021,11 @@ class RotationService:
                 usage_value=candidate.usage_value,
             )
             metadata = {
-                "decision_type": "usage_balancing",
+                "decision_type": (
+                    "source_group_evacuation"
+                    if evacuation_reason is not None
+                    else "usage_balancing"
+                ),
                 "usage_loads_before": self._serialize_usage_loads(target_loads),
                 "group_loads_before": before_loads,
                 "group_loads_after": after_loads,
@@ -2048,6 +2126,10 @@ class RotationService:
         schedule_source_group_ids: tuple[Any, ...],
         imbalance_epsilon: float = 0.0,
         improvement_delta: float = 0.0,
+        evacuate_unschedulable_sources: bool = True,
+        evacuate_quota_used_percent: float | None = 95.0,
+        capacity_weighted_targets: bool = True,
+        protected_user_ids: tuple[Any, ...] = (),
     ) -> AutoRotationRuntimeConfig:
         if cooldown_minutes < 0:
             raise RotationExecutionError("cooldown_minutes must be >= 0")
@@ -2055,6 +2137,12 @@ class RotationService:
             raise RotationExecutionError("imbalance_epsilon must be >= 0")
         if improvement_delta < 0:
             raise RotationExecutionError("improvement_delta must be >= 0")
+        if evacuate_quota_used_percent is not None and not (
+            0 < float(evacuate_quota_used_percent) <= 100
+        ):
+            raise RotationExecutionError(
+                "evacuate_quota_used_percent must be within (0, 100], or null to disable"
+            )
         now = datetime.now(timezone.utc)
         existing = self.store.get_auto_rotation_config()
         config = AutoRotationRuntimeConfig(
@@ -2066,6 +2154,10 @@ class RotationService:
             imbalance_epsilon=imbalance_epsilon,
             improvement_delta=improvement_delta,
             schedule_source_group_ids=schedule_source_group_ids,
+            evacuate_unschedulable_sources=evacuate_unschedulable_sources,
+            evacuate_quota_used_percent=evacuate_quota_used_percent,
+            capacity_weighted_targets=capacity_weighted_targets,
+            protected_user_ids=protected_user_ids,
             created_at=existing.created_at if existing else now,
             updated_at=now,
         )
@@ -2709,6 +2801,140 @@ class RotationService:
                 "Target group has no schedulable upstream accounts",
             )
         return None
+
+    def _account_quota_used_percent(self, account: dict[str, Any]) -> float | None:
+        """Quota utilisation this account reports, as a 0-100 float.
+
+        ``usage_7d_percent`` is the client's normalised field and the one that
+        survives into the operational snapshot; the raw ``extra.*`` spellings are
+        kept as a fallback for accounts that came straight off the upstream API.
+        Upstream is loose about the type -- int, float, or a string like ``"0%"``.
+        Platforms other than openai publish nothing at all, which is why "unknown"
+        is None rather than 0: a missing reading must never read as "wide open".
+        """
+        for field_name in (
+            "usage_7d_percent",
+            "extra.codex_7d_used_percent",
+            "codex_7d_used_percent",
+        ):
+            value = self._account_nested_value(account, field_name)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                text = value.strip().rstrip("%").strip()
+                if not text:
+                    continue
+                try:
+                    return float(text)
+                except ValueError:
+                    continue
+
+        raw_payload = account.get("raw")
+        if isinstance(raw_payload, dict) and raw_payload is not account:
+            return self._account_quota_used_percent(raw_payload)
+        return None
+
+    def _group_quota_used_percent(
+        self,
+        group_id: Any,
+        availability: TargetGroupAvailability,
+    ) -> float | None:
+        """Utilisation of the *roomiest* schedulable account backing a group.
+
+        A group is only as exhausted as its best remaining account, so several
+        accounts on one group take the minimum. Accounts that cannot be scheduled
+        at all are excluded -- their quota is irrelevant, and counting them would
+        let a dead-but-idle account mask an exhausted live one.
+        """
+        accounts = availability.accounts_by_group_key.get(self._normalize_key(group_id), [])
+        percents = [
+            percent
+            for account in accounts
+            if self._account_is_schedulable_for_rotation(account)
+            for percent in (self._account_quota_used_percent(account),)
+            if percent is not None
+        ]
+        if not percents:
+            return None
+        return min(percents)
+
+    def _group_remaining_capacity(
+        self,
+        group_id: Any,
+        availability: TargetGroupAvailability,
+    ) -> float:
+        """Remaining quota share of a group, used as its weight when landing users.
+
+        Groups that publish no quota reading (every non-openai platform today) all
+        return the same neutral weight, which degrades capacity weighting back to
+        plain "emptiest wins" for that platform instead of skewing it.
+        """
+        used = self._group_quota_used_percent(group_id, availability)
+        if used is None:
+            return _NEUTRAL_CAPACITY_WEIGHT
+        return max(0.0, 100.0 - used)
+
+    def _group_evacuation_reason(
+        self,
+        group_id: Any,
+        *,
+        availability: TargetGroupAvailability,
+        runtime_config: AutoRotationRuntimeConfig,
+    ) -> str | None:
+        """Why this group can no longer hold users, or None if it is healthy."""
+        group_key = self._normalize_key(group_id)
+        if group_key not in availability.groups_by_key:
+            # Unknown groups are left to the existing precondition checks: this
+            # function decides whether to *empty* a live group, and refusing to
+            # guess about a group upstream does not report keeps that separate.
+            return None
+        accounts = availability.accounts_by_group_key.get(group_key, [])
+        if runtime_config.evacuate_unschedulable_sources:
+            if not accounts:
+                return "source_group_has_no_accounts"
+            if not any(
+                self._account_is_schedulable_for_rotation(account) for account in accounts
+            ):
+                return "source_group_has_no_schedulable_accounts"
+        threshold = runtime_config.evacuate_quota_used_percent
+        if threshold is not None:
+            used = self._group_quota_used_percent(group_id, availability)
+            if used is not None and used >= float(threshold):
+                return f"source_group_quota_exhausted:{used:g}%>={float(threshold):g}%"
+        return None
+
+    def _evacuation_reasons_by_group_key(
+        self,
+        pool_groups: list[RotationPoolGroup],
+        *,
+        availability: TargetGroupAvailability,
+        runtime_config: AutoRotationRuntimeConfig,
+    ) -> dict[str, str]:
+        reasons: dict[str, str] = {}
+        for pool_group in pool_groups:
+            reason = self._group_evacuation_reason(
+                pool_group.group_id,
+                availability=availability,
+                runtime_config=runtime_config,
+            )
+            if reason is not None:
+                reasons[self._normalize_key(pool_group.group_id)] = reason
+        return reasons
+
+    def _user_is_protected(
+        self,
+        user_id: Any,
+        runtime_config: AutoRotationRuntimeConfig,
+    ) -> bool:
+        if not runtime_config.protected_user_ids:
+            return False
+        user_key = self._normalize_key(user_id)
+        return any(
+            self._normalize_key(protected) == user_key
+            for protected in runtime_config.protected_user_ids
+        )
 
     def _account_is_schedulable_for_rotation(self, account: dict[str, Any]) -> bool:
         if self._account_bool_value(
@@ -3478,7 +3704,161 @@ class RotationService:
             ),
         )
 
+    def _capacity_target_shares(
+        self,
+        pool_groups: list[RotationPoolGroup],
+        loads: dict[str, float],
+        availability: TargetGroupAvailability,
+    ) -> dict[str, float]:
+        """Load each group *should* carry, in proportion to its remaining quota.
+
+        This is the same weighting a manual rebalance uses: total load spread over
+        the pool by remaining quota share, so a group with twice the headroom is
+        expected to carry twice the traffic.
+        """
+        weights = {
+            self._normalize_key(group.group_id): self._group_remaining_capacity(
+                group.group_id, availability
+            )
+            for group in pool_groups
+        }
+        total_weight = sum(weights.values())
+        total_load = sum(loads.get(key, 0.0) for key in weights)
+        if total_weight <= 0:
+            # Every group is spent. Falling back to an even split keeps the
+            # selector total-ordered instead of dividing by zero; the evacuation
+            # checks are what stop users landing on an exhausted group.
+            even = total_load / len(weights) if weights else 0.0
+            return {key: even for key in weights}
+        return {key: total_load * weight / total_weight for key, weight in weights.items()}
+
+    def _select_capacity_weighted_target_group(
+        self,
+        pool_groups: list[RotationPoolGroup],
+        loads: dict[str, float],
+        availability: TargetGroupAvailability,
+    ) -> RotationPoolGroup:
+        """Group furthest *below* the load its remaining quota says it can take.
+
+        Remaining quota breaks ties before priority does, and that tiebreak is
+        load-bearing rather than cosmetic: target shares are proportional to total
+        load, so when every candidate is idle -- the usual case when evacuating
+        into a fresh pool -- every share is 0 and the primary key cannot separate
+        them. Without the tiebreak the pick would fall through to priority order
+        and ignore quota entirely.
+        """
+        shares = self._capacity_target_shares(pool_groups, loads, availability)
+        return min(
+            pool_groups,
+            key=lambda group: (
+                loads.get(self._normalize_key(group.group_id), 0.0)
+                - shares.get(self._normalize_key(group.group_id), 0.0),
+                -self._group_remaining_capacity(group.group_id, availability),
+                group.priority,
+                group.created_at,
+                str(group.group_id),
+            ),
+        )
+
+    def _select_landing_target_group(
+        self,
+        pool_groups: list[RotationPoolGroup],
+        loads: dict[str, float],
+        *,
+        availability: TargetGroupAvailability,
+        runtime_config: AutoRotationRuntimeConfig,
+    ) -> RotationPoolGroup:
+        if runtime_config.capacity_weighted_targets:
+            return self._select_capacity_weighted_target_group(pool_groups, loads, availability)
+        return self._select_least_loaded_usage_group(pool_groups, loads)
+
     def _select_usage_balancing_target_group(
+        self,
+        candidate: UsageRotationCandidate,
+        pool_groups: list[RotationPoolGroup],
+        loads: dict[str, float],
+        improvement_delta: float = 0.0,
+        *,
+        availability: TargetGroupAvailability | None = None,
+        runtime_config: AutoRotationRuntimeConfig | None = None,
+    ) -> tuple[RotationPoolGroup, dict[str, Any]]:
+        if (
+            availability is not None
+            and runtime_config is not None
+            and runtime_config.capacity_weighted_targets
+        ):
+            return self._select_capacity_balancing_target_group(
+                candidate,
+                pool_groups,
+                loads,
+                availability,
+                improvement_delta=improvement_delta,
+            )
+        return self._select_least_loaded_balancing_target_group(
+            candidate,
+            pool_groups,
+            loads,
+            improvement_delta=improvement_delta,
+        )
+
+    def _select_capacity_balancing_target_group(
+        self,
+        candidate: UsageRotationCandidate,
+        pool_groups: list[RotationPoolGroup],
+        loads: dict[str, float],
+        availability: TargetGroupAvailability,
+        improvement_delta: float = 0.0,
+    ) -> tuple[RotationPoolGroup, dict[str, Any]]:
+        """Balance toward each group's quota-weighted share rather than an even split.
+
+        The move is judged by total distance from those shares, so a user only
+        leaves when doing so brings the pool closer to "everyone carries what their
+        remaining quota can afford".
+        """
+        assignment = candidate.assignment
+        current_key = self._normalize_key(assignment.current_group_id)
+        shares = self._capacity_target_shares(pool_groups, loads, availability)
+        best = self._select_capacity_weighted_target_group(pool_groups, loads, availability)
+        best_key = self._normalize_key(best.group_id)
+        deviation = lambda key, load: abs(load - shares.get(key, 0.0))  # noqa: E731
+        if current_key in loads and current_key != best_key:
+            current_load = loads.get(current_key, 0.0)
+            best_load = loads.get(best_key, 0.0)
+            before = deviation(current_key, current_load) + deviation(best_key, best_load)
+            after = deviation(current_key, current_load - candidate.usage_value) + deviation(
+                best_key, best_load + candidate.usage_value
+            )
+            if after < before - improvement_delta:
+                return best, {
+                    "selection_reason": "move_reduces_capacity_weighted_deviation",
+                    "before_gap": before,
+                    "after_gap": after,
+                    "spread_improvement": before - after,
+                    "target_capacity_share": shares.get(best_key, 0.0),
+                    "source_capacity_share": shares.get(current_key, 0.0),
+                }
+        if current_key in loads:
+            current_group = next(
+                group
+                for group in pool_groups
+                if self._normalize_key(group.group_id) == current_key
+            )
+            return current_group, {
+                "selection_reason": "no_capacity_weighted_improvement",
+                "before_gap": deviation(current_key, loads.get(current_key, 0.0)),
+                "after_gap": None,
+                "spread_improvement": 0.0,
+                "source_capacity_share": shares.get(current_key, 0.0),
+            }
+        return best, {
+            "selection_reason": "source_group_missing_from_pool",
+            "before_gap": None,
+            "after_gap": None,
+            "spread_improvement": 0.0,
+            "target_capacity_share": shares.get(best_key, 0.0),
+        }
+
+    def _select_least_loaded_balancing_target_group(
         self,
         candidate: UsageRotationCandidate,
         pool_groups: list[RotationPoolGroup],
@@ -3820,6 +4200,10 @@ class RotationService:
             "imbalance_epsilon": config.imbalance_epsilon,
             "improvement_delta": config.improvement_delta,
             "schedule_source_group_ids": list(config.schedule_source_group_ids),
+            "evacuate_unschedulable_sources": config.evacuate_unschedulable_sources,
+            "evacuate_quota_used_percent": config.evacuate_quota_used_percent,
+            "capacity_weighted_targets": config.capacity_weighted_targets,
+            "protected_user_ids": list(config.protected_user_ids),
             "created_at": config.created_at.isoformat(),
             "updated_at": config.updated_at.isoformat(),
         }

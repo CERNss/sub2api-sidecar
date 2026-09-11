@@ -5151,3 +5151,78 @@ pre {
   font-size: 12px;
   line-height: 18px;
 }
+
+/* Auto-rotation config: three labelled sections (evacuation / balancing / scope).
+   The panel grew from five controls to nine, and an undifferentiated stack of
+   nine gave no clue which knob answers "when do users move" versus "where do
+   they land". Same visual language as the notification rule editor's sections. */
+.rotation-config-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.rotation-config-section__title {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.rotation-config-section__title > span {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #e0f2f1;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rotation-config-section__title h5 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 13.5px;
+  line-height: 1.3;
+}
+
+.rotation-config-section__title p {
+  margin: 2px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Two equal columns so a Segmented and an Input sitting side by side line up on
+   both edges; each control owns a full cell, so they share a width and a height. */
+.rotation-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.rotation-config-grid__wide {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 720px) {
+  .rotation-config-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The usage-window control carries four options and cannot shrink below their
+   combined width. In a narrow column it would otherwise push the card wider than
+   its parent; let it scroll inside its own cell instead. */
+.rotation-config-grid .ant-segmented {
+  max-width: 100%;
+  overflow-x: auto;
+}

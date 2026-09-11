@@ -40,6 +40,7 @@ from app.services.operational_data import (
     OperationalDataCollectionResult,
     OperationalDataRefresher,
 )
+from app.services.rotation import TargetGroupAvailability
 from app.services.rotation_scheduler import AutoRotationScheduler
 from app.services.usage_segmentation import UsageSegmentationService
 
@@ -67,7 +68,6 @@ EXPECTED_TEMPORARY_UNSCHEDULABLE_RULES = [
 EXPECTED_MODEL_WHITELIST_MAPPING = {
     "codex-auto-review": "codex-auto-review",
     "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
-    "gpt-5.4-mini": "gpt-5.4-mini",
     "gpt-5.5": "gpt-5.5",
     "gpt-5.6-luna": "gpt-5.6-luna",
     "gpt-5.6-sol": "gpt-5.6-sol",
@@ -1070,6 +1070,10 @@ def save_auto_rotation_config(
     imbalance_epsilon: float = 0.0,
     improvement_delta: float = 0.0,
     schedule_source_group_ids: tuple[object, ...] = (),
+    evacuate_unschedulable_sources: bool = True,
+    evacuate_quota_used_percent: float | None = 95.0,
+    capacity_weighted_targets: bool = True,
+    protected_user_ids: tuple[object, ...] = (),
 ) -> AutoRotationRuntimeConfig:
     return main.get_flow_store().save_auto_rotation_config(
         AutoRotationRuntimeConfig(
@@ -1081,8 +1085,52 @@ def save_auto_rotation_config(
             imbalance_epsilon=imbalance_epsilon,
             improvement_delta=improvement_delta,
             schedule_source_group_ids=schedule_source_group_ids,
+            evacuate_unschedulable_sources=evacuate_unschedulable_sources,
+            evacuate_quota_used_percent=evacuate_quota_used_percent,
+            capacity_weighted_targets=capacity_weighted_targets,
+            protected_user_ids=protected_user_ids,
         )
     )
+
+
+def normalize_rotation_accounts(
+    backend: FakeRotationSub2API,
+    *,
+    used_percent: int = 25,
+) -> FakeRotationSub2API:
+    """Make every fixture account schedulable and equally provisioned.
+
+    Two rotation inputs key off account state: an unschedulable account evacuates
+    its group, and unequal quota readings decide which group wins a landing
+    decision. The default fixture parks acct-2 (group 22) in a rate_limited state
+    and gives acct-1 85% utilisation, so a test about anything *else* -- the dead
+    band, the improvement delta, platform isolation -- has to pin both first, or
+    it ends up asserting on an evacuation it never meant to trigger. Equal quota
+    readings also make capacity weighting degrade to plain "emptiest wins", which
+    is what the load-balancing assertions were written against.
+    """
+    for account in backend.accounts:
+        # rate_limited is *derived*, not just copied: a reset_at/overload_until
+        # timestamp or a rate_limited-ish status is enough to set it downstream,
+        # so all three have to go.
+        for field in (
+            "rate_limited",
+            "error_message",
+            "reset_at",
+            "overload_until",
+            "rate_limit_reset_at",
+        ):
+            account.pop(field, None)
+        account["status"] = "active"
+        account["available"] = True
+        account["schedulable"] = True
+        extra = account.get("extra")
+        if not isinstance(extra, dict):
+            extra = {}
+            account["extra"] = extra
+        extra["codex_5h_used_percent"] = 0
+        extra["codex_7d_used_percent"] = used_percent
+    return backend
 
 
 def add_available_account_for_group(
@@ -8196,6 +8244,7 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
     client, monkeypatch
 ) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 8.0, "usage_1d": 80.0, "usage_7d": 200.0}]
@@ -8279,6 +8328,7 @@ def test_auto_rotation_balances_usage_across_rotation_pool(
 
 def test_auto_rotation_execution_forces_refresh_before_using_snapshots(client) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     call_order: list[str] = []
@@ -8405,6 +8455,7 @@ def test_auto_rotation_refreshes_usage_segments_before_execution(client) -> None
 
 def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 0.0, "usage_1d": 0.0, "usage_7d": 0.0}]
@@ -8475,6 +8526,7 @@ def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -
 
 def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 11
     backend.users[0]["group_name"] = "rotation-low"
     backend.users[1]["group_id"] = 11
@@ -8672,8 +8724,17 @@ def test_auto_rotation_fails_when_target_group_missing_upstream(client) -> None:
     assert backend.replace_calls == []
 
 
-def test_auto_rotation_fails_when_target_group_has_no_upstream_accounts(client) -> None:
+def test_auto_rotation_never_lands_users_on_a_group_without_accounts(client) -> None:
+    """A group with no upstream accounts is dropped from the candidate pool.
+
+    This used to surface as a `failed` result: balancing picked the empty group,
+    and the execution-layer precondition caught it on the way out. Evacuation
+    scanning now rules that group out before it can be chosen, so the run makes no
+    attempt at all. The execution-layer guard still exists as a backstop against a
+    stale snapshot -- see the availability-block test below.
+    """
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 11
     backend.users[0]["group_name"] = "rotation-low"
     backend.users[1]["group_id"] = 11
@@ -8763,14 +8824,22 @@ def test_auto_rotation_fails_when_target_group_has_no_upstream_accounts(client) 
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "failed"
     assert payload["moved"] == []
-    assert payload["failed"][0]["target_group_id"] == "55"
-    assert payload["failed"][0]["reason"] == "Target group has no upstream accounts"
+    assert payload["failed"] == []
+    # The decisive assertion: nothing was ever sent upstream for the empty group.
     assert backend.replace_calls == []
+    assert all(str(item["target_group_id"]) != "55" for item in payload["skipped"])
 
 
-def test_auto_rotation_fails_when_target_group_accounts_are_unschedulable(client) -> None:
+def test_auto_rotation_never_lands_users_on_a_group_whose_accounts_are_unschedulable(
+    client,
+) -> None:
+    """Same as above for a group whose only account cannot be scheduled.
+
+    Group 22's account is rate-limited in the fixture, which is exactly the state
+    the evacuation trigger keys off, so the group is excluded as a landing spot
+    rather than attempted and rejected.
+    """
     backend = FakeRotationSub2API()
     backend.users[0]["group_id"] = 11
     backend.users[0]["group_name"] = "rotation-low"
@@ -8851,15 +8920,346 @@ def test_auto_rotation_fails_when_target_group_accounts_are_unschedulable(client
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "failed"
     assert payload["moved"] == []
-    assert payload["failed"][0]["target_group_id"] == "22"
-    assert payload["failed"][0]["reason"] == "Target group has no schedulable upstream accounts"
+    assert payload["failed"] == []
     assert backend.replace_calls == []
+    assert all(str(item["target_group_id"]) != "22" for item in payload["skipped"])
+
+
+def _seed_two_group_openai_pool(store, *, user_ids, current_group_id) -> None:
+    now = datetime.now(timezone.utc)
+    for group_id, name, priority in ((11, "rotation-low", 0), (22, "rotation-high", 1)):
+        store.upsert_rotation_pool_group(
+            RotationPoolGroup(
+                group_id=group_id,
+                group_name=name,
+                platform="openai",
+                status="active",
+                is_exclusive=True,
+                priority=priority,
+            )
+        )
+    for user_id, email in user_ids:
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=user_id,
+                email=email,
+                current_group_id=current_group_id,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+
+def test_auto_rotation_evacuates_every_user_off_an_unschedulable_account(client) -> None:
+    """Switching an account off must empty its group, not merely stop filling it.
+
+    The dead band is set wide enough to suppress ordinary balancing, which is the
+    point: an evacuation is not a balancing decision and must not be suppressed by
+    one. Both users leave, including the idle one that load balancing would never
+    have bothered to move.
+    """
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    for account in backend.accounts:
+        if account["id"] == "acct-2":  # the account backing group 22
+            account["schedulable"] = False
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    backend.user_api_keys[202] = [{"id": 2, "usage_5h": 4.0, "usage_1d": 40.0, "usage_7d": 80.0}]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config(imbalance_epsilon=1000.0)
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        _seed_two_group_openai_pool(
+            store,
+            user_ids=((101, "busy@example.com"), (202, "idle@example.com")),
+            current_group_id=22,
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {str(item["user_id"]) for item in payload["moved"]} == {"101", "202"}
+    assert all(str(item["target_group_id"]) == "11" for item in payload["moved"])
+    assert {call["old_group_id"] for call in backend.replace_calls} == {22}
+    assert {call["new_group_id"] for call in backend.replace_calls} == {11}
+    reasons = {item["metadata"]["evacuation_reason"] for item in payload["moved"]}
+    assert reasons == {"source_group_has_no_schedulable_accounts"}
+    assert all(
+        item["metadata"]["decision_type"] == "source_group_evacuation"
+        for item in payload["moved"]
+    )
+    # A wide dead band would have skipped every balancing move; evacuation ignores it.
+    assert payload["dead_band_skipped"] is False
+
+
+def test_auto_rotation_evacuates_a_group_whose_quota_is_spent(client) -> None:
+    """Quota at or above the configured percentage evacuates the group."""
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    for account in backend.accounts:
+        if account["id"] == "acct-2":
+            account["extra"]["codex_7d_used_percent"] = 97
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config(evacuate_quota_used_percent=95.0)
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        _seed_two_group_openai_pool(
+            store,
+            user_ids=((101, "busy@example.com"), (202, "idle@example.com")),
+            current_group_id=22,
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {str(item["user_id"]) for item in payload["moved"]} == {"101", "202"}
+    assert all(str(item["target_group_id"]) == "11" for item in payload["moved"])
+    assert all(
+        item["metadata"]["evacuation_reason"].startswith("source_group_quota_exhausted")
+        for item in payload["moved"]
+    )
+
+
+def test_auto_rotation_leaves_a_group_just_under_the_quota_threshold(client) -> None:
+    """The threshold is a floor, not a hint: 94% against a 95% setting stays put."""
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    for account in backend.accounts:
+        if account["id"] == "acct-2":
+            account["extra"]["codex_7d_used_percent"] = 94
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config(
+            evacuate_quota_used_percent=95.0,
+            imbalance_epsilon=1000.0,
+        )
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        _seed_two_group_openai_pool(
+            store,
+            user_ids=((101, "busy@example.com"), (202, "idle@example.com")),
+            current_group_id=22,
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    assert response.json()["moved"] == []
+    assert backend.replace_calls == []
+
+
+def test_auto_rotation_quota_evacuation_can_be_disabled(client) -> None:
+    """A null threshold turns the quota trigger off without touching the other one."""
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    for account in backend.accounts:
+        if account["id"] == "acct-2":
+            account["extra"]["codex_7d_used_percent"] = 100
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config(
+            evacuate_quota_used_percent=None,
+            imbalance_epsilon=1000.0,
+        )
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        _seed_two_group_openai_pool(
+            store,
+            user_ids=((101, "busy@example.com"), (202, "idle@example.com")),
+            current_group_id=22,
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    assert response.json()["moved"] == []
+    assert backend.replace_calls == []
+
+
+def test_auto_rotation_never_moves_a_protected_user_even_when_evacuating(client) -> None:
+    """Relay identities are pinned to their group and outrank an evacuation.
+
+    Without this the relay accounts -- whose keys sit on a specific group on
+    purpose -- would be swept up by the first switched-off account, because an
+    evacuation deliberately ignores how much traffic a user sends.
+    """
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    for account in backend.accounts:
+        if account["id"] == "acct-2":
+            account["schedulable"] = False
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config(protected_user_ids=(202,))
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        _seed_two_group_openai_pool(
+            store,
+            user_ids=((101, "busy@example.com"), (202, "relay@example.com")),
+            current_group_id=22,
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {str(item["user_id"]) for item in payload["moved"]} == {"101"}
+    assert {call["user_id"] for call in backend.replace_calls} == {101}
+    protected = [item for item in payload["skipped"] if str(item["user_id"]) == "202"]
+    assert len(protected) == 1
+    assert protected[0]["reason"] == "User is protected from automatic rotation"
+    assert str(store_user_group(202)) == "22"
+
+
+def store_user_group(user_id):
+    assignment = main.get_flow_store().get_user_assignment(user_id, "openai")
+    return assignment.current_group_id if assignment else None
+
+
+def test_auto_rotation_capacity_weighting_prefers_the_group_with_more_quota_left(
+    client,
+) -> None:
+    """Between two idle groups, the one with more quota left wins.
+
+    Plain "emptiest wins" cannot tell these apart -- both land groups carry no
+    load -- so this is the assertion that pins capacity weighting itself. Group 11
+    has 90% of its quota spent, group 33 only 10%, and the evacuated user must go
+    to 33.
+    """
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    for account in backend.accounts:
+        if account["id"] == "acct-2":
+            account["schedulable"] = False
+        elif account["id"] == "acct-1":  # group 11
+            account["extra"]["codex_7d_used_percent"] = 90
+        elif account["id"] == "acct-camel":  # group 33
+            account["extra"]["codex_7d_used_percent"] = 10
+    # Exactly one user, so both landing groups stay at zero load and remaining
+    # quota is the only thing that can decide between them. With a second user in
+    # play the first move would shift the load balance and muddy the comparison.
+    backend.users = [backend.users[0]]
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config(capacity_weighted_targets=True)
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        now = datetime.now(timezone.utc)
+        for group_id, name, priority in (
+            (11, "rotation-low", 0),
+            (22, "rotation-high", 1),
+            (33, "rotation-roomy", 2),
+        ):
+            store.upsert_rotation_pool_group(
+                RotationPoolGroup(
+                    group_id=group_id,
+                    group_name=name,
+                    platform="openai",
+                    status="active",
+                    is_exclusive=True,
+                    priority=priority,
+                )
+            )
+        store.upsert_user_assignment(
+            UserGroupAssignment(
+                user_id=101,
+                email="busy@example.com",
+                current_group_id=22,
+                current_group_name="rotation-high",
+                assignment_mode=AssignmentMode.managed_pool,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["moved"]) == 1
+    # Group 11 sorts first on priority and is equally idle, so a plain
+    # "emptiest wins" selector would send everyone there; only remaining quota
+    # separates the two, and it picks 33.
+    assert {str(item["target_group_id"]) for item in payload["moved"]} == {"33"}
+    assert {call["new_group_id"] for call in backend.replace_calls} == {33}
+    assert {call["old_group_id"] for call in backend.replace_calls} == {22}
+
+
+def test_target_group_availability_block_still_guards_execution(client) -> None:
+    """The execution-layer precondition survives as a backstop.
+
+    Excluding unhealthy groups from the candidate pool means balancing no longer
+    reaches this guard in normal operation, so assert it directly: a stale
+    snapshot or a manual target must still be refused at execution time.
+    """
+    service = main.get_rotation_service()
+    availability = TargetGroupAvailability(
+        groups_by_key={
+            "11": {"id": 11, "name": "rotation-low"},
+            "22": {"id": 22, "name": "rotation-high"},
+        },
+        accounts_by_group_key={
+            "22": [{"id": "acct-2", "status": "active", "schedulable": False}],
+        },
+    )
+    missing = service._target_group_availability_block(99, availability=availability)
+    assert missing is not None
+    assert missing.reason == "Target group does not exist in upstream Sub2API"
+
+    no_accounts = service._target_group_availability_block(11, availability=availability)
+    assert no_accounts is not None
+    assert no_accounts.reason == "Target group has no upstream accounts"
+
+    unschedulable = service._target_group_availability_block(22, availability=availability)
+    assert unschedulable is not None
+    assert unschedulable.reason == "Target group has no schedulable upstream accounts"
 
 
 def test_auto_rotation_run_records_can_rollback_execution(client, monkeypatch) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 8.0, "usage_1d": 80.0, "usage_7d": 200.0}]
@@ -8979,6 +9379,7 @@ def test_auto_rotation_dead_band_skips_when_spread_within_epsilon(
     client, monkeypatch
 ) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
@@ -9048,6 +9449,7 @@ def test_auto_rotation_improvement_delta_blocks_marginal_swap(
     client, monkeypatch
 ) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 50.0, "usage_7d": 100.0}]
@@ -9177,6 +9579,7 @@ def test_auto_rotation_runtime_config_can_be_saved_and_controls_execution(
     client, monkeypatch
 ) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 22
     backend.users[0]["group_name"] = "rotation-high"
     backend.user_api_keys[101] = [{"id": 1, "usage_5h": 5.0, "usage_1d": 10.0, "usage_7d": 20.0}]
@@ -9418,6 +9821,7 @@ def test_auto_rotation_empty_schedule_range_does_not_auto_assign_new_users(
 
 def test_auto_rotation_balances_inside_each_platform_only(client, monkeypatch) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users = [
         {
             "id": 101,
@@ -9514,8 +9918,14 @@ def test_auto_rotation_balances_inside_each_platform_only(client, monkeypatch) -
 
 
 def two_platform_rotation_backend() -> FakeRotationSub2API:
-    """openai load sits in group 22, grok load in group 72; 11 and 71 are idle."""
+    """openai load sits in group 22, grok load in group 72; 11 and 71 are idle.
+
+    Accounts are normalized so the only thing driving a move is load: these
+    fixtures exist to prove platform isolation, and an evacuation triggered by the
+    default fixture's rate-limited account would move users for the wrong reason.
+    """
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
     backend.users = [
         {
             "id": 101,
@@ -9645,6 +10055,8 @@ def test_auto_rotation_without_platform_rotates_every_platform(client, monkeypat
 
 def test_auto_rotation_syncs_one_assignment_per_platform(client, monkeypatch) -> None:
     backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    normalize_rotation_accounts(backend)
     backend.users = [
         {
             "id": 707,

@@ -97,6 +97,25 @@ class AutoRotationRuntimeConfig(BaseModel):
     imbalance_epsilon: float = 0.0
     improvement_delta: float = 0.0
     schedule_source_group_ids: tuple[Any, ...] = ()
+    # Source-side evacuation. Load balancing only ever asks "which group is
+    # emptiest"; it never asks whether the group a user already sits on can still
+    # serve traffic at all. These two triggers do: a group that lost every
+    # schedulable account, or whose quota is spent, is emptied outright -- the
+    # dead band and the improvement delta do not apply to an evacuation, because
+    # "the pool looks balanced" is no reason to leave users on a dead account.
+    evacuate_unschedulable_sources: bool = True
+    # Quota utilisation (0-100) at which a group stops being usable. None turns
+    # the trigger off. Defaults to 95 rather than 100 so the move lands before
+    # the account starts refusing requests.
+    evacuate_quota_used_percent: float | None = 95.0
+    # Pick landing spots by remaining quota share instead of raw "emptiest wins",
+    # so a group that is idle *because* it is nearly exhausted stops attracting
+    # traffic. Mirrors the weighting used for manual rebalances.
+    capacity_weighted_targets: bool = True
+    # Users that must never be rotated -- relay identities whose keys are pinned
+    # to a group on purpose. Without this an evacuation would happily move them,
+    # since it does not care how much traffic the user sends.
+    protected_user_ids: tuple[Any, ...] = ()
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

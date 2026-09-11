@@ -566,6 +566,12 @@ type AutoRotationConfig = {
   usage_thresholds: number[];
   imbalance_epsilon: number;
   improvement_delta: number;
+  // Evacuation: emptying a group whose accounts can no longer serve traffic.
+  // null on the quota percent disables that trigger.
+  evacuate_unschedulable_sources: boolean;
+  evacuate_quota_used_percent: number | null;
+  capacity_weighted_targets: boolean;
+  protected_user_ids: (string | number)[];
 };
 
 type AutoRotationConfigPayload = ApiPayload & {
@@ -8855,7 +8861,11 @@ function DynamicOrchestrationView({
     usage_window: "1d",
     usage_thresholds: [],
     imbalance_epsilon: 0,
-    improvement_delta: 0
+    improvement_delta: 0,
+    evacuate_unschedulable_sources: true,
+    evacuate_quota_used_percent: 95,
+    capacity_weighted_targets: true,
+    protected_user_ids: []
   });
   const [status, setStatus] = useState<StatusState>(emptyStatus);
   const [loading, setLoading] = useState(false);
@@ -9255,82 +9265,203 @@ function DynamicOrchestrationView({
               ]}
             />
           </div>
-          <div className="dynamic-config-row">
-            <Typography.Text strong>自动分配新用户</Typography.Text>
-            <AntSegmented
-              value={config.auto_assign_new_users ? "on" : "off"}
-              disabled={defaultOnly}
-              onChange={(value) => setConfig((current) => ({ ...current, auto_assign_new_users: value === "on" }))}
-              options={[
-                { label: "关闭", value: "off" },
-                { label: "开启", value: "on" }
-              ]}
-            />
+          <div className="rotation-config-section">
+            <div className="rotation-config-section__title">
+              <span>1</span>
+              <div>
+                <h5>疏散触发</h5>
+                <p>账号不能再服务时，把该分组上的用户整体迁走。不受下面的均衡死区约束。</p>
+              </div>
+            </div>
+            <div className="rotation-config-grid">
+              <div className="ant-field">
+                <Typography.Text strong>账号停用时疏散</Typography.Text>
+                <AntSegmented
+                  block
+                  value={config.evacuate_unschedulable_sources ? "on" : "off"}
+                  disabled={defaultOnly}
+                  onChange={(value) =>
+                    setConfig((current) => ({ ...current, evacuate_unschedulable_sources: value === "on" }))
+                  }
+                  options={[
+                    { label: "关闭", value: "off" },
+                    { label: "开启", value: "on" }
+                  ]}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>额度用尽疏散（%）</Typography.Text>
+                <Input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  placeholder="留空表示不按额度疏散"
+                  disabled={defaultOnly}
+                  value={config.evacuate_quota_used_percent ?? ""}
+                  onChange={(event) => {
+                    const raw = event.target.value.trim();
+                    setConfig((current) => ({
+                      ...current,
+                      evacuate_quota_used_percent:
+                        raw === "" ? null : Math.min(100, Math.max(1, Number(raw) || 0))
+                    }));
+                  }}
+                />
+              </div>
+            </div>
           </div>
-          <div className="dynamic-config-row dynamic-config-row--stacked">
-            <Space>
-              <TimerReset size={16} aria-hidden="true" />
-              <Typography.Text strong>用量窗口</Typography.Text>
-            </Space>
-            <AntSegmented
-              value={config.usage_window}
-              disabled={defaultOnly}
-              onChange={(value) =>
-                setConfig((current) => ({
-                  ...current,
-                  usage_window: value as AutoRotationConfig["usage_window"]
-                }))
-              }
-              options={[...usageWindowOptions]}
-            />
+          <div className="rotation-config-section">
+            <div className="rotation-config-section__title">
+              <span>2</span>
+              <div>
+                <h5>均衡判定</h5>
+                <p>常规调度按用量把人摊平。差距落在死区内、或改进不够大，都不动。</p>
+              </div>
+            </div>
+            <div className="rotation-config-grid">
+              <div className="ant-field rotation-config-grid__wide">
+                <Typography.Text strong>用量窗口</Typography.Text>
+                <AntSegmented
+                  block
+                  value={config.usage_window}
+                  disabled={defaultOnly}
+                  onChange={(value) =>
+                    setConfig((current) => ({
+                      ...current,
+                      usage_window: value as AutoRotationConfig["usage_window"]
+                    }))
+                  }
+                  options={[...usageWindowOptions]}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>均衡死区 ε</Typography.Text>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  disabled={defaultOnly}
+                  value={config.imbalance_epsilon}
+                  onChange={(event) => setConfig((current) => ({
+                    ...current,
+                    imbalance_epsilon: Math.max(0, Number(event.target.value) || 0)
+                  }))}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>改进阈值 δ</Typography.Text>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  disabled={defaultOnly}
+                  value={config.improvement_delta}
+                  onChange={(event) => setConfig((current) => ({
+                    ...current,
+                    improvement_delta: Math.max(0, Number(event.target.value) || 0)
+                  }))}
+                />
+              </div>
+            </div>
           </div>
-          <div className="ant-field">
-            <Typography.Text strong>Cooldown Minutes</Typography.Text>
-            <Input
-              type="number"
-              min={0}
-              disabled={defaultOnly}
-              value={config.cooldown_minutes}
-              onChange={(event) => setConfig((current) => ({
-                ...current,
-                cooldown_minutes: Math.max(0, Number(event.target.value) || 0)
-              }))}
-            />
-          </div>
-          <div className="ant-field">
-            <Typography.Text strong>Imbalance Epsilon (ε)</Typography.Text>
-            <Input
-              type="number"
-              min={0}
-              step={0.1}
-              disabled={defaultOnly}
-              value={config.imbalance_epsilon}
-              onChange={(event) => setConfig((current) => ({
-                ...current,
-                imbalance_epsilon: Math.max(0, Number(event.target.value) || 0)
-              }))}
-            />
-          </div>
-          <div className="ant-field">
-            <Typography.Text strong>Improvement Delta (δ)</Typography.Text>
-            <Input
-              type="number"
-              min={0}
-              step={0.1}
-              disabled={defaultOnly}
-              value={config.improvement_delta}
-              onChange={(event) => setConfig((current) => ({
-                ...current,
-                improvement_delta: Math.max(0, Number(event.target.value) || 0)
-              }))}
-            />
+          <div className="rotation-config-section">
+            <div className="rotation-config-section__title">
+              <span>3</span>
+              <div>
+                <h5>落点与范围</h5>
+                <p>迁到哪个分组、谁参与轮转。保护名单里的用户连疏散都不会动。</p>
+              </div>
+            </div>
+            <div className="rotation-config-grid">
+              <div className="ant-field">
+                <Typography.Text strong>落点按剩余额度加权</Typography.Text>
+                <AntSegmented
+                  block
+                  value={config.capacity_weighted_targets ? "on" : "off"}
+                  disabled={defaultOnly}
+                  onChange={(value) =>
+                    setConfig((current) => ({ ...current, capacity_weighted_targets: value === "on" }))
+                  }
+                  options={[
+                    { label: "只看负载", value: "off" },
+                    { label: "按额度", value: "on" }
+                  ]}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>自动分配新用户</Typography.Text>
+                <AntSegmented
+                  block
+                  value={config.auto_assign_new_users ? "on" : "off"}
+                  disabled={defaultOnly}
+                  onChange={(value) => setConfig((current) => ({ ...current, auto_assign_new_users: value === "on" }))}
+                  options={[
+                    { label: "关闭", value: "off" },
+                    { label: "开启", value: "on" }
+                  ]}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>冷却时间（分钟）</Typography.Text>
+                <Input
+                  type="number"
+                  min={0}
+                  disabled={defaultOnly}
+                  value={config.cooldown_minutes}
+                  onChange={(event) => setConfig((current) => ({
+                    ...current,
+                    cooldown_minutes: Math.max(0, Number(event.target.value) || 0)
+                  }))}
+                />
+              </div>
+              <div className="ant-field">
+                <Typography.Text strong>保护名单（用户 ID）</Typography.Text>
+                <Select
+                  mode="tags"
+                  allowClear
+                  disabled={defaultOnly}
+                  placeholder="ID 回车添加，如中继账号"
+                  value={config.protected_user_ids.map((id) => String(id))}
+                  onChange={(values: string[]) =>
+                    setConfig((current) => ({
+                      ...current,
+                      protected_user_ids: values.map((value) => value.trim()).filter(Boolean)
+                    }))
+                  }
+                  tokenSeparators={[",", " "]}
+                  options={[]}
+                />
+              </div>
+            </div>
           </div>
           <div className="dynamic-allocation-summary">
             <Tag color={config.enabled ? "green" : "default"}>{config.enabled ? "允许执行" : "仅配置/预览"}</Tag>
             <Tag color={config.auto_assign_new_users ? "green" : "default"}>{config.auto_assign_new_users ? "自动分配开启" : "自动分配关闭"}</Tag>
             <Tag color="blue">Landing {selectedLandingGroups.length}</Tag>
             <Tag color="processing">Rotation {selectedGroups.length}</Tag>
-            <Tag color="green">按用量均衡</Tag>
+            <Tag color={config.capacity_weighted_targets ? "green" : "default"}>
+              {config.capacity_weighted_targets ? "落点按额度" : "落点只看负载"}
+            </Tag>
+            <Tag
+              color={
+                config.evacuate_unschedulable_sources || config.evacuate_quota_used_percent !== null
+                  ? "volcano"
+                  : "default"
+              }
+            >
+              {[
+                config.evacuate_unschedulable_sources ? "停用疏散" : null,
+                config.evacuate_quota_used_percent !== null
+                  ? `额度 ≥${config.evacuate_quota_used_percent}%`
+                  : null
+              ]
+                .filter(Boolean)
+                .join(" · ") || "疏散关闭"}
+            </Tag>
+            {config.protected_user_ids.length > 0 ? (
+              <Tag color="purple">保护 {config.protected_user_ids.length} 人</Tag>
+            ) : null}
             <Tag color="gold">{usageWindowOptions.find((item) => item.value === config.usage_window)?.label}</Tag>
           </div>
           {config.auto_assign_new_users && selectedLandingGroups.length === 0 ? (
