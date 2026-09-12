@@ -8524,7 +8524,15 @@ def test_auto_rotation_prefers_collected_user_usage_over_api_key_usage(client) -
     ]
 
 
-def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
+def test_auto_rotation_group_load_follows_current_members(client) -> None:
+    """A group weighs what its current members use, not what it once served.
+
+    The persisted group-usage record here says the opposite of the membership:
+    group 11 reads as nearly idle (0.2) and group 22 as busy (5.0), while both
+    movable users actually sit on 11. History-based load would leave everyone
+    alone -- 11 already looks like the emptiest group -- so the move onto 22 is
+    only reachable once the record stops driving the decision.
+    """
     backend = FakeRotationSub2API()
     normalize_rotation_accounts(backend)
     backend.users[0]["group_id"] = 11
@@ -8534,9 +8542,7 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     backend.usage_log_items = [
         usage_log_item(user_id=101, group_id=11, actual_cost=2.0),
         usage_log_item(user_id=202, group_id=11, actual_cost=1.0),
-        usage_log_item(group_id=22, actual_cost=0.2),
     ]
-    add_available_account_for_group(backend, 22)
     clear_caches()
 
     with started_test_client() as auto_client:
@@ -8554,9 +8560,9 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
                         "5h": {
                             "group_id": 11,
                             "window": "5h",
-                            "total_actual_cost": 3.0,
-                            "total_requests": 30,
-                            "total_tokens": 3000,
+                            "total_actual_cost": 0.2,
+                            "total_requests": 2,
+                            "total_tokens": 200,
                             "source": "usage_logs",
                         }
                     },
@@ -8564,9 +8570,9 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
                         "5h": {
                             "group_id": 22,
                             "window": "5h",
-                            "total_actual_cost": 0.2,
-                            "total_requests": 2,
-                            "total_tokens": 200,
+                            "total_actual_cost": 5.0,
+                            "total_requests": 50,
+                            "total_tokens": 5000,
                             "source": "usage_logs",
                         }
                     },
@@ -8624,15 +8630,186 @@ def test_auto_rotation_uses_persisted_group_usage_for_balancing(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert len(payload["moved"]) == 1
+    assert payload["moved"][0]["user_id"] == 101
     assert payload["moved"][0]["source_group_id"] == 11
     assert payload["moved"][0]["target_group_id"] == "22"
-    assert payload["moved"][0]["metadata"]["source_group_load_before"] == 3.0
-    assert payload["moved"][0]["metadata"]["target_group_load_before"] == 0.2
-    assert payload["moved"][0]["metadata"]["source_group_load_source"] == "group_usage:usage_logs"
-    assert payload["moved"][0]["metadata"]["target_group_load_source"] == "group_usage:usage_logs"
+    metadata = payload["moved"][0]["metadata"]
+    # 2.0 + 1.0, the two members of group 11 -- not the 0.2 the record claims.
+    assert metadata["source_group_load_before"] == pytest.approx(3.0)
+    # Group 22 has no members, so it is empty however busy the record says it was.
+    assert metadata["target_group_load_before"] == pytest.approx(0.0)
+    assert metadata["source_group_load_source"] == "candidate_sum"
+    assert metadata["target_group_load_source"] == "candidate_sum"
     assert backend.replace_calls == [
         {"user_id": 101, "old_group_id": 11, "new_group_id": 22}
     ]
+
+
+def test_auto_rotation_next_run_sees_the_previous_move_in_group_loads(client) -> None:
+    """A move counts against its target group from the very next run onwards.
+
+    This is the anti-thrash property. The first run balances the heavy user off
+    group 22 onto group 11. No usage collection happens in between, so a
+    history-based load would still read group 11 as idle -- and the second run,
+    forced to empty group 22, would pile its remaining user straight on top of the
+    one it just moved there. Summing the members instead makes group 11 already
+    look occupied, and the evacuated user lands on the genuinely empty group 33.
+    """
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.users[1]["group_id"] = 22
+    backend.users[1]["group_name"] = "rotation-high"
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=22, actual_cost=2.0),
+        usage_log_item(user_id=202, group_id=22, actual_cost=1.0),
+    ]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        save_auto_rotation_config()
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        now = datetime.now(timezone.utc)
+        for group_id, name, priority in (
+            (11, "rotation-low", 0),
+            (22, "rotation-high", 1),
+            (33, "public-shared", 2),
+        ):
+            store.upsert_rotation_pool_group(
+                RotationPoolGroup(
+                    group_id=group_id,
+                    group_name=name,
+                    platform="openai",
+                    status="active",
+                    is_exclusive=True,
+                    priority=priority,
+                )
+            )
+        for user_id, email in ((101, "busy@example.com"), (202, "idle@example.com")):
+            store.upsert_user_assignment(
+                UserGroupAssignment(
+                    user_id=user_id,
+                    email=email,
+                    current_group_id=22,
+                    current_group_name="rotation-high",
+                    assignment_mode=AssignmentMode.managed_pool,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        with patch.object(requests.Session, "request", new=backend.request):
+            first = auto_client.post("/rotation/auto/run")
+            assert first.status_code == 200
+            first_payload = first.json()
+            assert len(first_payload["moved"]) == 1
+            assert first_payload["moved"][0]["user_id"] == 101
+            assert first_payload["moved"][0]["target_group_id"] == "11"
+            moved_usage = first_payload["moved"][0]["usage_value"]
+
+            # Only the account state changes between the runs: no usage
+            # collection, no new snapshot of who used what.
+            for account in backend.accounts:
+                if account["id"] == "acct-2":
+                    account["schedulable"] = False
+            save_operational_snapshots(backend)
+            second = auto_client.post("/rotation/auto/run")
+
+    assert second.status_code == 200
+    payload = second.json()
+    assert len(payload["moved"]) == 1
+    evacuated = payload["moved"][0]
+    assert evacuated["user_id"] == 202
+    assert evacuated["metadata"]["decision_type"] == "source_group_evacuation"
+    loads_before = evacuated["metadata"]["group_loads_before"]
+    assert loads_before["11"]["load"] == pytest.approx(moved_usage)
+    assert loads_before["11"]["source"] == "candidate_sum"
+    # Group 11 sorts first on priority and would win any tie, so landing on 33 is
+    # only explicable by the previous run's move already weighing on 11.
+    assert evacuated["target_group_id"] == "33"
+    assert backend.replace_calls == [
+        {"user_id": 101, "old_group_id": 22, "new_group_id": 11},
+        {"user_id": 202, "old_group_id": 22, "new_group_id": 33},
+    ]
+
+
+def test_auto_rotation_dead_band_measures_deviation_from_capacity_shares(
+    client,
+) -> None:
+    """Under capacity weighting the dead band measures distance from the share.
+
+    Group 22 has three times the quota left of group 11 and carries three times
+    the load, which is exactly the split capacity weighting aims at: every group
+    is already sitting on its share. The raw spread between the two is 2.0 all the
+    same, so the equal-shares dead band would wave the run through and start
+    shuffling users to flatten a distribution that is already correct.
+    """
+    backend = FakeRotationSub2API()
+    normalize_rotation_accounts(backend)
+    for account in backend.accounts:
+        if account["id"] == "acct-1":  # group 11, a quarter of its quota left
+            account["extra"]["codex_7d_used_percent"] = 75
+        elif account["id"] == "acct-2":  # group 22, three quarters left
+            account["extra"]["codex_7d_used_percent"] = 25
+    backend.users[0]["group_id"] = 22
+    backend.users[0]["group_name"] = "rotation-high"
+    backend.users[1]["group_id"] = 11
+    backend.users[1]["group_name"] = "rotation-low"
+    backend.usage_log_items = [
+        usage_log_item(user_id=101, group_id=22, actual_cost=3.0),
+        usage_log_item(user_id=202, group_id=11, actual_cost=1.0),
+    ]
+    clear_caches()
+
+    with started_test_client() as auto_client:
+        login(auto_client)
+        store = main.get_flow_store()
+        # Raw spread is 2.0 and deviation from the shares is 0.0, so the epsilon
+        # sits between them: only the share-relative metric can skip this run.
+        save_auto_rotation_config(
+            capacity_weighted_targets=True, imbalance_epsilon=0.5
+        )
+        save_operational_snapshots(backend)
+        UsageSegmentationService(store).refresh()
+        now = datetime.now(timezone.utc)
+        for group_id, name, priority in ((11, "rotation-low", 0), (22, "rotation-high", 1)):
+            store.upsert_rotation_pool_group(
+                RotationPoolGroup(
+                    group_id=group_id,
+                    group_name=name,
+                    platform="openai",
+                    status="active",
+                    is_exclusive=True,
+                    priority=priority,
+                )
+            )
+        for user_id, email, group_id, group_name in (
+            (101, "busy@example.com", 22, "rotation-high"),
+            (202, "idle@example.com", 11, "rotation-low"),
+        ):
+            store.upsert_user_assignment(
+                UserGroupAssignment(
+                    user_id=user_id,
+                    email=email,
+                    current_group_id=group_id,
+                    current_group_name=group_name,
+                    assignment_mode=AssignmentMode.managed_pool,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        with patch.object(requests.Session, "request", new=backend.request):
+            response = auto_client.post("/rotation/auto/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dead_band_skipped"] is True
+    assert payload["moved"] == []
+    assert payload["skipped"] == []
+    assert backend.replace_calls == []
 
 
 def test_auto_rotation_fails_when_target_group_missing_upstream(client) -> None:

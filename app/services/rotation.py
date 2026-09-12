@@ -83,6 +83,8 @@ class UsageRotationCandidate:
 class GroupLoadState:
     loads: dict[str, float]
     sources: dict[str, str]
+    # Balancing no longer reads collected group history, so nothing fills this
+    # today. It stays on the struct to keep the run metadata's shape stable.
     records: dict[str, GroupUsageSegmentRecord]
 
 
@@ -1976,8 +1978,22 @@ class RotationService:
             # For an evacuation that question is irrelevant: the user is sitting on
             # an account that cannot serve them, however tidy the load chart looks.
             if evacuation_reason is None and imbalance_epsilon > 0 and platform_loads:
-                spread = max(platform_loads.values()) - min(platform_loads.values())
-                if spread <= imbalance_epsilon:
+                if runtime_config.capacity_weighted_targets:
+                    # Raw spread measures "is every group carrying the same load?",
+                    # which is the wrong question once shares are weighted: a group
+                    # with more quota left is *supposed* to sit higher than its
+                    # neighbours, so a wide spread can already be the target state.
+                    # Measure how far each group sits from the share it is owed.
+                    shares = self._capacity_target_shares(
+                        platform_pool, target_loads, target_availability
+                    )
+                    imbalance = max(
+                        abs(load - shares.get(key, 0.0))
+                        for key, load in platform_loads.items()
+                    )
+                else:
+                    imbalance = max(platform_loads.values()) - min(platform_loads.values())
+                if imbalance <= imbalance_epsilon:
                     dead_band_skipped = True
                     continue
             if evacuation_reason is not None:
@@ -3666,28 +3682,28 @@ class RotationService:
         pool_groups: list[RotationPoolGroup],
         candidates: list[UsageRotationCandidate],
     ) -> GroupLoadState:
-        fallback_loads = self._initial_pool_usage_loads(pool_groups, candidates)
-        loads: dict[str, float] = {}
-        sources: dict[str, str] = {}
-        records: dict[str, GroupUsageSegmentRecord] = {}
-        window = self._window_enum().value
-        for group in pool_groups:
-            key = self._normalize_key(group.group_id)
-            record = self.store.get_group_usage_segment(group.group_id)
-            usage_value = (
-                record.usage_by_window.get(window)
-                if record is not None
-                else None
-            )
-            if usage_value is not None:
-                loads[key] = float(usage_value)
-                source = record.source_by_window.get(window) or "group_usage"
-                sources[key] = f"group_usage:{source}"
-                records[key] = record
-            else:
-                loads[key] = fallback_loads.get(key, 0.0)
-                sources[key] = "candidate_sum"
-        return GroupLoadState(loads=loads, sources=sources, records=records)
+        """Group load is the usage of the members that are sitting on it today.
+
+        Load has to follow the user. The collected per-group usage history looks
+        like the better number -- it counts every request the group actually
+        served -- but it only moves when the collection window rolls over, so a
+        run cannot see the effect of the moves the previous run just made and
+        keeps re-correcting the same imbalance. Eighteen hours of that produced 52
+        migrations with individual users bounced four times. Summing the current
+        members' usage makes a move visible to the very next run.
+
+        Traffic from users that cannot be moved (relay identities pinned to a
+        group) is deliberately left out rather than modelled as extra load: the
+        capacity dimension already absorbs it. As a relay burns its group's quota,
+        `_group_remaining_capacity` shrinks that group's target share and the
+        movable users drain off it on their own.
+        """
+        loads = self._initial_pool_usage_loads(pool_groups, candidates)
+        return GroupLoadState(
+            loads=loads,
+            sources={key: "candidate_sum" for key in loads},
+            records={},
+        )
 
     def _select_least_loaded_usage_group(
         self,
